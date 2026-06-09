@@ -538,9 +538,16 @@ class WhoopBleClient(
                 return
             }
             seq = (seq + 1) and 0xFF
-            val frame = Framing.puffinCommandFrame(cmd = cmd.rawValue, seq = seq, payload = payload)
+            // EXPERIMENTAL (#48): WHOOP 5/MG haptics use opcode 0x13, NOT the WHOOP 4.0 RUN_HAPTICS_PATTERN
+            // (79). A real-MG capture shows the strap REJECTING 79 (COMMAND_RESPONSE result=0x03) while a
+            // working third-party app fires the buzz with 0x13 (PENDING→SUCCESS, VALID_PATTERN). Override
+            // just the opcode here; the payload is still the 4.0 preset pending the exact 5/MG payload
+            // (whootify APK). WHOOP 4.0 is untouched (uses 79 via its own frame below).
+            val puffinCmd = if (cmd == CommandNumber.RUN_HAPTICS_PATTERN) 0x13 else cmd.rawValue
+            val frame = Framing.puffinCommandFrame(cmd = puffinCmd, seq = seq, payload = payload)
             enqueueWrite(PendingWrite(frame, withResponse))
-            log("→ ${cmd.name} payload=${payload.toHex()} (puffin)")
+            val cmdNote = if (cmd == CommandNumber.RUN_HAPTICS_PATTERN) " cmd=0x13" else ""
+            log("→ ${cmd.name} payload=${payload.toHex()} (puffin$cmdNote)")
             return
         }
         seq = (seq + 1) and 0xFF

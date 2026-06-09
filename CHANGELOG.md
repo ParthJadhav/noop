@@ -17,6 +17,21 @@ approximate; downloads are on the [Releases](https://github.com/NoopApp/noop/rel
 
 ---
 
+## 1.34 — WHOOP 5/MG haptics opcode (experimental, #48)
+
+- **Experimental (WHOOP 5.0/MG): buzz now sends opcode `0x13`, not the 4.0 `RUN_HAPTICS_PATTERN`
+  (79).** Decoding @james-e-morris's real-MG puffin capture showed the strap **rejecting** our
+  opcode 79 (`COMMAND_RESPONSE result=0x03`, while every accepted command — toggle-HR `0x03`,
+  historical `0x16`/`0x17` — returns `0x01`), and a working third-party 5.0 app fires the buzz with
+  opcode **`0x13` (19)** (`PENDING → HAPTICS_FIRED → SUCCESS`, `VALID_PATTERN`). The `send()` puffin
+  branch now overrides **only the opcode** for `runHapticsPattern` on `.whoop5` (`0x13`); the payload
+  is still the 4.0 preset `[patternId, loops, …]` pending the exact 5/MG payload (incoming via the
+  working app's binary). Scoped strictly to the 5/MG path — **WHOOP 4.0 buzz is byte-for-byte
+  unchanged** (still 79 via its own frame). The strap log now annotates the write `(puffin cmd=0x13)`.
+- This may or may not buzz yet (payload unconfirmed); the immediate goal is to confirm the strap now
+  **accepts** the command (result `0x01` / a haptics-fired event) instead of rejecting it. 5/MG owners:
+  please share a strap log on #48.
+
 ## 1.33 — Smart alarm time actually reaches the strap
 
 - **Fixed: the Smart-alarm wake time you set didn't always transmit to the strap** (issue #59). The

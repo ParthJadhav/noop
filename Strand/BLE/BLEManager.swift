@@ -323,9 +323,16 @@ public final class BLEManager: NSObject, ObservableObject {
                 return
             }
             seq = seq &+ 1
-            let frame = puffinCommandFrame(cmd: command.rawValue, seq: seq, payload: payload)
+            // EXPERIMENTAL (#48): WHOOP 5/MG haptics use opcode 0x13, NOT the WHOOP 4.0 RUN_HAPTICS_PATTERN
+            // (79). A real-MG capture shows the strap REJECTING 79 (COMMAND_RESPONSE result=0x03) while a
+            // working third-party app fires the buzz with 0x13 (PENDING→SUCCESS, VALID_PATTERN). Override
+            // just the opcode here; the payload is still the 4.0 preset [patternId, loops, …] pending the
+            // exact 5/MG payload (whootify APK). WHOOP 4.0 is untouched (uses 79 via its own frame below).
+            let puffinCmd: UInt8 = (command == .runHapticsPattern) ? 0x13 : command.rawValue
+            let frame = puffinCommandFrame(cmd: puffinCmd, seq: seq, payload: payload)
             p.writeValue(Data(frame), for: ch, type: writeType)
-            log("→ \(command.label) payload=\(hex(payload)) (puffin)")
+            let cmdNote = command == .runHapticsPattern ? " cmd=0x13" : ""
+            log("→ \(command.label) payload=\(hex(payload)) (puffin\(cmdNote))")
             return
         }
         seq = seq &+ 1
