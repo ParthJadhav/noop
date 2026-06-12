@@ -244,6 +244,8 @@ fun TodayScreen(viewModel: AppViewModel, onSupport: () -> Unit = {}) {
         MetricGrid(displayMetric, window, recoveryCalibration, unitSystem, weightKg, profileWeightKg, importedStepsForDay)
         HeartRateTrendCard(viewModel, days, selectedDay, todayDate)
         TodayWorkoutsSection(footer.recentWorkouts)
+        // Honest, dismissible 12-hourly donation ask — a card in the flow, never a dialog.
+        DonationNudgeCard()
         // Strap battery only while the link is up AND a real reading exists — a stale % from a
         // dropped connection must not present as live (#159).
         TodaySourcesSection(footer, strapBatteryPct = if (live.connected) live.batteryPct?.roundToInt() else null)

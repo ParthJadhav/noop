@@ -7,7 +7,7 @@ enum AppChangelog {
 
     /// Bump this when you add a release below. The "What's New" sheet shows automatically when the
     /// stored last-seen version is behind this. (Decoupled from the bundle version on purpose.)
-    static let currentVersion = "2.3.2"
+    static let currentVersion = "2.4.0"
 
     struct Release: Identifiable {
         let version: String
@@ -19,6 +19,13 @@ enum AppChangelog {
 
     /// Newest first.
     static let releases: [Release] = [
+        Release(
+            version: "2.4.0",
+            title: "A small, honest ask",
+            date: "June 2026",
+            items: [
+                "New (Mac, iOS and Android): a small card on the Today screen — at most once every 12 hours — asking whether NOOP is proving useful, with the honest numbers: a WHOOP membership runs $300–480 a year, NOOP is free, and 5,000+ downloads in, 7 people have donated. \"Later\" snoozes it 12 hours; \"Don't ask again\" turns it off forever. It's a card in the flow, never a pop-over, and the stats are baked in at release time — the app still never touches the network.",
+            ]),
         Release(
             version: "2.3.2",
             title: "Split sleep: every block counted, one night per day",

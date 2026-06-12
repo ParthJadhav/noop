@@ -82,6 +82,8 @@ struct TodayView: View {
                 readinessSection
                 metricsSection
                 workoutsSection
+                // Honest, dismissible 12-hourly donation ask — a card in the flow, never a modal.
+                DonationNudgeCard()
                 sourcesSection
             }
         }

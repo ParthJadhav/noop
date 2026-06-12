@@ -17,6 +17,17 @@ approximate; downloads are on the [Releases](https://github.com/NoopApp/noop/rel
 
 ---
 
+## 2.4.0 — A small, honest ask
+
+- **New (Mac, iOS and Android):** a small card on the Today screen — at most **once every 12 hours** —
+  asking whether NOOP is proving useful, with the honest numbers: a WHOOP membership runs **$300–480 a
+  year**, NOOP is free and built by one person, and **5,000+ downloads in, 7 people have donated**.
+  **"Later"** snoozes it 12 hours; **"Don't ask again"** turns it off permanently. It's a card in the
+  flow, never a pop-over — and the stats are **baked in at release time** (`Tools/update-donation-stats.sh`),
+  so the app still never touches the network.
+
+---
+
 ## 2.3.2 — Split sleep: every block counted, one night per day
 
 - **Fixed (Mac and iOS):** on a **Bluetooth-only** setup (no import), a day recorded as multiple sleep
