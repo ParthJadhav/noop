@@ -71,9 +71,12 @@ below.
 > 3. **Change the App Group** to match (e.g. `group.com.yourdomain.noop`) — the app and the widget
 >    extension must share the *same* group.
 >
-> Set the team + bundle prefix in **`project.yml`** and re-run `xcodegen` so the change survives
-> regeneration instead of being overwritten. The App Group is only needed for the **widgets / Live
-> Activity** — if you don't need those, you can skip wiring it and the core app still builds.
+> Set the team + bundle prefix in **`project.yml`**, and set the App Group **once** via the
+> **`APP_GROUP_ID`** build setting there — both targets' entitlements/Info.plist reference
+> `$(APP_GROUP_ID)`, and the runtime `WidgetSnapshot.suiteName` reads it back from the Info.plist, so
+> there's a single value to change and nothing hard-coded in Swift. Then re-run `xcodegen` so the
+> change survives regeneration instead of being overwritten. The App Group is only needed for the
+> **widgets / Live Activity** — if you don't need those, you can skip wiring it and the core app still builds.
 
 > ℹ️ **Cross-platform engineering lives in [`CROSS_PLATFORM.md`](CROSS_PLATFORM.md)** — the shared-code
 > boundary across the macOS / iOS / Android clients, the `Platform.swift` shim convention, the

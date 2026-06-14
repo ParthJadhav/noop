@@ -20,6 +20,11 @@ settings:
     SWIFT_STRICT_CONCURRENCY: minimal
     DEVELOPMENT_TEAM: ""
     CODE_SIGN_STYLE: Automatic
+    # Single source of truth for the App Group id shared by the iOS app + its widget / Live Activity
+    # extension. Referenced as $(APP_GROUP_ID) by both targets' entitlements and Info.plist, and read
+    # at runtime via the AppGroupIdentifier Info.plist key (WidgetSnapshot.suiteName) so the value is
+    # never hard-coded in Swift. Change it in this one place when building under your own Apple ID.
+    APP_GROUP_ID: group.com.noopapp.noop
     # Build for both Apple Silicon and Intel so the release runs on every Mac.
     ARCHS: "$(ARCHS_STANDARD)"
   configs:
@@ -159,6 +164,9 @@ targets:
         CFBundleDisplayName: NOOP
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        # Surfaces APP_GROUP_ID to runtime (WidgetSnapshot.suiteName) so the App Group id isn't
+        # hard-coded in Swift; stays in sync with the application-groups entitlement (both $(APP_GROUP_ID)).
+        AppGroupIdentifier: "$(APP_GROUP_ID)"
         LSApplicationCategoryType: public.app-category.healthcare-fitness
         UILaunchScreen: {}
         NSSupportsLiveActivities: true
@@ -191,7 +199,7 @@ targets:
         com.apple.developer.healthkit: true
         com.apple.developer.healthkit.access: []
         com.apple.security.application-groups:
-          - group.com.noopapp.noop
+          - $(APP_GROUP_ID)
     settings:
       base:
         CURRENT_PROJECT_VERSION: "74"
@@ -226,13 +234,15 @@ targets:
       path: StrandiOSWidgets/Info.plist
       properties:
         CFBundleDisplayName: NOOP
+        # Mirrors the app target: exposes APP_GROUP_ID to the extension at runtime (WidgetSnapshot.suiteName).
+        AppGroupIdentifier: "$(APP_GROUP_ID)"
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
     entitlements:
       path: StrandiOSWidgets/NOOPWidgets.entitlements
       properties:
         com.apple.security.application-groups:
-          - group.com.noopapp.noop
+          - $(APP_GROUP_ID)
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.noopapp.noop.widgets

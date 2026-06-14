@@ -18,11 +18,19 @@ public struct WidgetSnapshot: Codable, Equatable {
         self.updated = updated
     }
 
-    /// App Group suite the app and widget both use. Must match the `com.apple.security.application-groups`
-    /// entitlement on both targets. If the entitlement is missing on either side, `UserDefaults(suiteName:)`
-    /// returns nil and every consumer (PendingIntents, WidgetSnapshot.publish, Live Activity) silently
-    /// no-ops — see `assertGroupProvisioned` for the debug-time canary.
-    public static let suiteName = "group.com.noopapp.noop"
+    /// App Group suite the app and widget both use. Injected from the `APP_GROUP_ID` build setting
+    /// (see project.yml) via the `AppGroupIdentifier` Info.plist key, so the value lives in exactly
+    /// one place rather than being duplicated here. Must match the `com.apple.security.application-groups`
+    /// entitlement on both targets (which also reads `$(APP_GROUP_ID)`). If the entitlement is missing on
+    /// either side, `UserDefaults(suiteName:)` returns nil and every consumer (PendingIntents,
+    /// WidgetSnapshot.publish, Live Activity) silently no-ops — see `assertGroupProvisioned` for the
+    /// debug-time canary. The fallback is the canonical upstream group and only applies if the Info.plist
+    /// key is somehow absent (each process reads its OWN bundle, so the app and the widget extension
+    /// each carry the key in their generated Info.plist).
+    public static let suiteName: String = {
+        Bundle.main.object(forInfoDictionaryKey: "AppGroupIdentifier") as? String
+            ?? "group.com.noopapp.noop"
+    }()
     public static let storageKey = "noop.widget.snapshot"
 
     /// Debug-only canary: trips on the first run after a misprovisioning so the silent no-op gets
