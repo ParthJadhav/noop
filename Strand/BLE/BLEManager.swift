@@ -275,7 +275,9 @@ public final class BLEManager: NSObject, ObservableObject {
     private var lastStandardHRLogAt: Date?
 
     /// Stable device id; matches the server's existing device for sync parity. Overridable.
-    let deviceId: String
+    /// Seeded from the init argument, then refined once in bootstrapStore() to the device registry's
+    /// active id (still "my-whoop" today) before any store writes use it — see bootstrapStore().
+    private(set) var deviceId: String
     /// Captured (device↔wall) correlation from GET_CLOCK; nil until the response lands.
     private(set) var clockRef: ClockRef?
 
@@ -338,6 +340,14 @@ public final class BLEManager: NSObject, ObservableObject {
             let ns = error as NSError
             log("Backfill: bootstrap FAILED opening store — \(ns.domain) code=\(ns.code): \(ns.localizedDescription)")
             return
+        }
+        // Route deviceId through the device registry: use the active device's id (migration v15 seeds
+        // a single 'my-whoop' row as active, so this is still "my-whoop" today — zero behaviour change).
+        // Guarded + best-effort: if the registry is empty/unreadable, deviceId stays as it was, so no
+        // crash and no behaviour change. registryQueue is nonisolated/Sendable (GRDB-serialized).
+        if let activeId = try? DeviceRegistryStore(dbQueue: store.registryQueue).activeDeviceId(),
+           !activeId.isEmpty {
+            self.deviceId = activeId
         }
         try? await store.upsertDevice(id: deviceId, mac: nil, name: "WHOOP 4.0")
         // Research toggle — OFF by default. When disabled the app is decoded-only and never

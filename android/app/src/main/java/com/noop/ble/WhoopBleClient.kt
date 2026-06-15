@@ -279,10 +279,12 @@ class WhoopBleClient(
      */
     private val repository: WhoopRepository = WhoopRepository.from(context),
     /**
-     * Stable device id; all rows are stamped with this. "my-whoop" matches the Swift default and
-     * the rest of the Android app (AppViewModel reads "my-whoop").
+     * Stable device id; all rows are stamped with this. Resolved at startup from
+     * [DeviceRegistry.activeDeviceId] (see NoopApplication), falling back to [DEFAULT_DEVICE_ID]
+     * ("my-whoop") — which matches the Swift default and the rest of the Android app, so behaviour
+     * is unchanged today while the registry takes over as the single source of the active id.
      */
-    private val deviceId: String = "my-whoop",
+    private val deviceId: String = DEFAULT_DEVICE_ID,
     /** Durable trim-cursor store for the offload safe-trim watermark (see [Backfiller]). */
     private val cursorStore: TrimCursorStore = PrefsTrimCursorStore(context),
     /**
@@ -304,6 +306,13 @@ class WhoopBleClient(
         private const val TAG = "WhoopBleClient"
         /** Cap on the in-app strap-log ring buffer (for the "Share strap log" diagnostics export). */
         private const val LOG_BUFFER_MAX = 2000
+
+        /**
+         * Fallback device id when the registry has no active device yet (fresh install before the v8
+         * migration seeds it, or an all-archived registry). Matches the Swift default and the legacy
+         * hardcoded id, so behaviour is unchanged today — the registry resolves to exactly this string.
+         */
+        const val DEFAULT_DEVICE_ID = "my-whoop"
 
 
         // MARK: GATT UUIDs (authoritative, from BLEManager.swift / FINDINGS.md).

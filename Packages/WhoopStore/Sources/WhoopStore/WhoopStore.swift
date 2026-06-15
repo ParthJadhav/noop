@@ -6,7 +6,7 @@ import WhoopProtocol
 /// transient, compressed, prunable outbox. Built on GRDB/SQLite.
 public enum WhoopStoreInfo {
     /// Bumped whenever the migrator gains a new migration.
-    public static let schemaVersion = 14
+    public static let schemaVersion = 15
 }
 
 /// WhoopStore is an `actor`: its public API is `async`, and all GRDB work runs on the
@@ -15,6 +15,11 @@ public enum WhoopStoreInfo {
 /// non-blocking). That is the intended off-main win — DatabaseQueue kept, not DatabasePool.
 public actor WhoopStore {
     let dbQueue: DatabaseQueue
+
+    /// Read-only handle to the underlying GRDB queue for the synchronous `DeviceRegistryStore`.
+    /// `nonisolated` because `DatabaseQueue` is `Sendable` and internally serialized — concurrent
+    /// access alongside the actor's own DB work is safe (GRDB queues calls onto one serial executor).
+    public nonisolated var registryQueue: DatabaseQueue { dbQueue }
 
     private init(dbQueue: DatabaseQueue) throws {
         self.dbQueue = dbQueue

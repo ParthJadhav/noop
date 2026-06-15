@@ -22,7 +22,7 @@ import kotlinx.coroutines.flow.Flow
  * and bound by [from, to] inclusive with a row limit.
  */
 @Dao
-interface WhoopDao {
+interface WhoopDao : DeviceRegistryDao {
 
     // MARK: - Device
 
@@ -31,6 +31,11 @@ interface WhoopDao {
 
     @Query("SELECT * FROM device WHERE id = :id")
     suspend fun device(id: String): DeviceRow?
+
+    // NOTE: the device-registry reads/writes (pairedDevice/dayOwnership, v8) live on the narrow
+    // [DeviceRegistryDao] super-interface so [DeviceRegistry] can be unit-tested with a small fake DAO
+    // (no Robolectric — see DeviceRegistryTest). Room flattens the inherited @Query/@Insert methods
+    // into this @Dao at compile time, so they generate exactly as if declared here.
 
     // MARK: - Stream inserts (idempotent by natural key)
 

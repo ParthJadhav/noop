@@ -75,8 +75,10 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     // store the Settings screen edits. Feeds the on-device scorer's HRmax/zones/calories.
     private val profileStore = ProfileStore.from(app.applicationContext)
 
-    /** The imported strap source id (raw streams + imported history live under this). */
-    private val deviceId = "my-whoop"
+    /** The active strap source id (raw streams + imported history live under this). Resolved once at
+     *  startup from the device registry (see [NoopApplication.activeDeviceId]); falls back to the
+     *  legacy "my-whoop", so behaviour is unchanged today. */
+    private val deviceId = noopApp.activeDeviceId
 
     /** Live connection + biometric snapshot, surfaced straight from the BLE client. */
     val live: StateFlow<LiveState> = ble.state

@@ -41,8 +41,10 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         DismissedWorkout::class,
         AppleDaily::class,
         PpgHrSample::class,
+        PairedDeviceRow::class,
+        DayOwnershipRow::class,
     ],
-    version = 7,
+    version = 8,
     exportSchema = false,
 )
 abstract class WhoopDatabase : RoomDatabase() {
@@ -156,12 +158,59 @@ abstract class WhoopDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v7 -> v8: ADDITIVE — adds the device registry (`pairedDevice` + `dayOwnership`), the Android
+         * port of the Swift Database.swift v15 migration. CREATE TABLE only (no existing data touched),
+         * so already-offloaded raw streams survive (the strap trims acked history and won't re-send it).
+         *
+         * The SQL MUST match Room's generated schema for [PairedDeviceRow]/[DayOwnershipRow] exactly:
+         *  - pairedDevice: `nickname` is the only nullable column (TEXT, no NOT NULL); every other is
+         *    NOT NULL with no SQL DEFAULT (Kotlin construction defaults don't emit a schema default).
+         *  - dayOwnership: `locked` is a non-null Kotlin Boolean with a *constructor* default of false —
+         *    Room stores it as INTEGER NOT NULL with NO SQL DEFAULT (the Kotlin default never reaches the
+         *    schema), so the migration must NOT add `DEFAULT 0` or MigrationRoundTripTest would flag a
+         *    schema mismatch.
+         *
+         * Seeds the existing WHOOP with its unchanged id "my-whoop" (zero sample-row migration), brand/
+         * model "WHOOP", sourceKind 'liveBLE', the full capability set, status 'active', and addedAt/
+         * lastSeenAt = now (seconds). `INSERT OR IGNORE` so a re-run / backup-restore is a no-op. The
+         * capabilities string + column order are byte-for-byte the Swift seed so a backup round-trips.
+         * Like the others this is the no-destructive-fallback path: a mismatch throws loudly rather than
+         * silently wiping non-resendable strap history; CI's MigrationRoundTripTest guards the SQL.
+         */
+        internal val MIGRATION_7_8 = object : Migration(7, 8) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `pairedDevice` (`id` TEXT NOT NULL, " +
+                        "`brand` TEXT NOT NULL, `model` TEXT NOT NULL, `nickname` TEXT, " +
+                        "`sourceKind` TEXT NOT NULL, `capabilities` TEXT NOT NULL, " +
+                        "`status` TEXT NOT NULL, `addedAt` INTEGER NOT NULL, " +
+                        "`lastSeenAt` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+                )
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `dayOwnership` (`day` TEXT NOT NULL, " +
+                        "`deviceId` TEXT NOT NULL, `locked` INTEGER NOT NULL, PRIMARY KEY(`day`))",
+                )
+                val now = System.currentTimeMillis() / 1000
+                db.execSQL(
+                    "INSERT OR IGNORE INTO `pairedDevice` " +
+                        "(`id`, `brand`, `model`, `nickname`, `sourceKind`, `capabilities`, " +
+                        "`status`, `addedAt`, `lastSeenAt`) VALUES " +
+                        "('my-whoop', 'WHOOP', 'WHOOP', NULL, 'liveBLE', " +
+                        "'hr,hrv,spo2,skinTemp,sleep,strainLoad', 'active', $now, $now)",
+                )
+            }
+        }
+
         private fun build(appContext: Context): WhoopDatabase =
             Room.databaseBuilder(appContext, WhoopDatabase::class.java, DB_NAME)
                 // Real additive migration — NO destructive fallback (see the class doc): with
                 // exportSchema=false a silent rebuild would lose already-acked, non-resendable strap
                 // history on any schema mismatch. Room throws loudly instead; CI guards the SQL.
-                .addMigrations(MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
+                .addMigrations(
+                    MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5,
+                    MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8,
+                )
                 .build()
     }
 }

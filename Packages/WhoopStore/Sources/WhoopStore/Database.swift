@@ -271,6 +271,35 @@ extension WhoopStore {
                 t.add(column: "startTsAdjusted", .integer)
             }
         }
+
+        // v15: the device registry. `deviceId` already keys every sample table (deviceId, ts), so it IS
+        // the per-device discriminator — this just gives each device a row with brand/model/capabilities,
+        // a single-active invariant (enforced in DeviceRegistryStore), and a dayOwnership override table so
+        // one source owns a day's scores (never blended). Additive: the existing WHOOP is seeded with its
+        // unchanged id "my-whoop" (zero sample-row migration). INSERT OR IGNORE so re-runs/restores are safe.
+        migrator.registerMigration("v15-device-registry") { db in
+            try db.execute(sql: """
+                CREATE TABLE IF NOT EXISTS pairedDevice (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    brand TEXT NOT NULL, model TEXT NOT NULL, nickname TEXT,
+                    sourceKind TEXT NOT NULL, capabilities TEXT NOT NULL,  -- comma-joined Metric rawValues
+                    status TEXT NOT NULL, addedAt INTEGER NOT NULL, lastSeenAt INTEGER NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS dayOwnership (
+                    day TEXT PRIMARY KEY NOT NULL,   -- "YYYY-MM-DD" local day
+                    deviceId TEXT NOT NULL,          -- which device owns this day's displayed/scored metrics
+                    locked INTEGER NOT NULL DEFAULT 0 -- 1 = explicit (import-overlap decision / user); 0 = resolver default
+                );
+            """)
+            // Seed the registry with the existing WHOOP so nothing is orphaned. selectedWhoopModel lives in
+            // the app's UserDefaults; the store can't read it, so seed a neutral "WHOOP" row the app reconciles
+            // on first launch from the live model.
+            let now = Int(Date().timeIntervalSince1970)
+            try db.execute(sql: """
+                INSERT OR IGNORE INTO pairedDevice (id, brand, model, nickname, sourceKind, capabilities, status, addedAt, lastSeenAt)
+                VALUES ('my-whoop', 'WHOOP', 'WHOOP', NULL, 'liveBLE', 'hr,hrv,spo2,skinTemp,sleep,strainLoad', 'active', \(now), \(now));
+            """)
+        }
         return migrator
     }
 }
