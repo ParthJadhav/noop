@@ -344,6 +344,30 @@ final class IntelligenceEngine: ObservableObject {
             if let v = faRes.vo2max { faPts.append(MetricPoint(day: satKey, key: "vo2max_est", value: v)) }
             _ = try? await store.upsertMetricSeries(faPts, deviceId: computedId)
         }
+
+        // ── Vitality / Body Age (Phase 7) — weekly, keyed to the week's Saturday ────────────────────
+        // Roll the last 7 days' wearable signals into the mortality-hazard model and upsert a weekly
+        // Vitality (0–100) + Body Age. VitalityEngine gates on ≥3 inputs, so a sparse week writes nothing.
+        // (VO₂max is omitted here — fitness is already its own Fitness Age headline; Vitality leans on
+        // resting HR, sleep duration + regularity, HRV-vs-age-norm, and steps.)
+        let vNights = fa7.compactMap { $0.totalSleepMin }.map { Double($0) / 60.0 }.filter { $0 > 0 }
+        let vHRVs = fa7.compactMap { $0.avgHrv }
+        let vSteps = fa7.compactMap { $0.steps }.map(Double.init)
+        let vInputs = VitalityEngine.Inputs(
+            chronoAge: Double(profile.age),
+            restingHR: faRHRs.isEmpty ? nil : IntelligenceEngine.medianOf(faRHRs),
+            sleepHours: vNights.isEmpty ? nil : vNights.reduce(0, +) / Double(vNights.count),
+            sleepConsistency: VitalityEngine.sleepConsistency(nightlyHours: vNights),
+            rmssd: vHRVs.isEmpty ? nil : IntelligenceEngine.medianOf(vHRVs),
+            rmssdNorm: VitalityEngine.rmssdNorm(forAge: Double(profile.age)),
+            steps: vSteps.isEmpty ? nil : vSteps.reduce(0, +) / Double(vSteps.count))
+        if let vRes = VitalityEngine.compute(vInputs) {
+            let satKey = IntelligenceEngine.saturdayKey(onOrBefore: newestDay)
+            _ = try? await store.upsertMetricSeries([
+                MetricPoint(day: satKey, key: "vitality", value: vRes.vitality),
+                MetricPoint(day: satKey, key: "body_age", value: vRes.bodyAge),
+            ], deviceId: computedId)
+        }
         // Drop any freshly-detected session that overlaps a night the user has already hand-corrected.
         // A detected onset can drift second-to-second as more raw data arrives, so without this the
         // re-detected night would upsert as a SECOND row beside the edited one (different startTs ⇒ no

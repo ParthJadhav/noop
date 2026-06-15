@@ -58,6 +58,19 @@ class VitalityEngineTest {
         assertTrue(old.vitality >= 0.0)
     }
 
+    @Test fun rmssdNormByAge() {
+        assertEquals(47.0, VitalityEngine.rmssdNorm(20.0), 0.01)
+        assertEquals(33.0, VitalityEngine.rmssdNorm(40.0), 0.01)
+        assertEquals(31.0, VitalityEngine.rmssdNorm(45.0), 0.01)
+        assertEquals(20.0, VitalityEngine.rmssdNorm(90.0), 0.01)
+    }
+
+    @Test fun sleepConsistencyTest() {
+        assertEquals(1.0, VitalityEngine.sleepConsistency(listOf(7.0, 7.0, 7.0, 7.0))!!, 1e-9)
+        assertEquals(0.857, VitalityEngine.sleepConsistency(listOf(6.0, 8.0, 6.0, 8.0))!!, 0.005)
+        assertNull(VitalityEngine.sleepConsistency(listOf(7.0, 7.0)))
+    }
+
     @Test fun contributionSigns() {
         val low = VitalityEngine.contributions(VitalityEngine.Inputs(chronoAge = 40.0, restingHR = 50.0))
             .first { it.key == "rhr" }

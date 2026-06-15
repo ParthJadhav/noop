@@ -45,6 +45,33 @@ object VitalityEngine {
         val factorsUsed: Int,
     )
 
+    /** Nocturnal RMSSD ~50th-pct by age (ms), piecewise-linear between decade anchors (WHOOP-window
+     *  norms). The reference for the HRV factor — a person at the age norm contributes 0. */
+    fun rmssdNorm(forAge: Double): Double {
+        val anchors = listOf(20.0 to 47.0, 30.0 to 40.0, 40.0 to 33.0, 50.0 to 29.0, 60.0 to 25.0, 70.0 to 22.0, 80.0 to 20.0)
+        if (forAge <= anchors.first().first) return anchors.first().second
+        if (forAge >= anchors.last().first) return anchors.last().second
+        for (i in 1 until anchors.size) {
+            if (forAge <= anchors[i].first) {
+                val (a0, v0) = anchors[i - 1]; val (a1, v1) = anchors[i]
+                return v0 + (v1 - v0) * (forAge - a0) / (a1 - a0)
+            }
+        }
+        return anchors.last().second
+    }
+
+    /** Sleep regularity (0–1) from nightly sleep durations (hours): 1 − coefficient of variation,
+     *  clamped. < 3 nights → null. */
+    fun sleepConsistency(nightlyHours: List<Double>): Double? {
+        val xs = nightlyHours.filter { it > 0 }
+        if (xs.size < 3) return null
+        val mean = xs.sum() / xs.size
+        if (mean <= 0) return null
+        val variance = xs.sumOf { (it - mean) * (it - mean) } / xs.size
+        val cv = kotlin.math.sqrt(variance) / mean
+        return (1 - cv).coerceIn(0.0, 1.0)
+    }
+
     /** Per-factor signed log-hazard vs the population reference (positive ages you, negative protective).
      *  Conservative published per-unit hazard ratios — see the Swift file for citations. */
     fun contributions(inputs: Inputs): List<Contribution> {

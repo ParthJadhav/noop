@@ -82,6 +82,33 @@ public enum VitalityEngine {
 
     private static func clamp(_ v: Double, _ lo: Double, _ hi: Double) -> Double { min(hi, max(lo, v)) }
 
+    /// Nocturnal RMSSD ~50th-percentile by age (ms), piecewise-linear between decade anchors (the WHOOP-
+    /// window norms banked in the spec — never mixed with daytime clinical norms). The reference for the
+    /// HRV factor: a person at the age norm contributes 0.
+    public static func rmssdNorm(forAge age: Double) -> Double {
+        let anchors: [(Double, Double)] = [(20, 47), (30, 40), (40, 33), (50, 29), (60, 25), (70, 22), (80, 20)]
+        if age <= anchors[0].0 { return anchors[0].1 }
+        if age >= anchors[anchors.count - 1].0 { return anchors[anchors.count - 1].1 }
+        for i in 1..<anchors.count where age <= anchors[i].0 {
+            let (a0, v0) = anchors[i - 1]; let (a1, v1) = anchors[i]
+            return v0 + (v1 - v0) * (age - a0) / (a1 - a0)
+        }
+        return anchors[anchors.count - 1].1
+    }
+
+    /// Sleep regularity (0–1) from a window of nightly sleep durations (hours): 1 − coefficient of
+    /// variation, clamped. A rough but honest on-device proxy for the Sleep Regularity Index when we only
+    /// have durations, not full timing. Fewer than 3 nights → nil (not enough to judge).
+    public static func sleepConsistency(nightlyHours: [Double]) -> Double? {
+        let xs = nightlyHours.filter { $0 > 0 }
+        guard xs.count >= 3 else { return nil }
+        let mean = xs.reduce(0, +) / Double(xs.count)
+        guard mean > 0 else { return nil }
+        let variance = xs.reduce(0) { $0 + ($1 - mean) * ($1 - mean) } / Double(xs.count)
+        let cv = variance.squareRoot() / mean
+        return clamp(1 - cv, 0, 1)
+    }
+
     /// Compute the per-factor log-hazard contributions present in `inputs`. Each references a population
     /// value, so an average person nets ~0. Published per-unit hazard ratios (conservative, clamped):
     ///   • Resting HR: +~10.5% all-cause mortality per +10 bpm (UK Biobank / meta-analyses). ref 65.

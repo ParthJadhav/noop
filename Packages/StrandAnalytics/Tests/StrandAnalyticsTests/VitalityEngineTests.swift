@@ -57,6 +57,19 @@ final class VitalityEngineTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(old.vitality, 0)
     }
 
+    func testRmssdNormByAge() {
+        XCTAssertEqual(VitalityEngine.rmssdNorm(forAge: 20), 47, accuracy: 0.01)
+        XCTAssertEqual(VitalityEngine.rmssdNorm(forAge: 40), 33, accuracy: 0.01)
+        XCTAssertEqual(VitalityEngine.rmssdNorm(forAge: 45), 31, accuracy: 0.01)   // halfway 33→29
+        XCTAssertEqual(VitalityEngine.rmssdNorm(forAge: 90), 20, accuracy: 0.01)   // clamps to last anchor
+    }
+
+    func testSleepConsistency() {
+        XCTAssertEqual(VitalityEngine.sleepConsistency(nightlyHours: [7, 7, 7, 7])!, 1.0, accuracy: 1e-9)
+        XCTAssertEqual(VitalityEngine.sleepConsistency(nightlyHours: [6, 8, 6, 8])!, 0.857, accuracy: 0.005)
+        XCTAssertNil(VitalityEngine.sleepConsistency(nightlyHours: [7, 7]))   // < 3 nights
+    }
+
     /// Contributions carry the right sign: a low resting HR is protective (negative), a high one ages you.
     func testContributionSigns() {
         let lowRHR = VitalityEngine.contributions(.init(chronoAge: 40, restingHR: 50))

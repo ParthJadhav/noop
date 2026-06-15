@@ -466,6 +466,28 @@ object IntelligenceEngine {
                 repo.upsertMetricSeries(faPts)
             }
         }
+
+        // ── Vitality / Body Age (Phase 7) — weekly, keyed to the week's Saturday ──
+        // Roll the last 7 days' wearable signals into the mortality-hazard model; VitalityEngine gates on
+        // ≥3 inputs. VO₂max is omitted (fitness is Fitness Age's headline); Vitality leans on resting HR,
+        // sleep duration + regularity, HRV-vs-age-norm, and steps.
+        val vNights = fa7.mapNotNull { it.totalSleepMin }.map { it / 60.0 }.filter { it > 0 }
+        val vHRVs = fa7.mapNotNull { it.avgHrv }
+        val vSteps = fa7.mapNotNull { it.steps }.map { it.toDouble() }
+        val vInputs = VitalityEngine.Inputs(
+            chronoAge = profile.age,
+            restingHR = if (faRHRs.isEmpty()) null else medianOfDoubles(faRHRs),
+            sleepHours = if (vNights.isEmpty()) null else vNights.average(),
+            sleepConsistency = VitalityEngine.sleepConsistency(vNights),
+            rmssd = if (vHRVs.isEmpty()) null else medianOfDoubles(vHRVs),
+            rmssdNorm = VitalityEngine.rmssdNorm(profile.age),
+            steps = if (vSteps.isEmpty()) null else vSteps.average())
+        VitalityEngine.compute(vInputs)?.let { vRes ->
+            val satKey = saturdayKeyOnOrBefore(newestDay)
+            repo.upsertMetricSeries(listOf(
+                MetricSeriesRow(deviceId = computedId, day = satKey, key = "vitality", value = vRes.vitality),
+                MetricSeriesRow(deviceId = computedId, day = satKey, key = "body_age", value = vRes.bodyAge)))
+        }
         // DURABILITY GUARD (iOS PR #395 cachedSleepKept): drop any freshly-detected session that
         // time-overlaps a night the user has already hand-corrected. A detected onset can drift
         // second-to-second as more raw data arrives, so without this the re-detected night would upsert
