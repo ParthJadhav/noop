@@ -581,6 +581,14 @@ class WhoopBleClient(
     @Volatile
     var preferredAddress: String? = null
 
+    /** True when [dev] is the strap we're pinned to — or when no pin is set (single-WHOOP default, any
+     *  WHOOP acceptable). The involuntary-reconnect fast paths consult this so they can never re-attach to a
+     *  non-pinned strap, mirroring macOS/iOS BLEManager.isPreferredPeripheral (multi-WHOOP parity). */
+    private fun isPreferred(dev: BluetoothDevice): Boolean {
+        val p = preferredAddress ?: return true
+        return dev.address.equals(p, ignoreCase = true)
+    }
+
     /** A WHOOP strap surfaced by the Add-a-device wizard's present-scan ([scanForWhoops]) WITHOUT
      *  auto-connecting. [address] is the BLE MAC; [name] the advertised name (may be null); [rssi] the
      *  signal. Twin of the iOS `discoveredWhoops` tuple (uuid/name/rssi). */
@@ -590,6 +598,11 @@ class WhoopBleClient(
     /** WHOOP straps seen while [scanningForList] is true (the Add-a-device wizard's present-scan), WITHOUT
      *  auto-connecting. Cleared at the start of each [scanForWhoops]. Empty/unused on the default path. */
     val discoveredWhoops: StateFlow<List<DiscoveredWhoop>> = _discoveredWhoops.asStateFlow()
+
+    private val _connectedPeripheralAddress = MutableStateFlow<String?>(null)
+    /** The BLE address of the strap currently connected, or null when disconnected. Twin of macOS
+     *  BLEManager.connectedPeripheralUUID — drives SourceCoordinator's first-connect identity adoption. */
+    val connectedPeripheralAddress: StateFlow<String?> = _connectedPeripheralAddress.asStateFlow()
 
     /** Add-a-WHOOP wizard present-scan flag: while true, [onScanResult] ACCUMULATES every discovered strap
      *  into [discoveredWhoops] instead of auto-connecting. Turned on by [scanForWhoops], off by
@@ -1132,7 +1145,11 @@ class WhoopBleClient(
         handler.post {
             if (gatt != null || _state.value.connected) return@post   // already (re)connected
             val dev = lastDevice
-            if (dev != null) {
+            // Multi-WHOOP: only fast-path reconnect to [lastDevice] when it's still the pinned strap; an
+            // un-pinned (or differently-pinned) last device falls through to the pin-aware rescan, mirroring
+            // macOS re-asserting the pin on every reconnect. Single-WHOOP: preferredAddress null → always
+            // preferred → unchanged.
+            if (dev != null && isPreferred(dev)) {
                 log("Bluetooth radio back on — reconnecting directly to the last strap")
                 intentionalDisconnect = false
                 connectToDevice(dev, autoConnect = true)
@@ -1529,10 +1546,16 @@ class WhoopBleClient(
      *  match too). Fails open to a scan on any lookup problem. (#78 fork) */
     @SuppressLint("MissingPermission")
     private fun bondedWhoopDevice(): BluetoothDevice? = try {
-        adapter?.bondedDevices?.firstOrNull { d ->
-            val n = try { d.name } catch (se: SecurityException) { null } ?: return@firstOrNull false
+        val bonded = adapter?.bondedDevices?.filter { d ->
+            val n = try { d.name } catch (se: SecurityException) { null } ?: return@filter false
             n.startsWith("WHOOP", ignoreCase = true) && !n.startsWith("WHOOP 4", ignoreCase = true)
-        }
+        }.orEmpty()
+        // With a multi-WHOOP pin set, take ONLY the pinned strap — never just "the first bonded 5/MG".
+        // Grabbing the first ignored the active-device selection and kept the link on the wrong strap (the
+        // 5/MG twin of the Mac/iOS attach-to-any-open-connection bug). No pin (single-WHOOP) → first, unchanged.
+        val preferred = preferredAddress
+        if (preferred != null) bonded.firstOrNull { it.address.equals(preferred, ignoreCase = true) }
+        else bonded.firstOrNull()
     } catch (se: SecurityException) {
         null
     }
@@ -1617,6 +1640,11 @@ class WhoopBleClient(
                     // Port of didConnect: mark connected, negotiate a larger ATT MTU, THEN discover.
                     handler.removeCallbacks(scanTimeoutRunnable)
                     _state.value = _state.value.copy(connected = true, advertisingName = g.device.name, scanning = false, statusNote = null, encryptedBond = false, reconnectGuide = null)
+                    // Multi-WHOOP: publish the connected strap's stable BLE address so SourceCoordinator can
+                    // adopt it onto the active registry device's peripheralId on first connect. Additive twin
+                    // of macOS BLEManager.connectedPeripheralUUID (set in didConnect). Decoupled from the
+                    // registry — the coordinator observes this; the connect flow below is unchanged.
+                    _connectedPeripheralAddress.value = g.device.address
                     serviceDiscoveryKicked.set(false)
                     // Capture link signal strength (logged via onReadRemoteRssi) — the scan
                     // "Discovered … (rssi …)" line never fires on a direct/auto-reconnect, so a weak-link
@@ -3078,6 +3106,9 @@ class WhoopBleClient(
             backfilling = false, syncChunksThisSession = 0,
             charging = null,   // a stale charging flag must not outlive the link
         )
+        // Multi-WHOOP: the link is down — clear the published connected address so SourceCoordinator's
+        // adoption sink can't re-fire on a stale strap id (twin of macOS clearing connectedPeripheralUUID).
+        _connectedPeripheralAddress.value = null
         reset()
 
         // close() can itself throw DeadObjectException on a dead binder — teardown must NEVER throw,
@@ -3114,11 +3145,16 @@ class WhoopBleClient(
                 return
             }
             val dev = lastDevice
-            if (dev != null) {
+            if (dev != null && isPreferred(dev)) {
                 // Reconnect DIRECTLY to the strap we already know (autoConnect=true): the OS reconnects
                 // as soon as it's reachable, with no scan and no advertisement required — fixing the
                 // dropout loop where a bonded strap that wasn't advertising could never be re-found by
                 // scanning, leaving the user stuck until they forced pairing mode (#61).
+                // Multi-WHOOP: gated on [isPreferred] so an involuntary reconnect can never re-attach to a
+                // strap that is no longer the active-pinned one — if [lastDevice] isn't the pinned strap we
+                // fall through to the pin-aware rescan below (mirrors macOS re-asserting the pin on every
+                // reconnect). On the single-WHOOP path [preferredAddress] is null → isPreferred is always
+                // true → byte-for-byte unchanged.
                 log("Disconnected (status=$status); reconnecting directly in ${RECONNECT_DELAY_MS / 1000}s")
                 handler.postDelayed({
                     if (!intentionalDisconnect) connectToDevice(dev, autoConnect = true)

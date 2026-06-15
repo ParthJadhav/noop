@@ -1,6 +1,7 @@
 package com.noop.ble
 
 import android.content.Context
+import android.util.Log
 import com.noop.data.DeviceRegistry
 import com.noop.data.PairedDeviceRow
 import com.noop.data.StreamBatch
@@ -40,9 +41,15 @@ import kotlinx.coroutines.launch
  * [start] reconciles once against the current active id at launch (a no-op for a single-WHOOP install).
  */
 class SourceCoordinator(
-    private val context: Context,
+    /** Android [Context] for the strap source's own scanner/GATT. Non-null in production (set at the
+     *  composition root); nullable ONLY so the registry-driven paths (e.g. identity adoption) are
+     *  exercisable on the plain JVM without Android — required at the single strap-path use site. */
+    private val context: Context?,
     private val registry: DeviceRegistry,
-    private val repository: WhoopRepository,
+    /** The store the strap source persists into. Non-null in production; nullable for the same JVM-test
+     *  reason as [context] — required at the single strap-path use site, untouched by the WHOOP/adoption
+     *  paths. */
+    private val repository: WhoopRepository?,
     /** Push a strap's live HR/R-R into whatever the UI observes (e.g. `ble::publishExternalLiveHr`). */
     private val liveSink: (hr: Int, rr: List<Int>) -> Unit,
     /** Re-trigger WHOOP's EXISTING scan/connect entry point (e.g. `AppViewModel.connect`). */
@@ -65,6 +72,11 @@ class SourceCoordinator(
     /** Background scope for the suspend registry reads + persist. SupervisorJob keeps one failure from
      *  cancelling the others; IO keeps DB work off the main thread. */
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO),
+    /** Diagnostic sink for the multi-WHOOP identity-adoption "different strap connected" notice — the
+     *  Android analogue of Swift's `live.append(log:)`. Defaults to logcat; tests inject a capturing
+     *  closure to assert the wording. Inert on the single-WHOOP path (the message only fires on a
+     *  registered-but-mismatched strap). */
+    private val log: (String) -> Unit = { Log.i("SourceCoordinator", it) },
 ) {
 
     /** The lazily-created generic-strap source. null until the first switch to a strap; reused after. */
@@ -99,6 +111,47 @@ class SourceCoordinator(
      */
     fun onActiveDeviceChanged(id: String) {
         scope.launch { reconcile(id) }
+    }
+
+    /**
+     * The BLE engine connected to a WHOOP strap at [address] (null on disconnect). Persist that stable
+     * identity onto the CURRENTLY ACTIVE device when it's a WHOOP and hasn't adopted one yet — so the
+     * legacy "my-whoop" learns its strap's address on first connect, and a freshly-paired WHOOP confirms
+     * its identity. Faithful twin of macOS `SourceCoordinator.connectedPeripheralChanged(to:)` (the sink
+     * fed by `BLEManager.connectedPeripheralUUID`), INCLUDING the different-strap guard.
+     *
+     * Guards (so this never corrupts the registry):
+     *   • null address (a disconnect/never-connected republish) → ignore.
+     *   • the active device is NOT a WHOOP (a generic strap is active) → ignore; this connection isn't ours.
+     *   • the active WHOOP already has a DIFFERENT non-null peripheralId → a different strap connected; LOG
+     *     it and do NOT clobber the stored identity (would mis-map another strap's samples onto this row).
+     *   • it already matches → nothing to write.
+     */
+    fun connectedPeripheralChanged(address: String?) {
+        if (address == null) return
+        scope.launch {
+            val activeId = registry.activeDeviceId() ?: return@launch
+            val devices = registry.all()
+            val row = devices.firstOrNull { it.id == activeId }
+            if (!isWhoop(activeId, devices) || row == null) return@launch
+
+            val existing = row.peripheralId
+            when {
+                existing == null ->
+                    // First connect for this WHOOP row → adopt the strap's stable identity (its address).
+                    registry.setPeripheralId(activeId, address)
+                existing.equals(address, ignoreCase = true) -> {
+                    // Already adopted this exact strap → nothing to do.
+                }
+                else ->
+                    // A DIFFERENT strap connected under this WHOOP row. Never silently overwrite — that would
+                    // mis-map another physical strap's samples onto this device. Log and leave the stored id.
+                    log(
+                        "Multi-WHOOP: active device $activeId is registered to strap $existing but " +
+                            "$address connected — not overwriting.",
+                    )
+            }
+        }
     }
 
     private suspend fun reconcile(id: String) {
@@ -171,12 +224,17 @@ class SourceCoordinator(
         if (!onStrap) stopWhoop()         // leaving WHOOP for the first strap → pause its BLE
         standardSource?.stop()            // strap→strap: stop the previous source first
 
+        // Non-null in production (set at the composition root); only the JVM-test paths that never reach a
+        // strap switch leave them null. Fail loudly rather than silently no-op if that invariant breaks.
+        val ctx = requireNotNull(context) { "SourceCoordinator.context is required to run a strap source" }
+        val repo = requireNotNull(repository) { "SourceCoordinator.repository is required to persist strap samples" }
+
         val source = StandardHrSource(
-            context = context,
+            context = ctx,
             deviceId = id,
             liveSink = liveSink,
             persist = { batch: StreamBatch, deviceId: String ->
-                scope.launch { runCatching { repository.insert(batch, deviceId) } }
+                scope.launch { runCatching { repo.insert(batch, deviceId) } }
             },
         )
         source.scan()   // discover + connect the chosen strap on its own scanner/GATT

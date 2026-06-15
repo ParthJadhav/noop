@@ -37,6 +37,14 @@ object AppChangelog {
     /** Newest first. */
     val releases: List<Release> = listOf(
         Release(
+            version = "4.0.2",
+            title = "Switching between WHOOP straps now actually switches",
+            date = "June 2026",
+            items = listOf(
+                "Multi-WHOOP: switching the active strap now moves the connection to it. If you had more than one WHOOP paired and switched the active one, the app could keep streaming the previous strap while showing the new one — because on reconnect it re-attached to whatever your system already had open, instead of the strap you selected. It now connects to the one you picked (Mac & iPhone), and the WHOOP 5/MG bonded fast-path on Android honours your selection the same way. Single-WHOOP setups are unaffected.",
+            ),
+        ),
+        Release(
             version = "4.0.1",
             title = "Today's Effort goes live — plus sleep & alarm honesty",
             date = "June 2026",

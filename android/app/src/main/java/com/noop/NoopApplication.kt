@@ -72,6 +72,11 @@ class NoopApplication : Application() {
      * [WhoopBleClient.publishExternalLiveHr]. [SourceCoordinator.start] reconciles once against the
      * current active id at launch (a no-op for a single-WHOOP install); the Devices screen (next task)
      * calls [SourceCoordinator.onActiveDeviceChanged] after a setActive.
+     *
+     * Multi-WHOOP identity adoption: AppViewModel's init collects [WhoopBleClient.connectedPeripheralAddress]
+     * (distinctUntilChanged) into [SourceCoordinator.connectedPeripheralChanged] — the Kotlin analogue of
+     * macOS wiring `BLEManager.connectedPeripheralUUID` into the coordinator's adoption sink. Kept beside
+     * the other `ble`-flow collectors there (this Application owns no CoroutineScope of its own).
      */
     val sourceCoordinator: SourceCoordinator by lazy {
         SourceCoordinator(

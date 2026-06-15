@@ -17,6 +17,16 @@ approximate; downloads are on the [Releases](https://github.com/NoopApp/noop/rel
 
 ---
 
+## 4.0.2 — Switching between WHOOP straps now actually switches
+
+- **Multi-WHOOP: switching the active strap now moves the connection to it.** With more than one WHOOP
+  paired, switching the active one could leave the app streaming the *previous* strap while showing the
+  new one — on reconnect it re-attached to whatever the system already had open instead of the strap you
+  selected. It now drops the old strap and connects to the one you picked (Mac & iPhone), and the WHOOP
+  5/MG bonded fast-path on Android honours your selection the same way. Single-WHOOP setups are unaffected.
+
+---
+
 ## 4.0.1 — Today's Effort goes live, plus sleep & alarm honesty
 
 A fix release following a full code review of the v4 line.

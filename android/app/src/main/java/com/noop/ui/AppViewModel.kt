@@ -311,6 +311,16 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
                 lastBonded = state.bonded
             }
         }
+        // Multi-WHOOP identity adoption: feed the connected strap's BLE address into the coordinator so the
+        // active WHOOP row adopts it on first connect (and a different-but-registered strap is logged, not
+        // overwritten). The Kotlin analogue of Swift's `connectedPeripheralUUID.removeDuplicates().sink`
+        // (SourceCoordinator.swift:111-114) — connectedPeripheralAddress is a StateFlow, which already only
+        // emits distinct values (operator fusion), so no distinctUntilChanged is needed. Inert on the
+        // single-WHOOP path: my-whoop simply learns its strap's address once.
+        viewModelScope.launch {
+            ble.connectedPeripheralAddress
+                .collect { addr -> noopApp.sourceCoordinator.connectedPeripheralChanged(addr) }
+        }
         // Re-arm the strap's firmware alarm once per process-alive day. The firmware alarm is a single
         // absolute instant with NO recurrence and was previously re-armed ONLY on the bond edge — so a
         // strap that stays continuously bonded (a phone in range overnight) would fire once and then

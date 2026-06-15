@@ -7,7 +7,7 @@ enum AppChangelog {
 
     /// Bump this when you add a release below. The "What's New" sheet shows automatically when the
     /// stored last-seen version is behind this. (Decoupled from the bundle version on purpose.)
-    static let currentVersion = "4.0.1"
+    static let currentVersion = "4.0.2"
 
     struct Release: Identifiable {
         let version: String
@@ -19,6 +19,13 @@ enum AppChangelog {
 
     /// Newest first.
     static let releases: [Release] = [
+        Release(
+            version: "4.0.2",
+            title: "Switching between WHOOP straps now actually switches",
+            date: "June 2026",
+            items: [
+                "**Multi-WHOOP: switching the active strap now moves the connection to it.** If you had more than one WHOOP paired and switched the active one, the app could keep streaming the *previous* strap while showing the new one — because on reconnect it re-attached to whatever your system already had open, instead of the strap you selected. It now lets go of the old strap and connects to the one you picked (Mac & iPhone), and the WHOOP 5/MG bonded fast-path on Android honours your selection the same way. Single-WHOOP setups are unaffected.",
+            ]),
         Release(
             version: "4.0.1",
             title: "Today's Effort goes live — plus sleep & alarm honesty",

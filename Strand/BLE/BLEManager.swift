@@ -454,7 +454,10 @@ public final class BLEManager: NSObject, ObservableObject {
             log("Bluetooth not powered on (state=\(central.state.rawValue)); cannot scan yet")
             return
         }
-        if let p = peripheral, p.state == .connected {
+        // Reuse the already-held peripheral ONLY if it's the strap we're pinned to. Without this guard a
+        // multi-WHOOP switch attached straight back to the previously-held strap, ignoring the new active
+        // device (registry said B, radio stayed on A). No pin (single-WHOOP) → always true, unchanged.
+        if let p = peripheral, p.state == .connected, isPreferredPeripheral(p) {
             state.connected = true
             p.delegate = self
             log("Already connected to \(model.displayName) — refreshing services and notifications")
@@ -462,7 +465,20 @@ public final class BLEManager: NSObject, ObservableObject {
             enableLiveNotifications(reason: "manual refresh")
             return
         }
-        if let p = central.retrieveConnectedPeripherals(withServices: [model.scanService]).first {
+        // Existing OS-level connections for this WHOOP family. CoreBluetooth keeps a bonded strap connected
+        // across app sessions, and `retrieveConnectedPeripherals(...).first` previously adopted WHICHEVER
+        // WHOOP macOS already had open — bypassing the scan (the only place the preferred-strap pin was
+        // read), so a switch could never move off the wrong strap. Now: with a pin set, drop every OTHER
+        // open WHOOP (so it stops holding the link) and attach ONLY to the pinned one. No pin → first-wins,
+        // exactly as before.
+        let existing = central.retrieveConnectedPeripherals(withServices: [model.scanService])
+        if preferredPeripheralUUID != nil {
+            for other in existing where !isPreferredPeripheral(other) {
+                log("Dropping non-active WHOOP connection \(other.identifier) — not the selected strap")
+                central.cancelPeripheralConnection(other)
+            }
+        }
+        if let p = existing.first(where: { isPreferredPeripheral($0) }) {
             log("Found existing \(model.displayName) connection \(p.identifier) — attaching")
             preparePeripheral(p)
             if p.state == .connected {
@@ -472,6 +488,16 @@ public final class BLEManager: NSObject, ObservableObject {
             } else {
                 central.connect(p, options: nil)
             }
+            return
+        }
+        // Pinned to a specific strap that isn't already open → connect it DIRECTLY by identifier. A scan
+        // would let any in-range WHOOP satisfy the connect and could land on the wrong one; the targeted
+        // retrieve can only ever return the strap we asked for.
+        if let preferred = preferredPeripheralUUID,
+           let p = central.retrievePeripherals(withIdentifiers: [preferred]).first {
+            log("Connecting to selected strap \(preferred) — targeted")
+            preparePeripheral(p)
+            central.connect(p, options: nil)
             return
         }
         startScan(for: model, allowFallback: true)
@@ -516,6 +542,15 @@ public final class BLEManager: NSObject, ObservableObject {
             return
         }
         preferredPeripheralUUID = uuid
+    }
+
+    /// True when `p` is the strap we're pinned to — or when no pin is set (the single-WHOOP default, so
+    /// any WHOOP is acceptable and the legacy first-found behaviour is preserved byte-for-byte). The
+    /// attach/reconnect paths consult this so they can never adopt the WRONG already-connected strap on a
+    /// multi-WHOOP setup (the registry said one strap, the radio stayed on another — multi-WHOOP switch bug).
+    private func isPreferredPeripheral(_ p: CBPeripheral) -> Bool {
+        guard let preferred = preferredPeripheralUUID else { return true }
+        return p.identifier == preferred
     }
 
     /// Re-point which device id live WHOOP samples store under, when the active WHOOP changes (a
