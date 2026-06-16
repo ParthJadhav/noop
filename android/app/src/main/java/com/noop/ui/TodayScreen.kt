@@ -1508,7 +1508,7 @@ private fun OverviewHRChart(
                     val end = Offset(lastX.coerceIn(0f, size.width), lastY)
                     drawCircle(color = Palette.metricRose.copy(alpha = 0.30f), radius = 9f, center = end)
                     drawCircle(color = Palette.metricRose.copy(alpha = 0.65f), radius = 5.5f, center = end)
-                    drawCircle(color = Color.White, radius = 2.4f, center = end)
+                    drawCircle(color = Palette.tipCore, radius = 2.4f, center = end)
                 }
             }
 

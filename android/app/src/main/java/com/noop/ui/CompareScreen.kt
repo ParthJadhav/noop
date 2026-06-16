@@ -771,7 +771,7 @@ private fun OverlayChart(series: List<CompareSeries>, modifier: Modifier) {
             val last = pts.last()
             drawCircle(color = s.color.copy(alpha = 0.30f), radius = 8f, center = last)
             drawCircle(color = s.color.copy(alpha = 0.65f), radius = 5f, center = last)
-            drawCircle(color = Color.White, radius = 2.2f, center = last)
+            drawCircle(color = Palette.tipCore, radius = 2.2f, center = last)
         }
     }
 }

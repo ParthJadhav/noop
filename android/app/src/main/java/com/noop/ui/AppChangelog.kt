@@ -25,7 +25,7 @@ object AppChangelog {
      * Bump this when you add a release below. The "What's New" sheet shows automatically when the
      * stored last-seen version is behind this. (Decoupled from the bundle version on purpose.)
      */
-    const val CURRENT_VERSION = "4.3.0"
+    const val CURRENT_VERSION = "4.3.1"
 
     data class Release(
         val version: String,
@@ -36,6 +36,14 @@ object AppChangelog {
 
     /** Newest first. */
     val releases: List<Release> = listOf(
+        Release(
+            version = "4.3.1",
+            title = "Light theme polish",
+            date = "June 2026",
+            items = listOf(
+                "**A handful of small details that were tuned for dark now adapt to Light too.** A theme audit caught a few chart and gauge end-cap dots, a secondary-button outline and a tooltip shadow that read faintly or invisibly on the new warm-paper canvas — they now flip to the right ink/shadow on Light. Dark is unaffected. If you switched to Light in 4.3.0 and noticed a missing dot on a graph, this is it.",
+            ),
+        ),
         Release(
             version = "4.3.0",
             title = "Light theme — NOOP in warm paper & gold",

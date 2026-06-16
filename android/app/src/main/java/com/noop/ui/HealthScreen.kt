@@ -1295,7 +1295,7 @@ private fun TileSparkline(values: List<Double>, color: Color, modifier: Modifier
         val end = pts.last()
         drawCircle(color = color.copy(alpha = 0.30f), radius = 6f, center = end)
         drawCircle(color = color.copy(alpha = 0.65f), radius = 3.5f, center = end)
-        drawCircle(color = Color.White, radius = 1.6f, center = end)
+        drawCircle(color = Palette.tipCore, radius = 1.6f, center = end)
     }
 }
 

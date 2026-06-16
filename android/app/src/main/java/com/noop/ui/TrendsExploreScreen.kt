@@ -625,7 +625,7 @@ private fun ExploreGlowEndCap(values: List<Double>, tipColor: Color) {
         val center = Offset(size.width, topPad + (1f - norm) * usableH)
         drawCircle(color = tipColor.copy(alpha = 0.30f), radius = 9f, center = center)
         drawCircle(color = tipColor.copy(alpha = 0.65f), radius = 5.5f, center = center)
-        drawCircle(color = Color.White, radius = 2.4f, center = center)
+        drawCircle(color = Palette.tipCore, radius = 2.4f, center = center)
     }
 }
 

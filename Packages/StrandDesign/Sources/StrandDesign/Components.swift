@@ -413,7 +413,7 @@ public struct NoopSecondaryButtonStyle: ButtonStyle {
             .padding(.vertical, 11).padding(.horizontal, 18)
             .frame(maxWidth: .infinity)
             .background(shape.fill(StrandPalette.surfaceInset))
-            .overlay(shape.strokeBorder(Color.white.opacity(0.12), lineWidth: 1))
+            .overlay(shape.strokeBorder(StrandPalette.hairline, lineWidth: 1))
             .opacity(pressed ? 0.82 : 1)
             .scaleEffect(pressed ? 0.98 : 1)
             .animation(StrandMotion.interactive, value: pressed)

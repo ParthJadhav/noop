@@ -390,7 +390,7 @@ private fun DaytimeStressLine(hours: List<DaytimeStress.HourPoint>) {
             val dotY = yFor(lvl)
             // Ring dot at the scrubbed point.
             drawCircle(color = stressColor, radius = 5.dp.toPx(), center = Offset(scrubX, dotY))
-            drawCircle(color = Color.White, radius = 2.5.dp.toPx(), center = Offset(scrubX, dotY))
+            drawCircle(color = Palette.tipCore, radius = 2.5.dp.toPx(), center = Offset(scrubX, dotY))
 
             // Tooltip pill: "9 am · 1.4" — avoid String.format; use integer tenths.
             val tenths = (lvl * 10).roundToInt().coerceIn(0, 30)

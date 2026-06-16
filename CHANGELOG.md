@@ -17,6 +17,10 @@ approximate; downloads are on the [Releases](https://github.com/NoopApp/noop/rel
 
 ---
 
+## 4.3.1 — Light theme polish (all platforms)
+
+- **A theme audit caught a handful of details that were tuned for dark and read faintly (or invisibly) on the new Light theme** — a few chart/gauge end-cap dots (the white core vanished against the white card), a secondary-button outline, and a tooltip shadow. They now flip to the right ink/shadow on Light via the same dynamic tokens. **Dark is unaffected.** If you tried Light in 4.3.0 and saw a missing dot at the end of a graph line, this fixes it.
+
 ## 4.3.0 — Light theme: NOOP in warm paper & gold (all platforms)
 
 - **NOOP now has a full Light theme, switchable any time.** Settings → Appearance offers **System** (follow your phone/Mac), **Light**, or **Dark**. The new Light look is "warm paper & gold" — a soft warm-white canvas with crisp navy-ink text and the brand gold deepened so it stays legible on white. Every surface was re-done for it rather than inverted: the ring gauges, the frosted cards (lifted with a soft drop shadow instead of a glow), the charts, the scenic hero, the home-screen / Dynamic Island widgets and the status bar all adapt. **Dark is unchanged.** Architecture note for the curious: on Apple every palette token became a dynamic `Color(light:dark:)`, and on Android a snapshot-state token set behind the `Palette` facade — so the whole UI re-resolves from one toggle with no per-screen rework.

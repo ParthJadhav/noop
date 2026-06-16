@@ -838,7 +838,7 @@ struct StressNeedle: View {
 
                 // Marker dot riding the arc at the value.
                 Circle()
-                    .fill(Color.white)
+                    .fill(StrandPalette.tipCore)
                     .frame(width: lineWidth * 0.42, height: lineWidth * 0.42)
                     .overlay(Circle().fill(StressRamp.color(fraction * 3.0)).opacity(0.4))
                     .position(tip)

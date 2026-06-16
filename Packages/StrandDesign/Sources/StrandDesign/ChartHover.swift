@@ -24,6 +24,8 @@ public struct ChartTooltip: View {
     /// gradient colour for that datum) so the tooltip explains the colour.
     public var accent: Color?
 
+    @Environment(\.colorScheme) private var scheme
+
     public init(value: String, label: String? = nil, accent: Color? = nil) {
         self.value = value
         self.label = label
@@ -60,7 +62,8 @@ public struct ChartTooltip: View {
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .stroke(StrandPalette.hairlineStrong, lineWidth: 1)
         )
-        .shadow(color: Color.black.opacity(0.45), radius: 10, x: 0, y: 6)
+        .shadow(color: scheme == .light ? Color(hex: "#1A2230").opacity(0.18) : Color.black.opacity(0.45),
+                radius: scheme == .light ? 8 : 10, x: 0, y: scheme == .light ? 4 : 6)
         .fixedSize()
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(label != nil ? "\(value), \(label!)" : value)
