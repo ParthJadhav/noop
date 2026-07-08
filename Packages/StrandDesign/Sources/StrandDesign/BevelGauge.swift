@@ -75,11 +75,47 @@ public struct BevelGauge: View {
 
     public var body: some View {
         ZStack {
-            innerDisc
-            ring
+            // STATIC BACKDROP: the frosted inner disc + the faint full-span track. Neither depends on
+            // `animatedFraction`, so SwiftUI/CoreAnimation already caches it as an unchanged layer and
+            // does NOT re-render it when only the arc animates. No .drawingGroup() — a per-instance
+            // offscreen flatten cost more than it saved (it was part of the v7.0.2 lag regression).
+            staticBackdrop
+                .frame(width: diameter, height: diameter)
+
+            // LIVE LAYER: the gradient progress arc + end-cap, kept OUTSIDE the drawingGroup so the
+            // shape's `animatableData` still animates smoothly (a drawingGroup would freeze it).
+            animatedArc
+
             if showsLabel { centerLabel }
         }
         .frame(width: diameter, height: diameter)
+    }
+
+    /// The non-animating backdrop: frosted disc behind the arc + the faint full-span track "well".
+    private var staticBackdrop: some View {
+        ZStack {
+            innerDisc
+            // Faint full-span track — the inset "well" the score arc sits in.
+            arcShape(to: 1.0)
+                .stroke(StrandPalette.surfaceInset,
+                        style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+        }
+    }
+
+    /// The live layer: the filled gradient arc + its clean end-cap dot (both driven by animatedFraction).
+    private var animatedArc: some View {
+        ZStack {
+            // Filled gradient arc.
+            arcShape(to: animatedFraction)
+                .stroke(
+                    AngularGradient(gradient: gradient, center: .center,
+                                    startAngle: startAngle, endAngle: endAngle),
+                    style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
+                )
+
+            // Clean end-cap dot at the arc tip.
+            if animatedFraction > 0.001 { endCap }
+        }
     }
 
     // Frosted inner disc behind the arc — gives the gauge a glassy "well".
@@ -95,29 +131,10 @@ public struct BevelGauge: View {
             .padding(lineWidth * 1.4)
     }
 
-    private var ring: some View {
-        ZStack {
-            // Design Reset (WHOOP): NO outer bloom. Fill-contrast carries the arc edge, so the
-            // ring reads as a clean, crisp Material instrument rather than a skeuomorphic glow.
-            // `bloomActive` stays in the signature (callers still pass it) but no longer renders.
-
-            // Faint full-span track — the inset "well" the score arc sits in.
-            arcShape(to: 1.0)
-                .stroke(StrandPalette.surfaceInset,
-                        style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
-
-            // Filled gradient arc.
-            arcShape(to: animatedFraction)
-                .stroke(
-                    AngularGradient(gradient: gradient, center: .center,
-                                    startAngle: startAngle, endAngle: endAngle),
-                    style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
-                )
-
-            // Clean end-cap dot at the arc tip.
-            if animatedFraction > 0.001 { endCap }
-        }
-    }
+    // Design Reset (WHOOP): NO outer bloom. Fill-contrast carries the arc edge, so the ring reads as a
+    // clean, crisp Material instrument rather than a skeuomorphic glow. `bloomActive` stays in the
+    // signature (callers still pass it) but no longer renders. The track + disc now live in
+    // `staticBackdrop` and the filled arc + tip in `animatedArc` (see `body`).
 
     private var endCap: some View {
         GeometryReader { geo in

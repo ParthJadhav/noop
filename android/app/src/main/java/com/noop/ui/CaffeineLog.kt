@@ -271,7 +271,7 @@ fun CaffeineLogCard() {
                                 )
                                 if (late) {
                                     Text(
-                                        "After your ${clockLabel(cutoffMinutes)} cutoff — may still be active at bed.",
+                                        "After your ${clockLabel(cutoffMinutes)} cutoff - may still be active at bed.",
                                         style = NoopType.caption,
                                         color = Palette.statusWarning,
                                     )

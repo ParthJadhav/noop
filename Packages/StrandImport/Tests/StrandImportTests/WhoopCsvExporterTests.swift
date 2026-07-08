@@ -82,7 +82,7 @@ final class WhoopCsvExporterTests: XCTestCase {
         let segNight = CachedSleepSession(startTs: 2_000_000_000, endTs: 2_000_007_200,
                                           efficiency: nil, restingHr: nil, avgHrv: nil,
                                           stagesJSON: #"[{"start":2000000000,"end":2000003600,"stage":"light"},{"start":2000003600,"end":2000007200,"stage":"deep"}]"#)
-        let csv = WhoopCsvExporter.sleepsCSV([dictNight, arrayNight, segNight])
+        let csv = WhoopCsvExporter.sleepsCSV([dictNight, arrayNight, segNight], cycleStart: { _ in "" })
         let back = WhoopExportImporter().parseSleeps(CSVTable(text: csv)).sorted {
             ($0.sleepOnset ?? .distantPast) < ($1.sleepOnset ?? .distantPast)
         }
@@ -138,7 +138,7 @@ final class WhoopCsvExporterTests: XCTestCase {
                               spo2Pct: 96.0, skinTempDevC: 33.1, respRateBpm: 14.2)
         let entries: [(name: String, data: Data)] = [
             ("physiological_cycles.csv", Data(WhoopCsvExporter.cyclesCSV(days: [day], series: [:]).utf8)),
-            ("sleeps.csv", Data(WhoopCsvExporter.sleepsCSV([]).utf8)),
+            ("sleeps.csv", Data(WhoopCsvExporter.sleepsCSV([], cycleStart: { _ in "" }).utf8)),
             ("workouts.csv", Data(WhoopCsvExporter.workoutsCSV([]).utf8)),
             ("journal_entries.csv", Data(WhoopCsvExporter.journalCSV([]).utf8)),
             // Sidecar + Source column must be ignored by the importer (it reads only the 4 CSVs).

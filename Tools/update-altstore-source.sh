@@ -38,7 +38,7 @@ SIZE="$(stat -f%z "$IPA")"
 DATE="$(date -u +%Y-%m-%d)"
 # GitHub is the canonical download home; the AltStore source must point at the GitHub release asset.
 # (noop.fans stays a mirror — the FORGE_* vars above are still used by the deploy/push mechanic.)
-URL="https://github.com/${ORG}/${REPO}/releases/download/v${VERSION}/NOOP-v${VERSION}.ipa"
+URL="https://github.com/${ORG}/${REPO}/releases/download/v${VERSION}/NOOP-v${VERSION}-ios.ipa"
 
 echo "→ $VERSION (build $BUILD), ${SIZE} bytes, $DATE"
 jq --arg v "$VERSION" --arg b "$BUILD" --arg d "$DATE" --arg desc "$DESC" \

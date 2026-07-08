@@ -58,6 +58,46 @@ final class DeepTimelineFacadeTests: XCTestCase {
         XCTAssertLessThan(out[0].date, out[1].date)         // ascending
     }
 
+    // MARK: - Off-main raw post-processing (the @MainActor-freeze fix)
+
+    /// The zoomed-in HR raw post-processing is a pure, off-actor `nonisolated static` helper (it runs in a
+    /// `Task.detached` so a dense day's ~200k 1 Hz rows don't beach-ball the UI). It dedups across the
+    /// union FIRST-ID-WINS per ts (the active strap is first in `unionIds`) and returns ascending-sorted
+    /// TrendPoints. Two id arrays with an OVERLAPPING ts must keep the first array's sample for that ts.
+    func testRawHrDedupSortIsOffMainPure() {
+        // id0 (active strap, first): ts 100 bpm 60, ts 102 bpm 62 (out of order to prove the sort).
+        let id0 = [HRSample(ts: 102, bpm: 62), HRSample(ts: 100, bpm: 60)]
+        // id1 (second source): ts 100 OVERLAPS id0 (must be dropped , first wins), ts 101 is new.
+        let id1 = [HRSample(ts: 100, bpm: 99), HRSample(ts: 101, bpm: 61)]
+
+        let out = Repository.dedupSortRawHr([id0, id1])
+
+        // Three distinct ts (100, 101, 102) , the duplicate 100 collapsed to one point.
+        XCTAssertEqual(out.map { Int($0.date.timeIntervalSince1970) }, [100, 101, 102], "ascending, deduped")
+        // ts 100 kept id0's 60 bpm, NOT id1's 99 (first id wins per ts).
+        XCTAssertEqual(out[0].value, 60, accuracy: 0.001)
+        XCTAssertEqual(out[1].value, 61, accuracy: 0.001)
+        XCTAssertEqual(out[2].value, 62, accuracy: 0.001)
+    }
+
+    /// The non-HR raw post-processing helper (also `nonisolated static`, also run in a `Task.detached`):
+    /// dedups the union first-wins per ts, sorts ascending, and either returns the raw points (`isRaw`) or
+    /// mean-bins onto the bucket grid. Same first-wins-on-overlap semantics as the in-line version it
+    /// replaced.
+    func testRawNonHrDedupSortIsOffMainPure() {
+        func p(_ ts: Int, _ v: Double) -> TrendPoint {
+            TrendPoint(date: Date(timeIntervalSince1970: TimeInterval(ts)), value: v)
+        }
+        let id0 = [p(202, 22), p(200, 20)]              // first source, out of order
+        let id1 = [p(200, 99), p(201, 21)]              // ts 200 overlaps id0 (dropped), 201 new
+
+        let raw = Repository.dedupSortDownsampleRaw([id0, id1], isRaw: true, bucketSeconds: 1)
+        XCTAssertEqual(raw.map { Int($0.date.timeIntervalSince1970) }, [200, 201, 202], "ascending, deduped")
+        XCTAssertEqual(raw[0].value, 20, accuracy: 0.001, "first id wins the overlapping ts")
+        XCTAssertEqual(raw[1].value, 21, accuracy: 0.001)
+        XCTAssertEqual(raw[2].value, 22, accuracy: 0.001)
+    }
+
     // MARK: - Live read facade (in-memory store)
 
     /// Day scale → coarse buckets (NOT raw). With a fully-worn hour of 1 Hz HR, a day-scale read returns a

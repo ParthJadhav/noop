@@ -24,8 +24,13 @@ import java.util.zip.ZipInputStream
  *   (+ OuraExportParser / FitbitExportParser / GarminExportParser)
  * so the three brands decode the same on every platform.
  *
- *   • Oura   — the Account → Export Data JSON: sleep periods (stages/durations/HRV/RHR/breath),
- *              daily readiness (RHR, temperature deviation, score), daily activity (steps/calories).
+ *   • Oura   : the Account -> Export Data per-category files (CSV, `;`-delimited; or an older JSON
+ *              variant): sleep periods (durations/HRV/RHR/breath; a `deleted` type is skipped), daily
+ *              readiness (RHR, temperature deviation, score), daily activity (steps/calories/distance),
+ *              daily SpO2 (`spo2_percentage.average`), VO2max (`vo2_max`). Field names verified against a
+ *              REAL Oura export schema (issue #862). The many health types NOOP doesn't model
+ *              (bloodglucose, contraception, medication, ring config, raw sample streams, ...) are skipped
+ *              gracefully, since an unknown category/column is ignored, never an error.
  *   • Fitbit — Google Takeout → Fitbit JSON: per-day sleep-*.json / resting_heart_rate-*.json /
  *              steps-*.json.
  *   • Garmin — Garmin Connect "Export Your Data" (GDPR) ZIP wellness JSON: *_sleepData.json + daily
@@ -54,6 +59,23 @@ object WearableExportImporter {
     private const val MAX_ENTRY_BYTES = 256L shl 20  // per-entry uncompressed ceiling (zip-bomb guard)
     private const val MAX_FILES = 200_000
     private const val MAX_ROWS = 5_000_000
+
+    // Oura CSV detection (#857). Header keys are already HeaderNorm-normalized.
+    private val OURA_CSV_DATE_KEYS = setOf("date", "day", "summary_date", "calendar_date")
+    // Columns that mark a CSV as an Oura wellness export. Covers BOTH a combined daily-summary CSV and
+    // Oura's REAL per-category CSVs, each carrying only its own category's columns (#862): readiness →
+    // `temperature_deviation`, activity → `steps`/`active_calories`, vo2max → `vo2_max`, spo2 →
+    // `spo2_percentage`, sleep period → `total_sleep_duration`.
+    private val OURA_CSV_SIGNAL_COLUMNS = setOf(
+        "total_sleep_duration", "rem_sleep_duration", "deep_sleep_duration", "light_sleep_duration",
+        "sleep_efficiency", "efficiency", "average_hrv", "average_breath",
+        "average_resting_heart_rate", "lowest_resting_heart_rate", "lowest_heart_rate",
+        "readiness_score", "sleep_score", "respiratory_rate", "temperature_deviation",
+        "active_calories", "total_calories", "equivalent_walking_distance",
+        "vo2_max", "spo2_percentage", "breathing_disturbance_index", "contributors",
+    )
+    // Filename fragments that mark an Oura per-category CSV export (lowercased, substring match).
+    private val OURA_CSV_FILENAMES = listOf("heartrate", "heart_rate", "readiness", "sleep_periods")
 
     private val DAY_FMT: DateTimeFormatter = DateTimeFormatter.ofPattern("yyyy-MM-dd")
 
@@ -94,9 +116,27 @@ object WearableExportImporter {
             Brand.GARMIN -> parseGarmin(files)
         }
         if (parsed.days.isEmpty() && parsed.sleeps.isEmpty()) {
+            // A lone Oura `heartrate.csv` is a raw HR-sample file, not a daily summary, so it carries no
+            // recovery/sleep/HRV to map. Say so plainly and point at the right file (#857).
+            if (brand == Brand.OURA && onlyHeartRateCsv(files)) {
+                return ImportSummary.failure(
+                    brand.label,
+                    "That file is Oura's raw heart-rate log, which has no daily sleep or recovery values to " +
+                        "import. Export your Oura data as JSON (Account -> Export Data), or pick the daily/" +
+                        "readiness CSV, and import that instead.",
+                )
+            }
             return ImportSummary.failure(brand.label, "${brand.label} export held no sleep or daily wellness data.")
         }
         return persist(repo, brand, parsed)
+    }
+
+    /** True when every collected file is a raw heart-rate CSV (no daily-summary file): the #857 case. */
+    internal fun onlyHeartRateCsv(files: Map<String, ByteArray>): Boolean {
+        if (files.isEmpty()) return false
+        return files.keys.all { name ->
+            name.endsWith(".csv") && (name.contains("heartrate") || name.contains("heart_rate"))
+        }
     }
 
     // ------------------------------------------------------------------------
@@ -105,8 +145,8 @@ object WearableExportImporter {
 
     internal class DayAcc(val day: String) {
         var steps: Int? = null; var distanceM: Double? = null; var activeKcal: Double? = null; var totalKcal: Double? = null
-        var restingHr: Int? = null; var avgHrvMs: Double? = null; var skinTempDevC: Double? = null
-        var spo2Pct: Double? = null; var avgStress: Int? = null
+        var restingHr: Int? = null; var avgHrvMs: Double? = null; var respRateBpm: Double? = null; var skinTempDevC: Double? = null
+        var spo2Pct: Double? = null; var avgStress: Int? = null; var vo2max: Double? = null
         var totalSleepMin: Double? = null; var deepMin: Double? = null; var lightMin: Double? = null
         var remMin: Double? = null; var awakeMin: Double? = null; var efficiencyPct: Double? = null
         var readinessScore: Int? = null; var sleepScore: Int? = null
@@ -116,7 +156,7 @@ object WearableExportImporter {
         val startTs: Long, val endTs: Long,
         val deepMin: Double?, val lightMin: Double?, val remMin: Double?, val awakeMin: Double?,
         val totalSleepMin: Double?, val efficiencyPct: Double?,
-        val avgHr: Int?, val lowestHr: Int?, val avgHrvMs: Double?,
+        val avgHr: Int?, val lowestHr: Int?, val avgHrvMs: Double?, val respRateBpm: Double?,
         val sleepScore: Int?, val stagesJson: String?,
     )
 
@@ -131,8 +171,15 @@ object WearableExportImporter {
         if (names.any { it.contains("sleepdata") || it.contains("di_connect") || it.contains("userbiometric") || it.contains("_summarizedactivities") }) return Brand.GARMIN
         if (names.any { last(it).startsWith("sleep-") || last(it).startsWith("resting_heart_rate-") || last(it).startsWith("steps-") || it.contains("fitbit") }) return Brand.FITBIT
         if (names.any { it.contains("oura") }) return Brand.OURA
+        // Oura CSV export (#857): the per-category files (`heartrate.csv` / `readiness.csv` / ...). Routing
+        // these to Oura (rather than failing detection) lets the importer give an HONEST per-file outcome:
+        // a daily-summary CSV imports, a lone raw heart-rate CSV reports "no daily wellness data".
+        if (names.any { name -> OURA_CSV_FILENAMES.any { name.contains(it) } }) return Brand.OURA
 
-        for (data in files.values.take(8)) brandFromJsonShape(data)?.let { return it }
+        for ((name, data) in files.entries.take(8)) {
+            brandFromJsonShape(data)?.let { return it }
+            if (name.endsWith(".csv") && looksLikeOuraCsv(CsvTable.fromData(data).normalizedHeaders)) return Brand.OURA
+        }
         return null
     }
 
@@ -193,6 +240,7 @@ object WearableExportImporter {
                     d.awakeMin = d.awakeMin ?: session.awakeMin
                     d.efficiencyPct = d.efficiencyPct ?: session.efficiencyPct
                     d.avgHrvMs = d.avgHrvMs ?: session.avgHrvMs
+                    d.respRateBpm = d.respRateBpm ?: session.respRateBpm   // night resp → day rollup (#17)
                     if (d.restingHr == null) d.restingHr = session.lowestHr
                 }
             }
@@ -222,13 +270,157 @@ object WearableExportImporter {
                     d.steps = a.posInt("steps") ?: d.steps
                     d.activeKcal = a.posDbl("active_calories") ?: d.activeKcal
                     d.totalKcal = a.posDbl("total_calories") ?: d.totalKcal
+                    // Oura reports walking-equivalent distance in METRES (no GPS path-distance).
+                    d.distanceM = a.posDbl("equivalent_walking_distance") ?: d.distanceM
+                }
+            }
+            // Daily SpO2: the value is NESTED, spo2_percentage = { "average": float }, not a flat number,
+            // so reading it flat (the old assumption) would always miss it (#862).
+            (categoryArray(root, "daily_spo2") ?: categoryArray(root, "spo2"))?.let { arr ->
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    val key = o.strOpt("day") ?: continue
+                    val d = day(key)
+                    val nested = o.optJSONObject("spo2_percentage")?.posDbl("average")
+                    val flat = o.posDbl("spo2_percentage") ?: o.posDbl("average")
+                    (nested ?: flat)?.let { d.spo2Pct = d.spo2Pct ?: it }
+                }
+            }
+            // VO2max → mL/kg/min (Oura key `vo2_max`). Feeds Fitness Age, same as Apple Health VO2max.
+            (categoryArray(root, "vo2max") ?: categoryArray(root, "vo2_max"))?.let { arr ->
+                for (i in 0 until arr.length()) {
+                    val v = arr.optJSONObject(i) ?: continue
+                    val key = v.strOpt("day") ?: continue
+                    day(key).let { it.vo2max = it.vo2max ?: (v.posDbl("vo2_max") ?: v.posDbl("vo2max")) }
                 }
             }
         }
+
+        // Fold Oura CSV daily-summary rows in too. An export can be JSON, CSV, or a mix; JSON is richer so
+        // it WINS field-by-field, CSV only fills a day's gaps (#857). A lone raw `heartrate.csv` folds to
+        // nothing here, so the day stays honestly empty and the caller reports it plainly.
+        parseOuraCsv(files, byDay, sleeps)
+
         return Parsed(byDay.values.sortedBy { it.day }, sleeps.sortedBy { it.startTs })
     }
 
+    /**
+     * Parse Oura's per-day SUMMARY CSV (the "Export Data" trends CSV) into the same day/sleep accumulators
+     * the JSON path fills. Columns are matched after HeaderNorm normalization (so "Average HRV" ->
+     * "average_hrv"); sleep durations are SECONDS (like Oura's JSON) -> minutes. Existing (JSON) values are
+     * never overwritten; CSV only fills nulls. (#857)
+     */
+    internal fun parseOuraCsv(
+        files: Map<String, ByteArray>,
+        byDay: LinkedHashMap<String, DayAcc>,
+        sleeps: ArrayList<SleepAcc>,
+    ) {
+        for ((name, data) in files) {
+            if (!name.endsWith(".csv")) continue
+            val table = CsvTable.fromData(data)
+            if (!looksLikeOuraCsv(table.normalizedHeaders)) continue
+            for (cells in table.rows) {
+                val rawDay = cells.cell("date", "day", "summary_date", "calendar_date") ?: continue
+                val key = normalizeDayKey(rawDay)
+                // A `deleted` sleep-period row (Oura's `type` enum) is a night the user removed, so skip it
+                // entirely so it neither folds onto the day nor becomes a session (#862).
+                if (cells.cell("type")?.lowercase() == "deleted") continue
+                val d = byDay.getOrPut(key) { DayAcc(key) }
+
+                fun minutes(vararg keys: String): Double? {
+                    val v = cells.double(*keys) ?: return null
+                    return if (v > 0) v / 60.0 else null
+                }
+                val total = minutes("total_sleep_duration", "total_sleep")
+                val deep = minutes("deep_sleep_duration", "deep_sleep")
+                val light = minutes("light_sleep_duration", "light_sleep")
+                val rem = minutes("rem_sleep_duration", "rem_sleep")
+                val awake = minutes("awake_time", "awake_duration", "time_awake")
+
+                d.totalSleepMin = d.totalSleepMin ?: total
+                d.deepMin = d.deepMin ?: deep
+                d.lightMin = d.lightMin ?: light
+                d.remMin = d.remMin ?: rem
+                d.awakeMin = d.awakeMin ?: awake
+                d.efficiencyPct = d.efficiencyPct ?: cells.double("sleep_efficiency", "efficiency")?.takeIf { it > 0 }
+
+                val rhr = cells.double("average_resting_heart_rate", "resting_heart_rate")
+                    ?: cells.double("lowest_resting_heart_rate", "lowest_heart_rate")
+                if (rhr != null && rhr > 0 && d.restingHr == null) d.restingHr = rhr.toInt()
+                cells.double("average_hrv", "hrv")?.takeIf { it > 0 }?.let { d.avgHrvMs = d.avgHrvMs ?: it }
+                // Oura's CSV resp column (`respiratory_rate` / `average_breath`) → the day rollup (#17).
+                val resp = cells.double("respiratory_rate", "average_breath")?.takeIf { it > 0 }
+                resp?.let { d.respRateBpm = d.respRateBpm ?: it }
+                cells.double("temperature_deviation", "skin_temperature_deviation")?.let { d.skinTempDevC = d.skinTempDevC ?: it }
+                // SpO2: the real `dailyspo2` CSV column is `spo2_percentage` (the average %); keep the older
+                // flat aliases too for a combined-summary CSV (#862).
+                cells.double("spo2_percentage", "spo2", "blood_oxygen", "average_spo2")?.takeIf { it > 0 }?.let { d.spo2Pct = d.spo2Pct ?: it }
+                // VO2max: the real `vo2max` CSV column is `vo2_max` (mL/kg/min) → feeds Fitness Age.
+                cells.double("vo2_max", "vo2max")?.takeIf { it > 0 }?.let { d.vo2max = d.vo2max ?: it }
+                cells.double("steps")?.takeIf { it >= 0 }?.let { d.steps = d.steps ?: it.toInt() }
+                cells.double("active_calories", "activity_burn", "active_burn")?.takeIf { it > 0 }?.let { d.activeKcal = d.activeKcal ?: it }
+                cells.double("total_calories", "total_burn")?.takeIf { it > 0 }?.let { d.totalKcal = d.totalKcal ?: it }
+                // Oura's walking-equivalent distance (metres); no GPS path distance in the export.
+                cells.double("equivalent_walking_distance", "distance_m")?.takeIf { it > 0 }?.let { d.distanceM = d.distanceM ?: it }
+                // Oura's OWN scores -> REFERENCE only. The combined-summary CSV labels them `readiness_score`
+                // / `sleep_score`; the REAL per-category CSVs use a bare `score`. Both `dailyreadiness` and
+                // `dailysleep` carry a `contributors` column, so that alone can't tell them apart; only
+                // `dailyreadiness` carries `temperature_deviation`. So: temperature_deviation present ->
+                // readiness; else contributors present with no sleep durations / steps -> sleep score; an
+                // activity-score row (bare `score` with `steps`) is left out rather than mislabelled (#862).
+                cells.double("readiness_score", "readiness")?.takeIf { it > 0 }?.let { d.readinessScore = d.readinessScore ?: it.toInt() }
+                cells.double("sleep_score")?.takeIf { it > 0 }?.let { d.sleepScore = d.sleepScore ?: it.toInt() }
+                cells.double("score")?.takeIf { it > 0 }?.let { bare ->
+                    val isReadiness = cells.cell("temperature_deviation") != null
+                    val isSleepScore = !isReadiness && total == null &&
+                        cells.cell("steps") == null && cells.cell("contributors") != null
+                    when {
+                        isReadiness -> d.readinessScore = d.readinessScore ?: bare.toInt()
+                        isSleepScore -> d.sleepScore = d.sleepScore ?: bare.toInt()
+                    }
+                }
+
+                // A bedtime window (when the CSV carries one) lands the night on the Sleep tab too.
+                val start = WhoopTime.parseIsoWithOffsetEpochSeconds(cells.cell("bedtime_start", "sleep_start"))
+                val end = WhoopTime.parseIsoWithOffsetEpochSeconds(cells.cell("bedtime_end", "sleep_end"))
+                if (start != null && end != null && end > start && sleeps.size < MAX_ROWS) {
+                    sleeps.add(
+                        SleepAcc(
+                            startTs = start, endTs = end,
+                            deepMin = deep, lightMin = light, remMin = rem, awakeMin = awake,
+                            totalSleepMin = total, efficiencyPct = d.efficiencyPct,
+                            avgHr = null,
+                            lowestHr = rhr?.takeIf { it > 0 }?.toInt(),
+                            avgHrvMs = d.avgHrvMs, respRateBpm = resp,
+                            sleepScore = null, stagesJson = null,
+                        ),
+                    )
+                }
+            }
+        }
+    }
+
+    /** True if a CSV's normalized header set looks like an Oura per-day summary (date + a wellness col). */
+    internal fun looksLikeOuraCsv(normalizedHeaders: List<String>): Boolean {
+        val set = normalizedHeaders.toHashSet()
+        if (set.none { it in OURA_CSV_DATE_KEYS }) return false
+        return set.any { it in OURA_CSV_SIGNAL_COLUMNS }
+    }
+
+    /** Reduce an Oura CSV date/datetime cell to the `YYYY-MM-DD` day key (drops any time component). */
+    private fun normalizeDayKey(raw: String): String {
+        val trimmed = raw.trim()
+        if (trimmed.length >= 10) {
+            val head = trimmed.substring(0, 10)
+            if (head.length == 10 && head[4] == '-') return head
+        }
+        return trimmed
+    }
+
     private fun ouraSleep(s: JSONObject): SleepAcc? {
+        // Skip a `deleted` period (Oura's `type` enum marks user-deleted sleeps); folding it would count a
+        // night the user removed. Any other type (`long_sleep`/`short_sleep`/missing) is kept (#862).
+        if (s.strOpt("type")?.lowercase() == "deleted") return null
         val start = WhoopTime.parseEpochSeconds(s.strOpt("bedtime_start"), 0) ?: return null
         val end = WhoopTime.parseEpochSeconds(s.strOpt("bedtime_end"), 0) ?: return null
         if (end <= start) return null
@@ -239,7 +431,8 @@ object WearableExportImporter {
             remMin = min("rem_sleep_duration"), awakeMin = min("awake_time"),
             totalSleepMin = min("total_sleep_duration"), efficiencyPct = s.posDbl("efficiency"),
             avgHr = s.posInt("average_heart_rate"), lowestHr = s.posInt("lowest_heart_rate"),
-            avgHrvMs = s.posDbl("average_hrv"), sleepScore = null, stagesJson = null,
+            avgHrvMs = s.posDbl("average_hrv"), respRateBpm = s.posDbl("average_breath"),
+            sleepScore = null, stagesJson = null,
         )
     }
 
@@ -335,7 +528,7 @@ object WearableExportImporter {
             startTs = start, endTs = end,
             deepMin = deep, lightMin = light, remMin = rem, awakeMin = awakeMin,
             totalSleepMin = asleep, efficiencyPct = log.posDbl("efficiency"),
-            avgHr = null, lowestHr = null, avgHrvMs = null, sleepScore = null,
+            avgHr = null, lowestHr = null, avgHrvMs = null, respRateBpm = null, sleepScore = null,
             stagesJson = if (stages.length() > 0) stages.toString() else null,
         )
     }
@@ -372,6 +565,7 @@ object WearableExportImporter {
                     d.remMin = d.remMin ?: session.remMin
                     d.awakeMin = d.awakeMin ?: session.awakeMin
                     d.sleepScore = d.sleepScore ?: session.sleepScore
+                    d.respRateBpm = d.respRateBpm ?: session.respRateBpm   // night resp → day rollup (#17)
                     if (d.restingHr == null) d.restingHr = session.lowestHr
                 }
             } else {
@@ -420,6 +614,7 @@ object WearableExportImporter {
             totalSleepMin = if (total > 0) total else null, efficiencyPct = null,
             avgHr = null, lowestHr = s.posInt("restingHeartRate"),
             avgHrvMs = s.posDbl("avgOvernightHrv") ?: s.posDbl("averageHrvValue"),
+            respRateBpm = s.posDbl("averageRespirationValue") ?: s.posDbl("averageRespiration"),
             sleepScore = score, stagesJson = null,
         )
     }
@@ -447,6 +642,7 @@ object WearableExportImporter {
                 efficiency = d.efficiencyPct ?: sleepEfficiency(d.totalSleepMin, d.awakeMin),
                 deepMin = d.deepMin, remMin = d.remMin, lightMin = d.lightMin,
                 restingHr = d.restingHr, avgHrv = d.avgHrvMs,
+                respRateBpm = d.respRateBpm,   // imported night resp now reaches the day rollup (#17)
                 recovery = null,          // NEVER the brand's readiness score
                 strain = null,
                 spo2Pct = d.spo2Pct, skinTempDevC = d.skinTempDevC,
@@ -471,6 +667,7 @@ object WearableExportImporter {
             add(d.day, "energy_kcal", d.activeKcal); add(d.day, "total_kcal", d.totalKcal)
             add(d.day, "rhr", d.restingHr?.toDouble()); add(d.day, "hrv", d.avgHrvMs)
             add(d.day, "skin_temp_dev_c", d.skinTempDevC); add(d.day, "spo2", d.spo2Pct)
+            add(d.day, "vo2max", d.vo2max)
             add(d.day, "stress", d.avgStress?.toDouble())
             add(d.day, "sleep_total_min", d.totalSleepMin); add(d.day, "sleep_deep_min", d.deepMin)
             add(d.day, "sleep_light_min", d.lightMin); add(d.day, "sleep_rem_min", d.remMin)
@@ -482,7 +679,7 @@ object WearableExportImporter {
 
         val first = parsed.days.firstOrNull()?.day
         val last = parsed.days.lastOrNull()?.day
-        val span = if (first != null && last != null && first != last) " · $first – $last" else ""
+        val span = if (first != null && last != null && first != last) " · $first-$last" else ""
         return ImportSummary(
             source = brand.label,
             counts = mapOf("dailyMetric" to dailyMetrics.size, "sleepSession" to sleepRows.size, "metricSeries" to series.size),
@@ -548,7 +745,11 @@ object WearableExportImporter {
     /** True if the file is a wellness JSON/CSV we care about (filters out a brand's non-wellness bulk). */
     internal fun isWellnessFile(name: String, data: ByteArray): Boolean {
         if (name.endsWith(".csv")) {
-            return listOf("sleep", "heart", "step", "stress", "activit", "readiness", "wellness", "rhr").any { name.contains(it) }
+            // Includes Oura's generically-named daily-summary CSV (#857) so it reaches the parser.
+            return listOf(
+                "sleep", "heart", "step", "stress", "activit", "readiness", "wellness", "rhr",
+                "oura", "daily", "trend",
+            ).any { name.contains(it) }
         }
         if (!name.endsWith(".json")) return false
         val hints = listOf("sleep", "heart", "rate", "step", "stress", "activit", "readiness", "wellness",

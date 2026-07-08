@@ -8,7 +8,10 @@ extension AppModel {
         for item in PendingIntents.drain() {
             switch item.action {
             case .markMoment: markMoment(at: item.date ?? Date())
-            case .buzz:       buzz(loops: 1)
+            // #921: the "Buzz Strap" Siri shortcut logged its write but a WHOOP 4.0 never vibrated.
+            // The one-shot routine sends the confirmed pattern + RUN_ALARM sequence, acked, so a
+            // busy just-foregrounded BLE link can't silently drop it.
+            case .buzz:       buzzStrapOnce()
             }
         }
     }

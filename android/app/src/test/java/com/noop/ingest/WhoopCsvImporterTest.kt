@@ -96,4 +96,42 @@ class WhoopCsvImporterTest {
         // cycle_start_time = wake day, so the fold still lands on 2024-01-02.
         assertEquals("2024-01-02", sleeps.daily.single().day)
     }
+
+    // --- Localized (Brazilian Portuguese) headers, issue #692 ---------------------------------
+
+    /** Diacritic-folded pt-BR headers land on the canonical English keys (parity with Swift). */
+    @Test
+    fun portugueseHeaderAliasesNormalize() {
+        assertEquals("recovery_score_pct", HeaderNorm.normalize("Pontuação de recuperação %"))
+        assertEquals("resting_heart_rate_bpm", HeaderNorm.normalize("Frequência cardíaca em repouso (bpm)"))
+        assertEquals("heart_rate_variability_ms", HeaderNorm.normalize("Variabilidade da frequência cardíaca (ms)"))
+        // The leading "%" in "% de oxigênio no sangue" becomes "pct" at the front, then folds.
+        assertEquals("blood_oxygen_pct", HeaderNorm.normalize("% de oxigênio no sangue"))
+        assertEquals("deep_sws_duration_min", HeaderNorm.normalize("Duração profundo (Sono) (min)"))
+        assertEquals("activity_name", HeaderNorm.normalize("Nome da atividade"))
+        assertEquals("hr_zone_3_pct", HeaderNorm.normalize("Zona 3 de FC %"))
+        assertEquals("nap", HeaderNorm.normalize("Sesta"))
+        // "FC máx." shares the French alias and must still resolve (it is not duplicated for pt-BR).
+        assertEquals("max_hr_bpm", HeaderNorm.normalize("FC máx. (bpm)"))
+        assertEquals("average_hr_bpm", HeaderNorm.normalize("FC média (bpm)"))
+    }
+
+    /** A real ciclos_fisiológicos.csv header + one data row: values flow through the pt-BR aliases. */
+    @Test
+    fun portugueseCyclesValuesParse() {
+        val rows = cycles(
+            """
+            Hora de início do ciclo,Hora de fim do ciclo,Fuso horário do ciclo,Pontuação de recuperação %,Frequência cardíaca em repouso (bpm),Variabilidade da frequência cardíaca (ms),Temp. da pele (celsius),% de oxigênio no sangue,Esforço diário,Energia queimada (cal),FC máx. (bpm),FC média (bpm),Início do sono,Início da vigília,Desempenho do sono %,Frequência respiratória (rpm),Duração do sono (min),Duração na cama (min),Duração do sono leve (min),Duração profundo (Sono) (min),Duração REM (min),Duração de vigília (min),Necessidade de sono (min),Débito de sono (min),Eficácia do sono %,Consistência do sono %
+            2024-03-01 06:00:00,2024-03-02 06:00:00,UTC+00:00,80,52,95,33.5,96,12.5,2000,150,61,2024-03-01 23:00:00,2024-03-02 06:30:00,90,14,420,450,200,120,100,30,480,60,93,85
+            """
+        )
+        assertEquals(1, rows.size)
+        val r = rows.single()
+        assertEquals(80.0, r.recovery!!, 1e-9)
+        assertEquals(52, r.restingHr)
+        assertEquals(95.0, r.avgHrv!!, 1e-9)
+        assertEquals("2024-03-01", r.day)
+        // Day Strain 12.5 is rescaled onto NOOP's 0–100 Effort axis (×100/21).
+        assertEquals(12.5 * (100.0 / 21.0), r.strain!!, 1e-9)
+    }
 }

@@ -1,5 +1,7 @@
 package com.noop.ble
 
+import java.text.Normalizer
+
 /**
  * CLEAN-ROOM best-effort recognition of the EXPERIMENTAL band families from an advertised device name.
  *
@@ -26,7 +28,12 @@ enum class ExperimentalBrand(val displayBrand: String, val canStreamLiveHR: Bool
     companion object {
         /** Best-effort brand from an advertised name. Returns null for an unrecognised name (no wrong guess). */
         fun recognise(name: String): ExperimentalBrand? {
-            val n = name.lowercase()
+            // Fold diacritics before matching so Garmin's accented branding (e.g. "vívoactive", "fēnix")
+            // is recognised the same as its ASCII advertised form. Mirrors Swift's
+            // `folding(options: .diacriticInsensitive)`. A device can advertise either form.
+            val n = Normalizer.normalize(name, Normalizer.Form.NFD)
+                .replace(Regex("\\p{M}+"), "")
+                .lowercase()
             // Order matters: most specific tokens first. Mi Band is a Huami sub-brand, so test its tokens
             // before Amazfit's.
             if (n.contains("mi band") || n.contains("miband") || n.contains("smart band") || n.contains("xiaomi")) {

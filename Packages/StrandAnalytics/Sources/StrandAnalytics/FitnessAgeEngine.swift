@@ -227,7 +227,7 @@ extension FitnessAgeEngine {
                 detail: hasHeightWeight ? "Unlocks your VO₂max" : "Add to also see VO₂max"),
             FitnessReadinessItem(key: "waist", label: "Waist (optional)",
                 status: hasWaist ? .satisfied : .missing, required: false, role: .unlocksVO2max,
-                detail: hasWaist ? "Sharpens VO₂max" : "Optional — sharpens VO₂max"),
+                detail: hasWaist ? "Sharpens VO₂max" : "Optional - sharpens VO₂max"),
         ]
         let confidence: FitnessAgeConfidence
         if !hasAge || !hasSex || rhrDays < minCoverageDays {

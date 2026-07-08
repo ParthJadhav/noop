@@ -114,6 +114,20 @@ final class ProfileStore: ObservableObject {
     /// Tanaka estimate unless overridden.
     var hrMax: Int { hrMaxOverride > 0 ? hrMaxOverride : Int((208 - 0.7 * Double(age)).rounded()) }
 
+    /// Whether the cycle-awareness opt-in applies to this profile (#801). Cycle phase is read from the
+    /// MENSTRUAL skin-temperature shift, so the opt-in (the Health card + the Automations toggle) is only
+    /// offered to profiles it can apply to and is NOT shown for male profiles. `sex` is the free String
+    /// "male" | "female" | "nonbinary"; we gate by excluding "male" (case-insensitive) so any non-male
+    /// value, including unrecognised ones, still sees the opt-in rather than being silently excluded.
+    var cycleAwarenessApplies: Bool { Self.cycleAwarenessApplies(sex: sex) }
+
+    /// Pure form of ``cycleAwarenessApplies`` for the given `sex` token, so the gate can be unit-tested
+    /// without a live store / UserDefaults. `nonisolated` because it is a pure function over its argument
+    /// (no actor state), so the gate and its tests can call it from any context.
+    nonisolated static func cycleAwarenessApplies(sex: String) -> Bool {
+        sex.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() != "male"
+    }
+
     /// Allowed range for the step-calibration divisor (#132). 5/MG straps overcount by
     /// up to ~24×, so the old 4.0 ceiling could never reach the truth.
     static let stepScaleRange: ClosedRange<Double> = 0.5...30.0

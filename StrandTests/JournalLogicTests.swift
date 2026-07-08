@@ -3,7 +3,7 @@ import WhoopStore
 @testable import Strand
 
 /// Pins the native-journal merge logic, mirroring the Android JournalLogTest value-for-value so the
-/// two platforms merge catalogs and entries identically — question strings are opaque exact-match
+/// two platforms merge catalogs and entries identically, question strings are opaque exact-match
 /// keys to the effects engines on both sides.
 final class JournalLogicTests: XCTestCase {
 
@@ -24,7 +24,7 @@ final class JournalLogicTests: XCTestCase {
         let native = [e("2026-06-10", "A?", false), e("2026-06-09", "A?", true)]
         let merged = Repository.mergeJournal(imported: imported, native: native)
         XCTAssertEqual(merged.count, 3)
-        // Sorted day ASC then question ASC — matches the DAO/store read order.
+        // Sorted day ASC then question ASC, matches the DAO/store read order.
         XCTAssertEqual(merged.map(\.question), ["A?", "B?", "A?"])
         XCTAssertEqual(merged.map(\.day), ["2026-06-09", "2026-06-09", "2026-06-10"])
     }
@@ -59,7 +59,7 @@ final class JournalLogicTests: XCTestCase {
                 .caseInsensitiveCompare("Did you take magnesium?") == .orderedSame
         }.count
         XCTAssertEqual(magCount, 1)
-        // No net growth — both imported variants dedupe against the starter.
+        // No net growth, both imported variants dedupe against the starter.
         XCTAssertEqual(cat.count, JournalCatalogStore.starterQuestions.count)
     }
 
@@ -73,5 +73,116 @@ final class JournalLogicTests: XCTestCase {
         XCTAssertFalse(cat.contains { $0.caseInsensitiveCompare("Did you drink any alcohol?") == .orderedSame })
         XCTAssertFalse(cat.contains { $0.caseInsensitiveCompare("Did you nap?") == .orderedSame })
         XCTAssertEqual(cat.count, JournalCatalogStore.starterQuestions.count - 1)
+    }
+
+    // MARK: - v2 catalog (#322): legacy migration, rename key-stability, grouping, numeric type
+
+    func testLegacyMigrationFoldsTwoArraysIntoItems() {
+        // The one-time fold: customs become .bool/.other custom items; hidden starters become hidden
+        // marker items; a hidden custom keeps its hidden flag on the single custom item (no dupe).
+        let items = JournalCatalogStore.migrateLegacy(
+            custom: ["Did you nap?", "Vitamin D"],
+            hidden: ["Did you drink any alcohol?", "Vitamin D"])
+        // Two customs materialised, both marked custom.
+        let customs = items.filter { $0.custom }
+        XCTAssertEqual(Set(customs.map(\.canonical)), ["Did you nap?", "Vitamin D"])
+        // The hidden custom kept its flag on the SAME item (deduped by norm, not a second row).
+        let vitaminD = items.filter { JournalCatalogStore.norm($0.canonical) == JournalCatalogStore.norm("Vitamin D") }
+        XCTAssertEqual(vitaminD.count, 1, "a hidden custom must not duplicate")
+        XCTAssertTrue(vitaminD[0].hidden)
+        // The hidden starter became a hidden non-custom marker in its default group.
+        let alcohol = items.first { JournalCatalogStore.norm($0.canonical) == JournalCatalogStore.norm("Did you drink any alcohol?") }
+        XCTAssertNotNil(alcohol)
+        XCTAssertTrue(alcohol!.hidden)
+        XCTAssertFalse(alcohol!.custom)
+        XCTAssertEqual(alcohol!.group, .nutrition)
+    }
+
+    @MainActor
+    func testRenameKeepsCanonicalStableSoHistorySurvives() {
+        // THE key-stability guarantee (#322): renaming an item changes only the display label; the
+        // stored canonical (the DB/engine join key) is untouched, so all logged + imported history, 
+        // which is keyed on the canonical question string, still lines up after a rename.
+        let store = JournalCatalogStore()
+        store.items = []   // start from a clean catalog for a deterministic assertion
+        let canonical = "Did you have caffeine late in the day?"
+
+        // Before: display resolves to the canonical verbatim.
+        XCTAssertEqual(store.displayName(for: canonical), canonical)
+
+        store.rename(canonical, to: "Caffeine")
+
+        // After: the DISPLAY changed, the KEY did not.
+        XCTAssertEqual(store.displayName(for: canonical), "Caffeine")
+        let item = store.item(for: canonical)
+        XCTAssertNotNil(item)
+        XCTAssertEqual(item!.canonical, canonical,
+                       "rename must NEVER change the canonical, history is keyed on it")
+        XCTAssertEqual(item!.displayName, "Caffeine")
+
+        // A journal write / effect lookup for this behaviour still keys on the canonical, so a row
+        // logged BEFORE the rename (under the canonical) is found AFTER the rename by the same key.
+        let resolved = store.resolvedItems(imported: [], includeHidden: false)
+        let caffeine = resolved.first { $0.canonical == canonical }
+        XCTAssertEqual(caffeine?.display, "Caffeine")
+        XCTAssertEqual(caffeine?.canonical, canonical,
+                       "the engine key is preserved end to end, logged/imported days still join")
+
+        // Clearing the rename (blank) falls back to the canonical.
+        store.rename(canonical, to: "   ")
+        XCTAssertEqual(store.displayName(for: canonical), canonical)
+        XCTAssertEqual(store.item(for: canonical)?.canonical, canonical)
+    }
+
+    @MainActor
+    func testSetGroupAndKindPreserveCanonical() {
+        let store = JournalCatalogStore()
+        store.items = []
+        let canonical = "Did you take magnesium?"
+        store.setGroup(canonical, to: .supplements)
+        store.setKind(canonical, to: .numeric(unitLabel: "mg"))
+        let item = store.item(for: canonical)
+        XCTAssertEqual(item?.canonical, canonical, "regroup/retype never touch the key")
+        XCTAssertEqual(item?.group, .supplements)
+        XCTAssertTrue(item?.kind.isNumeric ?? false)
+        XCTAssertEqual(item?.kind.unitLabel, "mg")
+    }
+
+    @MainActor
+    func testResolvedItemsGroupStartersByDefaultAndDropHidden() {
+        let store = JournalCatalogStore()
+        store.items = []
+        let resolved = store.resolvedItems(imported: [], includeHidden: false)
+        // Every starter is present with a default group and .bool kind.
+        XCTAssertEqual(resolved.count, JournalCatalogStore.starterQuestions.count)
+        let alcohol = resolved.first { $0.canonical == "Did you drink any alcohol?" }
+        XCTAssertEqual(alcohol?.group, .nutrition)
+        XCTAssertFalse(alcohol?.kind.isNumeric ?? true)
+        // Hidden items are dropped unless includeHidden.
+        store.remove("Did you drink any alcohol?")
+        let afterHide = store.resolvedItems(imported: [], includeHidden: false)
+        XCTAssertFalse(afterHide.contains { $0.canonical == "Did you drink any alcohol?" })
+        let withHidden = store.resolvedItems(imported: [], includeHidden: true)
+        XCTAssertTrue(withHidden.contains { $0.canonical == "Did you drink any alcohol?" && $0.hidden })
+    }
+
+    @MainActor
+    func testAddCustomNumericItem() {
+        let store = JournalCatalogStore()
+        store.items = []
+        store.addCustom("Water (L)", kind: .numeric(unitLabel: "L"), group: .nutrition)
+        XCTAssertTrue(store.isCustom("Water (L)"))
+        let item = store.item(for: "Water (L)")
+        XCTAssertEqual(item?.group, .nutrition)
+        XCTAssertEqual(item?.kind.unitLabel, "L")
+    }
+
+    func testNumericJournalKeyIsNamespaced() {
+        // The InsightsView folds a numeric journal series under a namespaced key that can never
+        // collide with a fixed metric outcome ("recovery" / "hrv" / …).
+        let key = InsightsView.numericJournalKey("Caffeine (mg)")
+        XCTAssertTrue(key.hasPrefix("journal.numeric:"))
+        XCTAssertNotEqual(key, "recovery")
+        XCTAssertNotEqual(key, "hrv")
     }
 }

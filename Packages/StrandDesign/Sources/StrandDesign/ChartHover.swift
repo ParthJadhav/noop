@@ -1,3 +1,6 @@
+#if !os(watchOS)
+// The chart-hover toolkit (tooltips, crosshair, nearest-point) is for pointer/cursor charts the
+// watch never shows; excluded on watchOS, iOS/macOS unchanged.
 import SwiftUI
 
 // MARK: - Chart Hover Toolkit (reusable across every visualization)
@@ -237,4 +240,5 @@ struct PositionedTooltip: View {
     .background(StrandPalette.surfaceBase)
     .preferredColorScheme(.dark)
 }
+#endif
 #endif

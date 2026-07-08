@@ -68,8 +68,8 @@ struct UpdatesInboxView: View {
 
     private var subtitle: String {
         let n = updateStore.unreadCount
-        if updateStore.items.isEmpty { return "What's new in the app and your data" }
-        return n == 0 ? "All caught up" : "\(n) unread"
+        if updateStore.items.isEmpty { return String(localized: "What's new in the app and your data") }
+        return n == 0 ? String(localized: "All caught up") : String(localized: "\(n) unread")
     }
 
     // MARK: Content

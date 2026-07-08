@@ -6,7 +6,7 @@ import SwiftUI
 // Apple-Weather restraint dialled WAY down: every atmosphere layer sits at opacity <= 0.16,
 // painted OVER the WHOOP `surfaceBase` canvas so screens stay dark, flat and clean.
 //
-// HARD RULES honoured here (Aaron, standing):
+// HARD RULES honoured here (standing):
 //  - NO GLOW. No bloom, no blur halos, no neon. The sun/moon are plain filled `Circle`s at
 //    very low opacity; stars are tiny crisp dots. Beauty = restraint, spacing, type, motion.
 //  - TOKENS first (`StrandPalette`). The only literal hexes are the few subtle atmosphere

@@ -4,6 +4,7 @@ import android.app.Application
 import android.util.Log
 import com.noop.ble.SourceCoordinator
 import com.noop.ble.WhoopBleClient
+import com.noop.ble.WhoopModel
 import com.noop.data.DeviceRegistry
 import com.noop.data.WhoopDatabase
 import com.noop.data.WhoopRepository
@@ -84,7 +85,12 @@ class NoopApplication : Application() {
             registry = deviceRegistry,
             repository = repository,
             liveSink = { hr, rr -> ble.publishExternalLiveHr(hr, rr) },
-            startWhoop = { ble.connect() },
+            // #74: reconnect on the PERSISTED family, not the WhoopModel.WHOOP4 default - otherwise a
+            // 5/MG WHOOP->WHOOP switch rescans the wrong service and misses the 5/MG direct-bond fast
+            // path (status=133 on an OS-bonded strap). Mirrors macOS AppModel.scan() reading the persisted
+            // "selectedWhoopModel". Same-strap switches now adopt in place (no reconnect) via the
+            // coordinator, so this only fires for a genuinely different WHOOP.
+            startWhoop = { ble.connect(persistedWhoopModel()) },
             stopWhoop = { ble.disconnect() },
             // Multi-WHOOP (MW-2/MW-3): pin the connection to the active WHOOP's persisted address and
             // re-attribute live samples to it on a WHOOP→WHOOP switch. Both inert on the single-WHOOP
@@ -98,4 +104,13 @@ class NoopApplication : Application() {
             batterySink = { pct -> ble.publishExternalBattery(pct) },
         )
     }
+
+    /** The WHOOP family last seen advertising, persisted by [WhoopBleClient.persistSelectedModel] under
+     *  "noop.selectedWhoopModel" in the shared noop_prefs store. Defaults to [WhoopModel.WHOOP4] when
+     *  unset or unparseable (the historical connect() default), so a fresh install is unchanged. Used to
+     *  reconnect on the right service after a WHOOP->WHOOP switch (#74). */
+    private fun persistedWhoopModel(): WhoopModel =
+        NoopPrefs.of(this).getString("noop.selectedWhoopModel", null)
+            ?.let { runCatching { WhoopModel.valueOf(it) }.getOrNull() }
+            ?: WhoopModel.WHOOP4
 }

@@ -11,8 +11,12 @@ enum XiaomiImporter {
     /// Per-source partition key (mirrors `"my-whoop"` / `"apple-health"`).
     static let deviceId = "xiaomi-band"
 
+    /// The Mi Fitness mapping revision, stamped into the Import test-mode parser line.
+    static let importerVersion = 1
+
     @discardableResult
-    static func importExport(url: URL, into store: WhoopStore, deviceId: String = deviceId) async throws -> ImportSummary {
+    static func importExport(url: URL, into store: WhoopStore, deviceId: String = deviceId,
+                             trace: (@Sendable ([String]) -> Void)? = nil) async throws -> ImportSummary {
         let result = try ImportCoordinator().importXiaomiBand(from: url)
 
         // Day rollups → DailyMetric. The Mi Fitness export has no HRV / recovery /
@@ -36,7 +40,8 @@ enum XiaomiImporter {
                 skinTempDevC: nil,
                 respRateBpm: nil))
         }
-        try await store.upsertDailyMetrics(metrics, deviceId: deviceId)
+        // Capture the rows the store actually wrote (summed SQLite changes) for the Import test mode.
+        let metricsWritten = try await store.upsertDailyMetrics(metrics, deviceId: deviceId)
 
         // Sleep sessions → CachedSleepSession with the band's actual hypnogram.
         var sessions: [CachedSleepSession] = []
@@ -58,7 +63,7 @@ enum XiaomiImporter {
                 avgHrv: nil,
                 stagesJSON: json))
         }
-        try await store.upsertSleepSessions(sessions, deviceId: deviceId)
+        let sessionsWritten = try await store.upsertSleepSessions(sessions, deviceId: deviceId)
 
         // Generic metric series — every scalar keyed, for the Metric Explorer + correlations.
         var points: [MetricPoint] = []
@@ -85,6 +90,22 @@ enum XiaomiImporter {
             add(d.day, "sleep_score", d.sleepScore.map(Double.init))
         }
         try await store.upsertMetricSeries(points, deviceId: deviceId)
+
+        // Import & Data Ingest test mode: emit the per-stage / reject / day-delta trace iff the mode is on.
+        // The numbers are the import's own parsed + persisted counts, so emission changes nothing saved.
+        if let trace {
+            let daysMapped = Set(metrics.map { $0.day }).count
+            let lines: [String] = [
+                ImportTrace.parserVersionLine(sourceKind: .xiaomiBand, importerVersion: importerVersion),
+                ImportTrace.stageLine(category: "days", rowsIn: metrics.count, rowsOut: metricsWritten),
+                ImportTrace.stageLine(category: "sleeps", rowsIn: sessions.count, rowsOut: sessionsWritten),
+                // The Mi Fitness rollups already drop unusable rows upstream in StrandImport; the app map
+                // keeps every day/sleep, so the only reject signal at this seam is the day-delta below.
+                ImportTrace.rejectLine(droppedRows: 0, skippedSpans: result.summary.skippedSpans),
+                ImportTrace.dayDeltaLine(category: "days", daysMapped: daysMapped, daysPersisted: metricsWritten),
+            ]
+            trace(lines)
+        }
 
         return result.summary
     }

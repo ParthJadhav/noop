@@ -1,5 +1,7 @@
 import Foundation
 import Combine
+import StrandAnalytics
+import WhoopProtocol
 
 /// Observable snapshot of the live connection + biometric state, driven by FrameRouter
 /// (from decoded frames) and BLEManager (from CoreBluetooth callbacks).
@@ -21,6 +23,14 @@ public final class LiveState: ObservableObject {
     /// connect/disconnect. Drives the Live pill's two-state distinction; the encrypted channel (buzz,
     /// alarm, double-tap, history offload) only works when this is true.
     @Published public var encryptedBond: Bool = false
+    /// True ONLY when a non-WHOOP live source (currently the Oura ring) is actively streaming live HR.
+    /// This is the green "STREAMING" signal for sources that have no WHOOP-style encrypted bond: it is
+    /// DELIBERATELY separate from `bonded`, which carries WHOOP encrypted-bond + buzz semantics (it gates
+    /// haptics in AppModel / BreathingView) and must not be set by the Oura path. The menu-bar pill reads
+    /// this to show STREAMING for a live ring while leaving the WHOOP bonded logic untouched. The owning
+    /// source sets it true in its streaming branch and false at every teardown (stop / needs-pairing /
+    /// radio-off / connect-fail / disconnect). Twin of the Android LiveState.streamingLiveHR.
+    @Published public var streamingLiveHR: Bool = false
     @Published public var heartRate: Int? = nil
     /// Whether the heavy R10/R11 realtime burst is currently armed (the "live feed"). Tracks the
     /// realtime INTENT (startRealtime/stopRealtime), NOT `heartRate` — the lightweight 0x2A37 profile
@@ -42,12 +52,155 @@ public final class LiveState: ObservableObject {
     /// first event of a session; cleared on disconnect so a stale flag can't outlive the link.
     /// Flag ONLY — the battery % keeps its family-specific source (#77).
     @Published public var charging: Bool? = nil
+
+    // MARK: - Battery runtime estimate (#713)
+
+    /// Rolling buffer of `(unix-seconds, SoC%)` battery readings banked from the live link, the twin of
+    /// `rrRecent` for the battery series. `setBattery` appends each reading (with a small dedupe so a
+    /// repeated identical % at a near-identical time doesn't pad the buffer), and `batteryEstimate` fits
+    /// the recent discharge slope over it. Capped + bounded so it can't grow without limit; cleared on
+    /// disconnect so a stale estimate can't outlive the link.
+    @Published public private(set) var batterySamples: [(ts: Int, soc: Double)] = []
+    /// Cap on the SoC buffer. Battery events arrive only every ~8 minutes, so a few hundred readings
+    /// already spans a couple of days, plenty to fit a discharge slope against.
+    static let maxBatterySamples = 400
+
+    // MARK: - Sleep & Rest test-mode live readout (Group E)
+
+    /// Rolling buffer of recent live HR samples, banked ONLY while the Sleep test mode is active so the
+    /// Test Centre readout can show live HR density (samples/min) the detector sees. Appended via
+    /// `recordSleepLiveSample` from the central live-HR ingest; empty (no work, no allocation) when the
+    /// mode is off. Capped + bounded; cleared on disconnect with the rest of the live biometrics.
+    @Published public private(set) var recentHrSamples: [HRSample] = []
+    /// Rolling buffer of recent live gravity samples, banked ONLY while the Sleep test mode is active so
+    /// the readout can show live gravity coverage. The twin of `recentHrSamples`.
+    @Published public private(set) var recentGravitySamples: [GravitySample] = []
+    /// Cap on each live-readout buffer. ~30 min of 1 Hz live HR is plenty to read a density/coverage
+    /// snapshot; bounded so an active test mode can never grow it without limit.
+    static let maxSleepReadoutSamples = 2000
+
+    /// Bank one live HR sample for the Sleep readout. Side-effect-only; the caller already gated on
+    /// `TestCentre.active(.sleep)`, so this does NO work when the mode is off (it is simply not called).
+    public func recordSleepLiveHr(ts: Int, bpm: Int) {
+        recentHrSamples.append(HRSample(ts: ts, bpm: bpm))
+        if recentHrSamples.count > Self.maxSleepReadoutSamples {
+            recentHrSamples.removeFirst(recentHrSamples.count - Self.maxSleepReadoutSamples)
+        }
+    }
+
+    /// Bank live gravity samples for the Sleep readout. Caller-gated on `TestCentre.active(.sleep)`.
+    public func recordSleepLiveGravity(_ samples: [GravitySample]) {
+        guard !samples.isEmpty else { return }
+        recentGravitySamples.append(contentsOf: samples)
+        if recentGravitySamples.count > Self.maxSleepReadoutSamples {
+            recentGravitySamples.removeFirst(recentGravitySamples.count - Self.maxSleepReadoutSamples)
+        }
+    }
+
+    /// The strap's typical full-charge life in hours, chosen by generation, used as the cold-start
+    /// fallback before enough of the user's own discharge is banked. The today lane / coordinator sets
+    /// this from the connected `WhoopModel` (WHOOP 4.0 vs 5.0/MG); it defaults to the WHOOP 4.0 figure so
+    /// an estimate is sensible before the strap generation is known.
+    @Published public var batteryRatedHours: Double = BatteryEstimator.ratedLifeHoursWhoop4
+
+    /// "~X days left" runtime estimate for the connected strap, computed from the banked SoC samples and
+    /// `batteryRatedHours`. nil until there's at least one reading. The Today badge reads this.
+    public var batteryEstimate: BatteryEstimator.Estimate? {
+        BatteryEstimator.estimate(samples: batterySamples, ratedHours: batteryRatedHours)
+    }
+
+    /// The discharge-run / fitted-slope / gate trace for the banked SoC series (#713, Test Centre Battery
+    /// mode). Pure: delegates to BatteryEstimator.estimateTrace, which returns the SAME Estimate as
+    /// batteryEstimate plus the trace lines, so reading this never changes any displayed number.
+    public var batteryEstimateTraceLines: [String] {
+        BatteryEstimator.estimateTrace(samples: batterySamples, ratedHours: batteryRatedHours).trace
+    }
+
+    /// Emit the discharge-run / slope / gate trace once, tagged .battery, when the Battery test mode is on.
+    /// The readout / Today lane calls this on each refresh; it is a no-op (zero cost) when the mode is off.
+    public func emitBatteryTrace() {
+        guard TestCentre.active(.battery) else { return }
+        for line in batteryEstimateTraceLines { append(log: line, domain: .battery) }
+    }
+
+    /// Resolve one of the Battery mode's liveReadout ids ("currentSoc" / "estimateDaysLeft" /
+    /// "slopeSource") to a short display string the Test Centre Battery panel binds to. Returns "--" when
+    /// there is no estimate yet or the id is unknown. Reads the SAME values the Today badge shows, so the
+    /// readout never diverges from the headline number.
+    public func batteryReadout(_ id: String) -> String {
+        guard let e = batteryEstimate else { return "--" }
+        switch id {
+        case "currentSoc":       return "\(Int(e.currentSoc.rounded()))%"
+        case "estimateDaysLeft": return BatteryEstimator.label(hours: e.remainingHours)
+        case "slopeSource":      return e.source.rawValue
+        default:                 return "--"
+        }
+    }
+
+    // MARK: - Strap clock-drift snapshot (universal export self-diagnostic, RTC cluster #531/#767/#804/#812)
+
+    /// The strap's last-decoded banked-record window + firmware layout, banked from the GET_DATA_RANGE reply
+    /// and the offload's hist_version. It is what the export assembler turns into the UNIVERSAL clock-drift
+    /// line that rides EVERY Test Centre export (UniversalTrace.clockDriftLine), so a clock-broken strap
+    /// self-diagnoses on a Sleep / Battery / any-mode report, not only when the Connection mode is on. Set
+    /// unconditionally (it is observability, not gated) and cleared on disconnect so a stale window can't
+    /// outlive the link. nil until the strap first reports its range this session.
+    public struct StrapRange: Equatable, Sendable {
+        public var newestUnix: Int
+        public var oldestUnix: Int?
+        public var firmwareLayout: Int?
+        public init(newestUnix: Int, oldestUnix: Int? = nil, firmwareLayout: Int? = nil) {
+            self.newestUnix = newestUnix; self.oldestUnix = oldestUnix; self.firmwareLayout = firmwareLayout
+        }
+    }
+    @Published public private(set) var strapRange: StrapRange?
+
+    /// Bank the strap's reported banked-record window (from GET_DATA_RANGE). Additive observability: the
+    /// universal clock-drift export line reads this. `oldest` keeps the previously-known value when this
+    /// reply carries only the upper bound, so a half/short range reply never clears a good lower bound.
+    public func setStrapRange(newestUnix: Int, oldestUnix: Int?) {
+        let firmware = strapRange?.firmwareLayout
+        let oldest = oldestUnix ?? strapRange?.oldestUnix
+        strapRange = StrapRange(newestUnix: newestUnix, oldestUnix: oldest, firmwareLayout: firmware)
+    }
+
+    /// Bank the historical record-layout version (hist_version: 18/24/25/26) the strap emits, so the
+    /// universal clock-drift line is firmware-aware even before a fresh range reply lands. Keeps the
+    /// already-known window; a nil range (firmware seen before any range) stores a firmware-only snapshot.
+    public func setStrapFirmwareLayout(_ version: Int) {
+        if let r = strapRange {
+            strapRange = StrapRange(newestUnix: r.newestUnix, oldestUnix: r.oldestUnix, firmwareLayout: version)
+        } else {
+            strapRange = StrapRange(newestUnix: 0, oldestUnix: nil, firmwareLayout: version)
+        }
+    }
+
+    /// Drop the strap-range snapshot (called on disconnect with the other live clears) so a stale clock-drift
+    /// window can't outlive the link.
+    public func clearStrapRange() { strapRange = nil }
+
     @Published public var lastFrameType: String? = nil
     @Published public var lastEvent: String? = nil
+    /// #987: unix of the most recent strap frame FrameRouter routed. Deliberately NOT @Published - the
+    /// raw flood arrives per-notification and a published write per frame would re-render every observer
+    /// at frame rate (the exact churn the lastFrameType change-guard exists to avoid). The Test Centre
+    /// Connection readout reads it on its own render cadence, which is plenty for a freshness label.
+    /// Cleared with the other live readouts in clearBiometrics so it can't outlive the link.
+    public private(set) var lastFrameAtUnix: Int?
+
+    /// Stamp the last-frame instant (#987). One plain Int write per routed frame; called by FrameRouter
+    /// after the CRC guard so bad bytes never count as liveness.
+    public func noteFrameRouted(now: Int = Int(Date().timeIntervalSince1970)) { lastFrameAtUnix = now }
     /// The strap's BLE advertising name, read back from firmware via GET_ADVERTISING_NAME_HARVARD
     /// (cmd 76 — sent in the connect handshake, parsed by FrameRouter). nil until the first reply.
     /// WHOOP 4.0 only; the rename control in Settings shows this as the strap's current name.
     @Published public var advertisingName: String? = nil
+    /// The connected strap's firmware version, read during the connect handshake: WHOOP 4.0 via
+    /// REPORT_VERSION_INFO (`fw_harvard`), WHOOP 5/MG via GET_HELLO (`fw_version`). FrameRouter
+    /// publishes it; the Devices card shows it next to battery. nil until the reply lands, and
+    /// cleared on disconnect so a stale version can't outlive the link. Twin of the Android
+    /// LiveState.strapFirmware.
+    @Published public var strapFirmware: String? = nil
     /// Transient, human-readable result of the most recent strap-rename attempt — the
     /// SET_ADVERTISING_NAME_HARVARD ack, or a local validation message from BLEManager.renameStrap.
     /// Surfaced under the rename field; overwritten by the next attempt.
@@ -220,7 +373,58 @@ public final class LiveState: ObservableObject {
     /// so both write sites (FrameRouter, BLEManager) drive the alert monitor identically.
     public func setBattery(_ pct: Double) {
         batteryPct = pct
+        bankBatterySample(pct)
         onBatteryUpdate?(pct)
+    }
+
+    /// Append a SoC reading to the rolling `batterySamples` buffer for the runtime estimate (#713). The
+    /// strap emits battery events every ~8 minutes, so we skip a reading that's the SAME % as the last one
+    /// within ten minutes (a duplicate event, not new discharge information) to keep the slope fit clean;
+    /// any change in %, or enough elapsed time, banks a fresh point. The oldest readings fall off once the
+    /// buffer is full. `now` is injectable so the estimate is unit-testable without a live clock.
+    func bankBatterySample(_ pct: Double, now: Int = Int(Date().timeIntervalSince1970)) {
+        if let last = batterySamples.last, last.soc == pct, now - last.ts < 600 { return }
+        batterySamples.append((ts: now, soc: pct))
+        if batterySamples.count > Self.maxBatterySamples {
+            batterySamples.removeFirst(batterySamples.count - Self.maxBatterySamples)
+        }
+        // Battery test mode: one tagged (t, soc) line per banked reading, gated zero-cost when off (the
+        // gate is one UserDefaults bool read, and the string below is only built when the mode is on).
+        // Rides the redacting sink; the banked SoC series is the readout + trace source (#713, Test Centre).
+        if TestCentre.active(.battery) {
+            append(log: "bank soc=\(String(format: "%.1f", pct)) t=\(now)s", domain: .battery)
+            // Also emit the discharge-run / slope / gate ANALYSIS trace, once per banked reading. The strap
+            // banks at most one SoC point every ~8 minutes (the dedup above), so this is a natural throttle,
+            // never a tight loop. emitBatteryTrace re-checks the same gate and is pure (it reads batteryEstimate,
+            // changing no displayed number), so the headline "~X left" badge is unaffected. (#713, Test Centre.)
+            emitBatteryTrace()
+        }
+    }
+
+    /// Seed the SoC buffer from the persisted battery table on connect/bootstrap (#7). `batterySamples` is
+    /// otherwise fed ONLY by live BLE events (`bankBatterySample`), so after a reconnect the "~X days left"
+    /// estimate restarted from an empty buffer and ignored the long discharge history already on disk.
+    /// Android seeds from its persisted battery table over a 14-day window; iOS/macOS did not, so the two
+    /// platforms diverged. The BLEManager bootstrap path does one async read of the persisted series and
+    /// passes it here. De-dupes against any points already banked from live events this session (by ts) so a
+    /// seed that races a couple of live readings can't double-count them, then re-sorts and caps the buffer.
+    /// Only banks the historical points that aren't already present, so calling it twice is idempotent.
+    public func seedBatterySamples(_ seed: [(ts: Int, soc: Double)]) {
+        guard !seed.isEmpty else { return }
+        let existing = Set(batterySamples.map { $0.ts })
+        let fresh = seed.filter { !existing.contains($0.ts) }
+        guard !fresh.isEmpty else { return }
+        batterySamples.append(contentsOf: fresh)
+        batterySamples.sort { $0.ts < $1.ts }
+        if batterySamples.count > Self.maxBatterySamples {
+            batterySamples.removeFirst(batterySamples.count - Self.maxBatterySamples)
+        }
+    }
+
+    /// Drop the banked SoC buffer (called on disconnect) so a stale runtime estimate can't outlive the
+    /// link, the twin of the `charging = nil` clear on the same path.
+    public func clearBatterySamples() {
+        batterySamples.removeAll()
     }
 
     /// Single funnel for R-R intervals from EITHER source (the standard 0x2A37 profile in BLEManager,
@@ -245,6 +449,11 @@ public final class LiveState: ObservableObject {
         heartRate = nil
         rr.removeAll()
         rrRecent.removeAll()
+        clearBatterySamples()   // a stale runtime estimate must not outlive the link either (#713)
+        recentHrSamples.removeAll()       // Sleep readout buffers must not outlive the link (Group E)
+        recentGravitySamples.removeAll()
+        clearStrapRange()                 // a stale clock-drift window must not outlive the link either
+        lastFrameAtUnix = nil             // #987: a stale "last frame" freshness must not outlive it either
     }
 
     /// Cap on the in-app strap-log ring buffer. Raised from the old ~1h (200 lines) to retain a rolling
@@ -254,10 +463,30 @@ public final class LiveState: ObservableObject {
     /// unbounded. Drives the Live log card AND the shareable `exportableLogText()`.
     static let maxLogLines = 5_000
 
-    public func append(log line: String) {
-        log.append(Self.redactPii(line))
+    public func append(log line: String, domain: TestDomain? = nil) {
+        // Tag inert when nil (today's behaviour, byte-identical). When tagged, prefix a compact,
+        // parseable marker the export filters on. Redaction is STILL the only scrub point
+        // (redactPii below); tagging happens BEFORE redaction so the scrub covers the whole line.
+        let tagged = domain.map { "[\($0.id)] " + line } ?? line
+        log.append(Self.redactPii(tagged))
         if log.count > Self.maxLogLines { log.removeFirst(log.count - Self.maxLogLines) }
         Self.persistTail(log)
+        // #990: fold the Backfiller's per-session "session persisted N rows" summary into the persisted
+        // ALL-TIME drained-rows tally, right here at the single log sink (no new BLE seam). The summary
+        // is emitted unconditionally whenever rows landed (#150), so the cumulative counter accrues on
+        // every session, not only while the Connection test mode is on. The contains() pre-check keeps
+        // the common per-line cost to one substring scan.
+        if line.contains("session persisted"), let rows = ConnectionReadout.drainedRowsFromSummary(line) {
+            TestCentre.noteDrainedRows(rows)
+        }
+    }
+
+    /// The in-app log lines tagged for one test domain (for the Test Centre live readout). Read-only,
+    /// no side effects; the prefix is the same one `append(log:domain:)` writes, and redaction never
+    /// strips it (the tag is prepended before the scrub, which only touches identifiers). (Group E)
+    public func taggedTail(domain: TestDomain) -> [String] {
+        let prefix = "[\(domain.id)] "
+        return log.filter { $0.hasPrefix(prefix) }
     }
 
     // MARK: - Durable log tail (#510, scheduled debug export)
@@ -316,7 +545,7 @@ public final class LiveState: ObservableObject {
     /// service base (…-8d6d-82b8-614a-1c8cb0f8dcc6) — those are public, identical on every strap, and
     /// are exactly the GATT diagnostics a shared log needs to be useful (#421). Thanks @ujix (#447) for
     /// catching the peripheral-UUID leak; this is a targeted form so we don't redact the service UUIDs.
-    static func redactPii(_ s: String) -> String {
+    nonisolated static func redactPii(_ s: String) -> String {
         var out = s
         out = out.replacingOccurrences(
             of: "([0-9A-Fa-f]{2}):[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:([0-9A-Fa-f]{2})",
@@ -341,7 +570,7 @@ public final class LiveState: ObservableObject {
         #else
         let osName = "macOS"
         #endif
-        var header = "NOOP strap log — \(osName)\nApp: \(v)\n\(osName): "
+        var header = "NOOP strap log - \(osName)\nApp: \(v)\n\(osName): "
             + ProcessInfo.processInfo.operatingSystemVersionString + "\n"
         #if os(iOS)
         let diagLines = IOSDiagnostics.capture().summaryLines()

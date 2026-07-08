@@ -32,16 +32,16 @@ enum KeyMetric: String, CaseIterable, Identifiable {
     /// The tile's display label — matches the `StatTile(label:)` text rendered on the grid.
     var title: String {
         switch self {
-        case .charge:      return "Charge"
-        case .effort:      return "Effort"
-        case .rest:        return "Rest"
+        case .charge:      return String(localized: "Charge")
+        case .effort:      return String(localized: "Effort")
+        case .rest:        return String(localized: "Rest")
         case .hrv:         return "HRV"
-        case .restingHr:   return "Resting HR"
-        case .bloodOxygen: return "Blood Oxygen"
-        case .respiratory: return "Respiratory"
-        case .steps:       return "Steps"
-        case .weight:      return "Weight"
-        case .calories:    return "Calories"
+        case .restingHr:   return String(localized: "Resting HR")
+        case .bloodOxygen: return String(localized: "Blood Oxygen")
+        case .respiratory: return String(localized: "Respiratory")
+        case .steps:       return String(localized: "Steps")
+        case .weight:      return String(localized: "Weight")
+        case .calories:    return String(localized: "Calories")
         }
     }
 

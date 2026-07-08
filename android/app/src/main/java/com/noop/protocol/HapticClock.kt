@@ -28,11 +28,15 @@ object HapticClock {
     }
 
     // Pulse + gap timing (ms). Kept in lock-step with HapticClock.swift — change both together.
-    const val LONG_MS = 500        // a "tens" pulse
-    const val SHORT_MS = 150       // a "units" pulse
-    const val INTRA_GAP_MS = 250   // silence between two pulses inside one digit group
-    const val GROUP_GAP_MS = 700   // silence between adjacent digit groups
-    const val BLOCK_GAP_MS = 1200  // silence between the hour block and the minute block
+    // #981: the buzz itself is a fixed hardware pattern, so durationMs+gapMs is only the start-to-start
+    // SPACING between buzzes. The old 250ms intra-gap left near-zero silence between unit taps, so they
+    // blended on the wrist and were "almost impossible to distinguish". Widened gaps (intra-gap most of
+    // all) give clear silence between taps and between digit groups while keeping the sequence practical.
+    const val LONG_MS = 550        // a "tens" pulse
+    const val SHORT_MS = 200       // a "units" pulse
+    const val INTRA_GAP_MS = 450   // silence between two pulses inside one digit group
+    const val GROUP_GAP_MS = 900   // silence between adjacent digit groups
+    const val BLOCK_GAP_MS = 1500  // silence between the hour block and the minute block
 
     /**
      * Encode [hour]:[minute] into the buzz schedule.

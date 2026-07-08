@@ -63,6 +63,30 @@ public enum StepsEstimateEngine {
         }
     }
 
+    /// A coarse confidence tier for the auto-fit, for a one-word badge on the steps tile/Settings. Derived
+    /// from the engine's 0–1 confidence by fixed thresholds so iOS + Android show the SAME word. A manual `k`
+    /// is reported as `.high` (the user asserted it). (#760/#792)
+    public enum ConfidenceTier: String, Equatable {
+        case low, medium, high
+
+        /// 0–1 confidence → tier. < 0.34 low, < 0.67 medium, else high. Thresholds are byte-identical to
+        /// the Kotlin twin so the badge never disagrees across platforms.
+        public static func from(_ confidence: Double) -> ConfidenceTier {
+            if confidence < 0.34 { return .low }
+            if confidence < 0.67 { return .medium }
+            return .high
+        }
+
+        /// The badge word the tile/Settings renders. US-neutral, no em-dashes.
+        public var word: String {
+            switch self {
+            case .low: return "low confidence"
+            case .medium: return "medium confidence"
+            case .high: return "high confidence"
+            }
+        }
+    }
+
     /// A readable read-out of the calibration state, for the Today steps tile and the Settings section.
     /// Pure value type (no UI strings beyond a single short status line) so both surfaces stay in step.
     public enum CalibrationStatus: Equatable {
@@ -96,6 +120,48 @@ public enum StepsEstimateEngine {
                 return "Need \(more) more day\(more == 1 ? "" : "s") where your phone also counted steps"
             }
         }
+
+        /// The confidence tier for the steps estimate. `.calibrated` maps its 0–1 confidence; a manual `k`
+        /// is `.high` (asserted by the user); a not-yet-calibrated state is `.low`. (#760/#792)
+        public var confidenceTier: ConfidenceTier {
+            switch self {
+            case .manual: return .high
+            case let .calibrated(_, _, confidence): return ConfidenceTier.from(confidence)
+            case .needsMoreDays: return .low
+            }
+        }
+
+        /// The personal coefficient `k` (steps per unit of motion) currently in force, or nil when none is
+        /// fit/set yet. Surfaced so a WHOOP 4.0 user can see WHY their steps read the way they do. (#760/#792)
+        public var coefficient: Double? {
+            switch self {
+            case let .manual(k, _): return k
+            case let .calibrated(k, _, _): return k
+            case .needsMoreDays: return nil
+            }
+        }
+
+        /// A second, denser status line (the headline carries the plain-English summary; this carries the
+        /// numbers): the confidence tier plus, when calibrated/manual, `k` and the day count, so a frozen or
+        /// dashed steps tile self-explains ("k=12.3 from 6 days, medium confidence" vs "calibrating: 1/3 days").
+        /// Pure, no em-dashes; identical wording cross-platform. (#760/#792)
+        public var detail: String {
+            switch self {
+            case let .manual(k, _):
+                return "manual k=\(StepsEstimateEngine.formatK(k))"
+            case let .calibrated(k, sampleDays, confidence):
+                let tier = ConfidenceTier.from(confidence)
+                return "k=\(StepsEstimateEngine.formatK(k)) from \(sampleDays) day\(sampleDays == 1 ? "" : "s"), \(tier.word)"
+            case let .needsMoreDays(have, need):
+                return "calibrating: \(Swift.min(have, need))/\(need) days"
+            }
+        }
+    }
+
+    /// Format the steps coefficient `k` to one decimal place for the status line (US-neutral, locale-free so
+    /// iOS + Android match byte-for-byte). (#760/#792)
+    static func formatK(_ k: Double) -> String {
+        String(format: "%.1f", k)
     }
 
     /// Classify the current calibration state from the same inputs `calibrate(_:manualOverride:)` sees,

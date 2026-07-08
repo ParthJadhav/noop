@@ -197,6 +197,13 @@ public func extractHistoricalStreams(_ parsed: [ParsedFrame],
                 // activity_class@63 (0=still/1=walk/2=run) rides on the same record — nil when invalid/absent.
                 out.steps.append(StepSample(ts: ts, counter: c, activityClass: p["activity_class"]?.intValue))
             }
+            // Band sleep_state (#175): the strap's OWN @81 high-nibble state (0 wake/1 still/2 asleep/3 up),
+            // decoded but DROPPED here until now, so the whole band-state chain (persist → the H7 re-onset
+            // confirm guard → Deep Timeline track) had no source. Carried VERBATIM including 0 (a real wake
+            // reading, not "absent"): only 5/MG v18 records emit the key, so a WHOOP 4.0 simply adds nothing.
+            if let st = p["sleep_state"]?.intValue {
+                out.sleepState.append(SleepStateSample(ts: ts, state: st))
+            }
             if let raw = p["resp_rate_raw"]?.intValue {
                 out.resp.append(RespSample(ts: ts, raw: raw))
             }

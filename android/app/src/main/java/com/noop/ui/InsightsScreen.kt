@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.compose.foundation.border
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -63,7 +64,7 @@ import kotlin.math.sqrt
 // The "interrogate what affects what" screen, ported from the macOS InsightsView.
 // Two halves:
 //
-//  1. BEHAVIOUR EFFECTS — split logged journal answers (the days each behaviour WAS
+//  1. BEHAVIOUR EFFECTS, split logged journal answers (the days each behaviour WAS
 //     logged "yes" vs NOT) and compare a chosen outcome metric (Charge / HRV /
 //     Rest / RHR) between the two groups. Ranked by effect size (Cohen's d), with
 //     significant effects first. Each card carries a plain-English sentence, the
@@ -71,7 +72,7 @@ import kotlin.math.sqrt
 //     Tint is sign-aware: a behaviour that moves the outcome the "good" way (respecting
 //     higherIsBetter) reads positive/green, the "bad" way reads critical/red.
 //
-//  2. METRIC RELATIONSHIPS — a curated set of Pearson correlations between daily series
+//  2. METRIC RELATIONSHIPS, a curated set of Pearson correlations between daily series
 //     (HRV ↔ charge, rest ↔ charge, RHR ↔ charge, charge → next-day charge),
 //     each rendered as a one-line insight with r and a plain-English reading.
 //
@@ -91,7 +92,7 @@ private enum class Outcome(
     val label: String,
     val outcomeName: String,
     val higherIsBetter: Boolean,
-    /** The Bevel colour world the outcome belongs to — drives the card wash so the
+    /** The Bevel colour world the outcome belongs to, drives the card wash so the
      *  Behaviour Effects section sits in one world (Charge→green, HRV/Rest→indigo,
      *  RHR→Stress teal), mirroring the Swift Outcome.domain. */
     val domain: DomainTheme,
@@ -130,7 +131,7 @@ private data class BehaviorEffect(
 ) {
     val delta: Double get() = meanWith - meanWithout
     /** Crude significance: a non-trivial effect with enough days on both sides.
-     *  Honest stand-in for a t-test — |d| ≥ 0.5 ("moderate") with ≥3 days each side. */
+     *  Honest stand-in for a t-test, |d| ≥ 0.5 ("moderate") with ≥3 days each side. */
     val significant: Boolean get() = abs(cohensD) >= 0.5 && nWith >= 3 && nWithout >= 3
 }
 
@@ -154,12 +155,19 @@ private data class InsightModel(
     val outcomeByDay: Map<Outcome, Map<String, Double>>,
     /** ordered (day, value) per outcome for correlations. */
     val seriesByOutcome: Map<Outcome, List<Pair<String, Double>>>,
+    /**
+     * #322: numeric journal item (question) → [day: value]. A numeric series is the same
+     * Map<String, Double> shape EffectRanker.rank's `outcomeByDay` takes, so a numeric journal item
+     * ("caffeine mg", "alcohol units") is a first-class series the ranker can consume like any metric
+     * outcome (dose-response lands in the v5 hub). Empty for a yes/no-only journal.
+     */
+    val numericJournalSeries: Map<String, Map<String, Double>> = emptyMap(),
 )
 
 // MARK: - Screen
 
 /**
- * Insights — behaviour effects + metric relationships over cached history.
+ * Insights, behaviour effects + metric relationships over cached history.
  *
  * Loads the journal (all days) and the per-day outcome series from `vm.recentDays`,
  * then presents the ranked behaviour effects for the selected outcome and the curated
@@ -174,30 +182,66 @@ fun InsightsScreen(vm: AppViewModel, onOpenInsightsHub: () -> Unit = {}) {
     // rows (native wins per (day, question)). Keyed on journalSeq so the logging card's saves and
     // clears refresh the effects immediately; re-loaded too when the cached days change underneath.
     var behaviours by remember { mutableStateOf<Map<String, Set<String>>>(emptyMap()) }
+    // #322: numeric journal item (question) -> [day: value]. A numeric journal series is a daily series
+    // the effect ranker consumes exactly like a metric series (EffectRanker.effect already takes a
+    // Map<String, Double> outcome), so "caffeine mg" / "alcohol units" can rank as a numeric outcome.
+    var numericJournalSeries by remember { mutableStateOf<Map<String, Map<String, Double>>>(emptyMap()) }
     var journalLoaded by remember { mutableStateOf(false) }
     var journalSeq by remember { mutableStateOf(0) }
     var dayOffset by remember { mutableStateOf(0L) }
     var importedQuestions by remember { mutableStateOf<List<String>>(emptyList()) }
     var dayAnswers by remember { mutableStateOf<Map<String, Boolean>>(emptyMap()) }
+    // #322: the selected day's native numeric values (question -> value), drives the numeric fields.
+    var dayNumeric by remember { mutableStateOf<Map<String, Double>>(emptyMap()) }
     var preFilledFromYesterday by remember { mutableStateOf(false) }
     val ctx = androidx.compose.ui.platform.LocalContext.current
     val scope = androidx.compose.runtime.rememberCoroutineScope()
-    var customQuestions by remember { mutableStateOf(loadCustomJournalQuestions(ctx)) }
-    var hiddenQuestions by remember { mutableStateOf(loadHiddenJournalQuestions(ctx)) }
+    // #322: the v2 catalog (rename + numeric type + group + order), folding the legacy custom/hidden
+    // arrays on first run. Held in state so edits (rename/regroup/convert/add/remove) recompose.
+    var catalogItems by remember { mutableStateOf(loadJournalCatalogItems(ctx)) }
 
-    androidx.compose.runtime.LaunchedEffect(journalSeq, dayOffset) {
+    // #860 item 4: today's local calendar-day key. The journal day chips ("Today"/"Yesterday"/"Tomorrow")
+    // are relative to the CURRENT date, but the answers (`dayAnswers`) and the resolved key are derived from
+    // `LocalDate.now()` only inside the load effect below, which re-keys on `journalSeq`/`dayOffset`. A day
+    // can pass with the screen alive and no save (the app simply backgrounded overnight), leaving the
+    // previous day's answers pinned under "Today" instead of the new day starting blank. We re-stamp this on
+    // every lifecycle RESUME, and fold it into the load effect's keys, so the moment the date rolls over the
+    // journal reloads for the new day and prior answers move to their real date. iOS parity in InsightsView.
+    var currentDayKey by remember { mutableStateOf(LocalDate.now().toString()) }
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                val key = LocalDate.now().toString()
+                if (key != currentDayKey) currentDayKey = key
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    androidx.compose.runtime.LaunchedEffect(journalSeq, dayOffset, currentDayKey) {
         val imported = vm.repo.journal("my-whoop", "0000-01-01", "9999-12-31")
         val native = vm.repo.journal(JOURNAL_DEVICE_ID, "0000-01-01", "9999-12-31")
         val entries = mergeJournalEntries(imported, native)
         val byBehaviour = mutableMapOf<String, MutableSet<String>>()
-        for (e in entries) if (e.answeredYes) {
-            byBehaviour.getOrPut(e.question) { mutableSetOf() }.add(e.day)
+        // #322: a numeric log writes answeredYes=true too, so a numeric item lands in the with/without
+        // split here unchanged; its per-day value is captured separately for a numeric series the effect
+        // ranker can consume like any metric outcome (dose-response lands in the v5 hub). Additive.
+        val numericByBehaviour = mutableMapOf<String, MutableMap<String, Double>>()
+        for (e in entries) {
+            if (e.answeredYes) byBehaviour.getOrPut(e.question) { mutableSetOf() }.add(e.day)
+            e.numericValue?.let { v -> numericByBehaviour.getOrPut(e.question) { mutableMapOf() }[e.day] = v }
         }
         behaviours = byBehaviour.mapValues { it.value.toSet() }
+        numericJournalSeries = numericByBehaviour.mapValues { it.value.toMap() }
         importedQuestions = imported.map { it.question }.distinct()
         val key = journalDayKey(dayOffset)
         var answers = native.filter { it.day == key }.associate { it.question to it.answeredYes }
-        // Pre-fill from last night when opening today's journal with no entries yet — makes
+        // #322: the selected day's numeric values (native-only; imported WHOOP rows carry none).
+        dayNumeric = native.filter { it.day == key && it.numericValue != null }
+            .associate { it.question to it.numericValue!! }
+        // Pre-fill from last night when opening today's journal with no entries yet, makes
         // recurring patterns (e.g. no alcohol, read before bed) one tap to confirm instead of re-enter.
         if (answers.isEmpty() && dayOffset == 0L) {
             val yesterdayAnswers = native
@@ -226,7 +270,7 @@ fun InsightsScreen(vm: AppViewModel, onOpenInsightsHub: () -> Unit = {}) {
     // Selected outcome metric for the behaviour-effects half.
     var outcome by remember { mutableStateOf(Outcome.Recovery) }
 
-    // --- Personal-experiment state (LOCAL ONLY — SharedPreferences, parity with the
+    // --- Personal-experiment state (LOCAL ONLY, SharedPreferences, parity with the
     //     Swift @AppStorage keys). `experimentSeq` bumps after a save so the snapshot
     //     and compliance refresh immediately, matching the journal card's pattern. ---
     var experimentSeq by remember { mutableStateOf(0) }
@@ -238,7 +282,7 @@ fun InsightsScreen(vm: AppViewModel, onOpenInsightsHub: () -> Unit = {}) {
 
     // Build outcome day-maps + ordered series off the cached daily metrics. Cheap and
     // recomputed only when `days` changes (not on every recomposition).
-    val model = remember(days, behaviours) { buildModel(days, behaviours) }
+    val model = remember(days, behaviours, numericJournalSeries) { buildModel(days, behaviours, numericJournalSeries) }
 
     // Ranked behaviour effects for the current outcome (recomputed when outcome/data change).
     val ranked = remember(model, outcome) { rankEffects(model, outcome) }
@@ -252,27 +296,56 @@ fun InsightsScreen(vm: AppViewModel, onOpenInsightsHub: () -> Unit = {}) {
     androidx.compose.runtime.LaunchedEffect(Unit) { vm.loadWorkouts() }
     val activityCosts = remember(workouts, days) { computeActivityCosts(workouts, days) }
 
-    ScreenScaffold(title = "Insights", subtitle = "Interrogate what affects what.") {
+    // PERF (#707): migrate to the lazy scaffold so only on-screen sections compose + get
+    // accessibility-walked. Each eager child becomes its own `item { }`, INCLUDING the standalone
+    // `Spacer(sectionGap - 20)` separators, which are real Column children that already sat inside the
+    // eager `spacedBy(20.dp)`; a LazyColumn with the same `spacedBy(20.dp)` flanks each item identically,
+    // so the rendered spacing is byte-for-byte unchanged. Conditional sections use `if (cond) { item {} }`
+    // (never `item { if (cond) }`) so a hidden section emits NO item, an unconditional empty item would
+    // otherwise insert a 0-height row that the 20dp arrangement flanks, shifting layout. The one
+    // composable-only block (`run { … remember(snapshot) … }`) moves inside its `item { }` (which is
+    // @Composable). Order is preserved exactly.
+    // LIQUID SKY BACKDROP (the pilot pattern — LiquidScreenSky.kt): the static time-of-day liquid sky
+    // settles into the theme canvas behind the header + the first cards (and bleeds full-width up behind the
+    // status bar via the scaffold's topBackground plumbing), top-aligned, so the analysis cards float OVER
+    // the sky on the flat surface below. The Android equivalent of the iOS
+    // `ScreenScaffold(topBackground: liquidScaffoldSky())`; reuses the shared LiquidScreenSky() slot verbatim.
+    // Insights has no day-cycle gate of its own, so the sky is always drawn (matching the liquid explorer).
+    LazyScreenScaffold(
+        title = "Insights",
+        subtitle = "Interrogate what affects what.",
+        topBackground = { LiquidScreenSky() },
+    ) {
 
         // --- "What moves you" deep-link into the v5 Insights Hub (ranked, lag-aware ranked-effect feed +
         //     personal alcohol/caffeine dose-response). The honest in-Insights entry point; the hub is its
         //     own destination too. Mirrors the Swift InsightsView.whatMovesYouLink. ---
-        WhatMovesYouLink(onOpen = onOpenInsightsHub)
+        item { WhatMovesYouLink(onOpen = onOpenInsightsHub) }
 
-        Spacer(Modifier.height(Metrics.sectionGap - 20.dp))
+        item { Spacer(Modifier.height(Metrics.sectionGap - 20.dp)) }
 
-        // --- Native journal logging (always reachable — the account-free way in) ---
+        // --- Native journal logging (always reachable, the account-free way in) ---
         if (preFilledFromYesterday) {
+            item {
             Text(
-                "Pre-filled from last night — tap to confirm or change.",
+                "Pre-filled from last night. Tap to confirm or change.",
                 style = NoopType.footnote,
                 color = Palette.textTertiary,
                 modifier = Modifier.fillMaxWidth(),
             )
+            }
+        }
+        item {
+        // Persist a mutated catalog list and refresh state (the pure edit helpers never touch the
+        // canonical key, so a rename/regroup/convert keeps history joined; #322).
+        fun applyCatalog(next: List<JournalCatalogItem>) {
+            saveJournalCatalogItems(ctx, next)
+            catalogItems = next
         }
         JournalLogCard(
-            catalog = mergeJournalCatalog(importedQuestions, customQuestions, hiddenQuestions),
+            items = resolveJournalItems(importedQuestions, catalogItems, includeHidden = false),
             answers = dayAnswers,
+            numericAnswers = dayNumeric,
             dayOffset = dayOffset,
             onDayOffset = { dayOffset = it },
             onAnswer = { q, yes ->
@@ -283,58 +356,55 @@ fun InsightsScreen(vm: AppViewModel, onOpenInsightsHub: () -> Unit = {}) {
                     journalSeq++
                 }
             },
+            onNumeric = { q, value ->
+                scope.launch {
+                    // A numeric log writes answeredYes=true AND the value (#322), so the effects engine
+                    // counts the day as logged and the with/without split is unchanged.
+                    vm.repo.upsertJournal(
+                        listOf(JournalEntry(JOURNAL_DEVICE_ID, journalDayKey(dayOffset), q,
+                            answeredYes = true, numericValue = value)),
+                    )
+                    journalSeq++
+                }
+            },
             onClear = { q ->
                 scope.launch {
                     vm.repo.deleteJournalEntry(JOURNAL_DEVICE_ID, journalDayKey(dayOffset), q)
                     journalSeq++
                 }
             },
-            onAddCustom = { q ->
-                val next = customQuestions + q
-                saveCustomJournalQuestions(ctx, next)
-                customQuestions = next
-            },
-            customQuestions = customQuestions,
-            hidden = hiddenQuestions,
-            onRemoveQuestion = { q ->
-                // A custom question is deleted outright; a built-in/imported one is hidden (restorable).
-                if (customQuestions.any { it.trim().equals(q.trim(), ignoreCase = true) }) {
-                    val next = customQuestions.filterNot { it.trim().equals(q.trim(), ignoreCase = true) }
-                    saveCustomJournalQuestions(ctx, next)
-                    customQuestions = next
-                } else if (hiddenQuestions.none { it.trim().equals(q.trim(), ignoreCase = true) }) {
-                    val next = hiddenQuestions + q.trim()
-                    saveHiddenJournalQuestions(ctx, next)
-                    hiddenQuestions = next
-                }
-            },
-            onRestoreQuestion = { q ->
-                val next = hiddenQuestions.filterNot { it.trim().equals(q.trim(), ignoreCase = true) }
-                saveHiddenJournalQuestions(ctx, next)
-                hiddenQuestions = next
-            },
+            onAddCustom = { q, kind, group -> applyCatalog(addCustomJournalItem(catalogItems, q, kind, group)) },
+            onRename = { q, name -> applyCatalog(renameJournalItem(catalogItems, q, name)) },
+            onSetGroup = { q, group -> applyCatalog(setJournalItemGroup(catalogItems, q, group)) },
+            onSetKind = { q, kind -> applyCatalog(setJournalItemKind(catalogItems, q, kind)) },
+            onRemoveQuestion = { q -> applyCatalog(removeJournalItem(catalogItems, q)) },
+            onRestoreQuestion = { q -> applyCatalog(restoreJournalItem(catalogItems, q)) },
         )
+        }
 
-        Spacer(Modifier.height(Metrics.sectionGap - 20.dp))
+        item { Spacer(Modifier.height(Metrics.sectionGap - 20.dp)) }
 
         // --- Mind: daily mood check-in + mood ↔ body correlations (Swift Mind-lane
         //     mirror; storage contract + footnote shared verbatim across platforms) ---
-        MindSection(vm)
+        item { MindSection(vm) }
 
-        Spacer(Modifier.height(Metrics.sectionGap - 20.dp))
+        item { Spacer(Modifier.height(Metrics.sectionGap - 20.dp)) }
 
-        // --- Caffeine window (#526) — log an intake + a rough on-device "still active"
+        // --- Caffeine window (#526), log an intake + a rough on-device "still active"
         //     hint. Self-contained (owns its own SharedPreferences state). Opt-in: shows
         //     nothing until the user logs one. Twin of macOS CaffeineLogCard. ---
-        CaffeineLogCard()
+        item { CaffeineLogCard() }
 
-        Spacer(Modifier.height(Metrics.sectionGap - 20.dp))
+        item { Spacer(Modifier.height(Metrics.sectionGap - 20.dp)) }
 
         // --- Personal experiment (LOCAL ONLY n-of-1 protocol) ------------------
+        item {
         run {
-            // Candidates are gated to behaviours the user actually has data for —
-            // logged journal questions ∪ imported wording, minus hidden — NOT the
+            // Candidates are gated to behaviours the user actually has data for, 
+            // logged journal questions ∪ imported wording, minus hidden, NOT the
             // starter catalog (triage fix a/b). Empty → real empty-state guard.
+            // Hidden canonicals come from the v2 catalog now (#322), same triage-fix semantics.
+            val hiddenQuestions = catalogItems.filter { it.hidden }.map { it.canonical }
             val candidates = experimentCandidates(behaviours, importedQuestions, hiddenQuestions, experimentBehaviour)
             val expOutcome = Outcome.entries.firstOrNull { it.outcomeName == experimentOutcomeName } ?: Outcome.Recovery
             val resolvedBehaviour = resolveExperimentBehaviour(candidates, experimentBehaviour)
@@ -398,10 +468,13 @@ fun InsightsScreen(vm: AppViewModel, onOpenInsightsHub: () -> Unit = {}) {
                 },
             )
         }
+        }
 
-        Spacer(Modifier.height(Metrics.sectionGap - 20.dp))
+        item { Spacer(Modifier.height(Metrics.sectionGap - 20.dp)) }
 
         // --- Behaviour effects -------------------------------------------------
+        // (Always emits one of three branches → one unconditional item, never empty.)
+        item {
         if (!journalLoaded) {
             NoopCard {
                 Text(
@@ -411,10 +484,10 @@ fun InsightsScreen(vm: AppViewModel, onOpenInsightsHub: () -> Unit = {}) {
                 )
             }
         } else if (behaviours.isEmpty()) {
-            // No journal yet — explain, without dead-ending on a paid export.
+            // No journal yet, explain, without dead-ending on a paid export.
             DataPendingNote(
                 title = "Insights read your journal and outcomes",
-                body = "Log behaviours above — after a few days of answers, NOOP ranks how each " +
+                body = "Log behaviours above. After a few days of answers, NOOP ranks how each " +
                     "one moves your recovery, HRV and sleep. Importing a WHOOP export (which " +
                     "includes its journal) backfills history instantly.",
             )
@@ -425,22 +498,23 @@ fun InsightsScreen(vm: AppViewModel, onOpenInsightsHub: () -> Unit = {}) {
                 ranked = ranked,
             )
         }
+        }
 
-        Spacer(Modifier.height(Metrics.sectionGap - 20.dp))
+        item { Spacer(Modifier.height(Metrics.sectionGap - 20.dp)) }
 
         // --- Activity Cost (what each activity costs your recovery) ------------
-        ActivityCostSection(activityCosts)
+        item { ActivityCostSection(activityCosts) }
 
-        Spacer(Modifier.height(Metrics.sectionGap - 20.dp))
+        item { Spacer(Modifier.height(Metrics.sectionGap - 20.dp)) }
 
         // --- Metric relationships ---------------------------------------------
-        RelationshipsSection(relationships)
+        item { RelationshipsSection(relationships) }
     }
 }
 
 // MARK: - "What moves you" deep-link
 //
-// A single NoopCard row into the v5 Insights Hub — the ranked, lag-aware "which of your habits actually
+// A single NoopCard row into the v5 Insights Hub, the ranked, lag-aware "which of your habits actually
 // move your Charge" feed plus the personal alcohol/caffeine dose-response. Charge-world wash (chargeColor
 // tint), an accent auto_awesome glyph in a soft rounded chip, a short lag-aware blurb, and a trailing
 // chevron. One combined accessibility label so screen readers announce it as a single link. Mirrors the
@@ -448,10 +522,15 @@ fun InsightsScreen(vm: AppViewModel, onOpenInsightsHub: () -> Unit = {}) {
 
 @Composable
 private fun WhatMovesYouLink(onOpen: () -> Unit) {
+    // liquidPress: the tappable card settles inward on press (the iOS LiquidPressStyle feel). The SAME
+    // interactionSource drives the clickable + the press, and indication is nulled so only the liquid
+    // settle reads (no ripple). Same onOpen nav + same combined accessibility label.
+    val interaction = remember { MutableInteractionSource() }
     NoopCard(
         tint = Palette.chargeColor,
         modifier = Modifier
-            .clickable(onClick = onOpen)
+            .clickable(interactionSource = interaction, indication = null, onClick = onOpen)
+            .liquidPress(interaction)
             .semantics {
                 contentDescription =
                     "What moves you. Ranked patterns in your own data, and your dose-response."
@@ -480,7 +559,7 @@ private fun WhatMovesYouLink(onOpen: () -> Unit) {
                 // glyph (mirrors the iOS "WHAT MOVES YOU ›" overline). The descriptive line sits beneath.
                 Overline("What moves you ›", color = Palette.textPrimary)
                 Text(
-                    "Ranked, lag-aware: which of your habits actually move your Charge — plus your " +
+                    "Ranked, lag-aware: which of your habits actually move your Charge, plus your " +
                         "personal alcohol/caffeine dose-response.",
                     style = NoopType.footnote,
                     color = Palette.textTertiary,
@@ -515,7 +594,7 @@ internal fun computeActivityCosts(
     workouts: List<WorkoutRow>,
     days: List<DailyMetric>,
 ): List<com.noop.analytics.ActivityCost> {
-    // Single "now" offset for every session — the SAME tz-offset basis IntelligenceEngine.kt uses to
+    // Single "now" offset for every session, the SAME tz-offset basis IntelligenceEngine.kt uses to
     // key DailyMetric.day (getOffset(now)/1000 applied across the run), via the SAME
     // AnalyticsEngine.dayString(ts, offsetSec) path, so the engine's D+1 next-morning lookups align
     // byte-for-byte with the recovery keys (and match the Swift TimeZone.current.secondsFromGMT path).
@@ -667,7 +746,7 @@ private fun BehaviourSection(
                 Text(
                     "Not enough overlap between your journal answers and " +
                         "${outcome.outcomeName.lowercase(Locale.US)} to measure an effect yet. " +
-                        "Keep logging — effects need days both with and without each behaviour.",
+                        "Keep logging. Effects need days both with and without each behaviour.",
                     style = NoopType.subhead,
                     color = Palette.textTertiary,
                 )
@@ -789,7 +868,7 @@ private fun EffectCard(e: BehaviorEffect, outcome: Outcome) {
 // the outcome on days you logged the behaviour (the intervention) against your
 // behaviour-ABSENT days before the start (the baseline). The absent-day baseline
 // matches the with/without model used by Behaviour Effects above, so "Baseline" vs
-// "Intervention" is an honest present-vs-absent contrast — not a raw pre/post window.
+// "Intervention" is an honest present-vs-absent contrast, not a raw pre/post window.
 // Nothing leaves the device: state is SharedPreferences and "Mark done" writes a
 // normal journal answer.
 
@@ -1027,25 +1106,22 @@ private fun ActiveExperimentCard(
 
         // Progress bar + day count + confidence pill.
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            Box(
+            // LiquidTube: a genuine SINGLE-value goal bar (day N of the window), so it liquid-fills to
+            // `snapshot.progress` in the accent tint. Static (animated = false) — a scrolling explorer must
+            // not carry a live Canvas clock. Same fraction, same tint, same accessibility label as the
+            // hand-drawn track it replaces.
+            LiquidTube(
+                frac = snapshot.progress.toDouble(),
+                tint = Palette.accent,
+                height = 6.dp,
+                animated = false,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(4.dp)
-                    .clip(RoundedCornerShape(50))
-                    .background(Palette.hairline)
                     .semantics {
                         contentDescription =
                             "Experiment progress ${snapshot.daysElapsed} of ${snapshot.durationDays} days"
                     },
-            ) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth(snapshot.progress)
-                        .height(4.dp)
-                        .clip(RoundedCornerShape(50))
-                        .background(Palette.accent),
-                )
-            }
+            )
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -1060,7 +1136,7 @@ private fun ActiveExperimentCard(
             }
         }
 
-        // Mark done / Skip / End — all routed through the unified NoopButton (mirrors iOS
+        // Mark done / Skip / End, all routed through the unified NoopButton (mirrors iOS
         // NoopButtonStyle(.primary / .secondary / .destructive) with leading icons).
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -1152,6 +1228,9 @@ private fun ExperimentBehaviourPicker(
     onSelect: (String) -> Unit,
 ) {
     var expanded by remember { mutableStateOf(false) }
+    // liquidPress on the tappable picker row (same interactionSource on the clickable + press; indication
+    // nulled so only the liquid settle reads). Same expand-on-tap + same accessibility label.
+    val interaction = remember { MutableInteractionSource() }
     Box {
         Row(
             modifier = Modifier
@@ -1159,7 +1238,8 @@ private fun ExperimentBehaviourPicker(
                 .clip(RoundedCornerShape(6.dp))
                 .background(Palette.surfaceBase)
                 .border(1.dp, Palette.hairline, RoundedCornerShape(6.dp))
-                .clickable { expanded = true }
+                .clickable(interactionSource = interaction, indication = null) { expanded = true }
+                .liquidPress(interaction)
                 .padding(horizontal = 12.dp, vertical = 8.dp)
                 .semantics { contentDescription = "Experiment behaviour: $selection" },
             verticalAlignment = Alignment.CenterVertically,
@@ -1194,7 +1274,7 @@ private fun ExperimentBehaviourPicker(
  * Behaviours the user actually has data for: distinct logged journal questions
  * (`behaviours.keys`) ∪ imported-export questions, minus the catalog's hidden set.
  * Triage fix (a)/(b): we do NOT route this through `mergeJournalCatalog`, which would
- * inject the whole starter catalog (and re-surface hidden behaviours) — so only
+ * inject the whole starter catalog (and re-surface hidden behaviours), so only
  * behaviours with real history are eligible, and the empty-state guard is real.
  */
 private fun experimentCandidates(
@@ -1333,7 +1413,7 @@ private fun dayDistance(start: String, end: String): Int {
 private fun mean(values: List<Double>): Double? =
     if (values.isEmpty()) null else values.sum() / values.size
 
-// MARK: - Experiment persistence (SharedPreferences — parity with Swift @AppStorage keys)
+// MARK: - Experiment persistence (SharedPreferences, parity with Swift @AppStorage keys)
 
 private const val EXP_PREFS = "noop_prefs"
 private const val EXP_BEHAVIOUR = "noop.experiment.behaviour"
@@ -1425,7 +1505,7 @@ private fun RelationshipRow(rel: Relationship) {
             )
         }
 
-        // r bar — centred zero, fills left (negative) / right (positive) by |r|.
+        // r bar, centred zero, fills left (negative) / right (positive) by |r|.
         RBar(r = rel.r, color = strength)
 
         Text(sentence, style = NoopType.subhead, color = Palette.textSecondary)
@@ -1436,7 +1516,7 @@ private fun RelationshipRow(rel: Relationship) {
 /**
  * A centred correlation bar: a faint inset track with a centre tick at zero, and a
  * coloured fill that grows left (negative r) or right (positive r) proportional to |r|.
- * Mirrors the macOS RBar (minus the desktop hover tooltip — the exact r value is already
+ * Mirrors the macOS RBar (minus the desktop hover tooltip, the exact r value is already
  * printed beside the title, so the bar is never an unexplained coloured shape on phone).
  */
 @Composable
@@ -1488,6 +1568,7 @@ private fun RBar(r: Double, color: Color) {
 private fun buildModel(
     days: List<DailyMetric>,
     behaviours: Map<String, Set<String>>,
+    numericJournalSeries: Map<String, Map<String, Double>> = emptyMap(),
 ): InsightModel {
     val outcomeByDay = mutableMapOf<Outcome, Map<String, Double>>()
     val seriesByOutcome = mutableMapOf<Outcome, List<Pair<String, Double>>>()
@@ -1497,7 +1578,7 @@ private fun buildModel(
         seriesByOutcome[o] = series
         outcomeByDay[o] = series.toMap()
     }
-    return InsightModel(behaviours, outcomeByDay, seriesByOutcome)
+    return InsightModel(behaviours, outcomeByDay, seriesByOutcome, numericJournalSeries)
 }
 
 /** Rank behaviour effects for one outcome by |Cohen's d|, significant first. */
@@ -1633,7 +1714,7 @@ private fun pearson(pairs: List<Pair<Double, Double>>): Pair<Double, Int>? {
 }
 
 /** Rough |r| threshold for "p < 0.05" at n pairs (critical r for a two-tailed test,
- *  approximated by 2 / sqrt(n) — a standard rule-of-thumb). Honest, not exact. */
+ *  approximated by 2 / sqrt(n), a standard rule-of-thumb). Honest, not exact. */
 private fun significanceThreshold(n: Int): Double =
     if (n < 4) 1.1 else (2.0 / sqrt(n.toDouble())).coerceAtMost(1.0)
 
@@ -1652,7 +1733,7 @@ private fun effectSentence(e: BehaviorEffect, outcome: Outcome): String {
     val withStr = outcome.format(e.meanWith)
     val withoutStr = outcome.format(e.meanWithout)
     return "On days you logged ${e.behavior.lowercase(Locale.US)}, your $name averaged " +
-        "$withStr — $dir than the $withoutStr on days you didn't."
+        "$withStr, $dir than the $withoutStr on days you didn't."
 }
 
 private fun effectMagnitudeWord(d: Double): String {

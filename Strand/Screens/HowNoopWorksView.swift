@@ -34,23 +34,23 @@ struct HowNoopWorksView: View {
 
         var title: String {
             switch self {
-            case .sleepSorting: return "How your sleep is sorted"
-            case .scores:       return "How your scores work"
-            case .recording:    return "What \"recording\" means"
-            case .provenance:   return "Where your numbers come from"
+            case .sleepSorting: return String(localized: "How your sleep is sorted")
+            case .scores:       return String(localized: "How your scores work")
+            case .recording:    return String(localized: "What \"recording\" means")
+            case .provenance:   return String(localized: "Where your numbers come from")
             }
         }
 
         var body: String {
             switch self {
             case .sleepSorting:
-                return "NOOP picks your main sleep as your longest real block, and (once it has learned your usual hours) the one nearest your normal sleep time. Everything else that day is a nap. You can always edit bed and wake times."
+                return String(localized: "NOOP picks your main sleep as your longest real block, and (once it has learned your usual hours) the one nearest your normal sleep time. Everything else that day is a nap. You can always edit bed and wake times.")
             case .scores:
-                return "Charge, Effort and Rest are scored on your own device from your strap data. They get personal after about two weeks of your nights (that's \"Calibrating\"). Before that NOOP shows what it can without faking a number."
+                return String(localized: "Charge, Effort and Rest are scored on your own device from your strap data. Charge needs about four nights of sleep to learn your baseline (that's \"Calibrating\", counted as nights of 4 on the ring), and keeps sharpening over your first couple of weeks. On a WHOOP 5 or MG the strap banks little history, so that count can sit at 0 of 4 until you have worn it across a few nights. That's the strap's sync limit, not a fault. Before there's a number, NOOP shows what it can without faking one.")
             case .recording:
-                return "When your strap is connected NOOP is saving data live. \"Last synced\" tells you how fresh it is. If it says \"Not recording\", reconnect."
+                return String(localized: "When your strap is connected NOOP is saving data live. \"Last synced\" tells you how fresh it is. If it says \"Not recording\", reconnect.")
             case .provenance:
-                return "A badge shows whether a number was scored on-device by NOOP, or imported from Whoop or Apple Health."
+                return String(localized: "A badge shows whether a number was scored on-device by NOOP, or imported from Whoop or Apple Health.")
             }
         }
 
@@ -78,10 +78,10 @@ struct HowNoopWorksView: View {
         /// Short overline tag above the section title.
         var overline: String {
             switch self {
-            case .sleepSorting: return "SLEEP"
-            case .scores:       return "SCORES"
-            case .recording:    return "RECORDING"
-            case .provenance:   return "PROVENANCE"
+            case .sleepSorting: return String(localized: "SLEEP")
+            case .scores:       return String(localized: "SCORES")
+            case .recording:    return String(localized: "RECORDING")
+            case .provenance:   return String(localized: "PROVENANCE")
             }
         }
     }
@@ -99,6 +99,7 @@ struct HowNoopWorksView: View {
                     ForEach(Section.allCases) { section in
                         primerCard(section)
                     }
+                    scoringMethodsCard
                     footerNote
                 }
                 .padding(20)
@@ -207,6 +208,117 @@ struct HowNoopWorksView: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(section.title). \(section.body)")
+    }
+
+    // MARK: - A7: "How your scores are computed" (named method families)
+
+    /// The four scores, each named with the PUBLISHED method family it follows. Honest about the
+    /// approach without faking precision: it cites the method, not a proprietary-identical claim. Order
+    /// mirrors the app's score order (Charge, Effort, Rest, Fitness Age); the tint matches each domain.
+    private enum ScoreMethod: CaseIterable, Identifiable {
+        case charge, effort, rest, fitnessAge
+        var id: Self { self }
+
+        var name: String {
+            switch self {
+            case .charge:     return String(localized: "Charge")
+            case .effort:     return String(localized: "Effort")
+            case .rest:       return String(localized: "Rest")
+            case .fitnessAge: return String(localized: "Fitness Age")
+            }
+        }
+
+        /// The plain-English description of the published method behind the score.
+        var method: String {
+            switch self {
+            case .charge:
+                return String(localized: "A baseline-normalized recovery score: your resting heart rate, sleep quality and night-to-night consistency, weighted against your own baseline, with heart-rate variability (rMSSD) leading wherever the strap gives us a clean reading.")
+            case .effort:
+                return String(localized: "A cardiovascular load in the Banister TRIMP family: time spent in each heart-rate zone, weighted so harder zones count for more, summed into one daily figure.")
+            case .rest:
+                return String(localized: "Sleep scored from how long you slept versus how much you needed, how efficient the night was, and the restorative (deep and REM) share of it.")
+            case .fitnessAge:
+                return String(localized: "An estimated VO2max from the Nes / HUNT Fitness Study model (resting heart rate, age and activity), read against population norms to express it as a fitness age.")
+            }
+        }
+
+        /// The short method-family tag shown as an overline next to the score name.
+        var family: String {
+            switch self {
+            case .charge:     return String(localized: "RESTING HR + SLEEP + HRV")
+            case .effort:     return String(localized: "BANISTER TRIMP / HR ZONES")
+            case .rest:       return String(localized: "DURATION + EFFICIENCY + STAGES")
+            case .fitnessAge: return String(localized: "NES / HUNT VO2MAX")
+            }
+        }
+
+        var tint: Color {
+            switch self {
+            case .charge:     return DomainTheme.charge.color
+            case .effort:     return DomainTheme.effort.color
+            case .rest:       return DomainTheme.rest.color
+            case .fitnessAge: return StrandPalette.accent
+            }
+        }
+    }
+
+    /// A7 , the "How your scores are computed" card: one row per score naming its published method
+    /// family, honest about the approach without claiming a proprietary-identical result.
+    private var scoringMethodsCard: some View {
+        NoopCard(tint: DomainTheme.charge.color) {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(spacing: 10) {
+                    Image(systemName: "function")
+                        .font(.system(size: 18))
+                        .foregroundStyle(DomainTheme.charge.color)
+                        .frame(width: 24)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("METHOD")
+                            .font(StrandFont.overline)
+                            .tracking(StrandFont.overlineTracking)
+                            .foregroundStyle(DomainTheme.charge.color)
+                        Text("How your scores are computed")
+                            .font(StrandFont.headline)
+                            .foregroundStyle(StrandPalette.textPrimary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 0)
+                }
+                Text("Each score follows a published method, computed on your device. We name the method family so you can read up on it, and we never claim to reproduce another company's number exactly.")
+                    .font(StrandFont.subhead)
+                    .foregroundStyle(StrandPalette.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .leading, spacing: 14) {
+                    ForEach(ScoreMethod.allCases) { method in
+                        methodRow(method)
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    /// One score-method row: the score name + its method-family overline, then the plain-English method.
+    private func methodRow(_ m: ScoreMethod) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Text(m.name)
+                    .font(StrandFont.subhead)
+                    .foregroundStyle(StrandPalette.textPrimary)
+                Text(m.family)
+                    .font(StrandFont.overline)
+                    .tracking(0.4)
+                    .foregroundStyle(m.tint)
+                Spacer(minLength: 0)
+            }
+            Text(m.method)
+                .font(StrandFont.footnote)
+                .foregroundStyle(StrandPalette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(m.name). \(m.method)")
     }
 
     private var footerNote: some View {

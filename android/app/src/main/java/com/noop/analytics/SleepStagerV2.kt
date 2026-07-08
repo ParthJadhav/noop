@@ -49,8 +49,81 @@ object SleepStagerV2 {
      * flag with no other change. [resp] (raw resp ADC) is accepted for signature-parity but not consumed —
      * respiration regularity is recovered from the R-R stream (RSA), the path available on both WHOOP 4 and
      * 5. The recipe stages "wake" naturally (no separate pre-onset / post-wake forcing).
+     *
+     * PERF (v7.0.2 / #707): this is a thin cache veneer over [stageSessionUncached]. The full recipe
+     * (per-epoch z-scores + a band-limited DFT per epoch + a 4-state Viterbi over the whole night) is the
+     * single heaviest thing the V2 path does, and it was being re-run for EVERY detected night on EVERY
+     * [IntelligenceEngine.analyzeRecent] — i.e. ~21× per post-sync pass, AGAIN per sleep edit, and up to
+     * thousands of nights on the one-shot full-history Effort rescore (maxDays=4000) — the traced cause of
+     * the #707 OOM (Sleep V2 on). Staging is a pure function of (start, end, samples), so we memoize it via
+     * the shared bounded [StagerCache] (keyed per recipe, so V1 and V2 never collide). The result: each
+     * distinct night stages AT MOST ONCE, peak heap stays flat across repeated passes, and the
+     * appearance/behaviour is byte-identical (the cached value is the same StageSegment list the recipe
+     * produced — returned as a fresh copy so a caller that extends a segment in place can never poison the
+     * cache). Edits invalidate naturally: a moved bed/wake time changes start/end → new key; newly-banked
+     * samples change the per-stream count/edge-ts/checksum → new key. `resp` is excluded from the V2 key on
+     * purpose — [stageSessionUncached] never consumes it (RSA comes from `rr`), so folding it in would only
+     * cause false misses.
      */
     fun stageSession(
+        start: Long, end: Long, grav: List<GravitySample>,
+        hr: List<HrSample>, rr: List<RrInterval>, resp: List<RespSample>,
+    ): List<StageSegment> {
+        // PERF CLIP (v7.0.2 / #707): bound the grav/hr/rr streams to the only seconds any Epoch feature can
+        // possibly READ before doing ANYTHING else — both the fingerprint and the compute then operate on the
+        // clipped window, so neither walks the whole multi-day (~54 h / 200 k-sample) stream. `features()`
+        // only ever reads seconds in [start − PAD_LO, end + PAD_HI): the farthest-reaching feature is the
+        // 11-min HR-flatness std `stdOfSeconds(e − 330, e + 30 + 360)`, whose loop touches `e − 330` at the
+        // low edge (smallest epoch start `e == firstE ≥ start` → ≥ start − 330) and `e + 389` at the high
+        // edge (largest `e ≤ end − 1` → ≤ end + 388); the 5-min std (±150/180) and the RSA beat window
+        // (e − 90 … e + 120) are strictly inside that. PAD_LO/PAD_HI add a full-epoch (30 s) safety margin
+        // over those exact reaches, so EVERY second any feature consults is still present — samples outside
+        // the window are allocated-but-never-read, so dropping them leaves every feature and the staging
+        // output byte-identical (V1's SleepStager already clips equivalently via rowsBetween; this only
+        // brings V2 in line, and also stops the cache fingerprint walking the full stream — a known
+        // low-severity audit finding). Sort defensively first (same precondition stageSessionUncached
+        // already establishes) so the binary-search bounds are correct even if a caller violates the
+        // already-sorted-by-ts contract; the clip itself is a single O(log n) lower/upper-bound sublist, not
+        // a linear filter.
+        val gravC = clipSorted(grav.sortedBy { it.ts }, start - PAD_LO, end + PAD_HI) { it.ts }
+        val hrC = clipSorted(hr.sortedBy { it.ts }, start - PAD_LO, end + PAD_HI) { it.ts }
+        val rrC = clipSorted(rr.sortedBy { it.ts }, start - PAD_LO, end + PAD_HI) { it.ts }
+
+        val key = StagerCache.fingerprint(StagerCache.Version.V2, start, end, gravC, hrC, rrC)
+        StagerCache.get(key)?.let { return StagerCache.copyOf(it) }
+        val segments = stageSessionUncached(start, end, gravC, hrC, rrC, resp)
+        StagerCache.put(key, segments)
+        return StagerCache.copyOf(segments)
+    }
+
+    /** Widest second-offset before `start` that any [features] window reads (11-min flatness low edge = 330),
+     *  plus a 30 s epoch of safety margin. */
+    private const val PAD_LO = 360L
+
+    /** Widest second-offset after `end` that any [features] window reads (11-min flatness high edge ≈ 389),
+     *  plus margin to a clean 420. The clip window is half-open [start − PAD_LO, end + PAD_HI). */
+    private const val PAD_HI = 420L
+
+    /**
+     * Half-open [lo, hi) sublist of an ALREADY-ts-sorted [rows] via binary search on the `ts` key — O(log n)
+     * to find each bound, then a view-backed [List.subList] (no element copy). Equivalent in result to a
+     * `rows.filter { ts(it) in lo until hi }` but without the full linear scan, so the whole multi-day stream
+     * is never traversed just to keep the night's window. Standard lower/upper bound: `loIdx` = first index
+     * with `ts ≥ lo`, `hiIdx` = first index with `ts ≥ hi`.
+     */
+    private inline fun <T> clipSorted(rows: List<T>, lo: Long, hi: Long, ts: (T) -> Long): List<T> {
+        if (rows.isEmpty()) return rows
+        var a = 0; var b = rows.size                 // lower bound: first ts ≥ lo
+        while (a < b) { val mid = (a + b) ushr 1; if (ts(rows[mid]) < lo) a = mid + 1 else b = mid }
+        val loIdx = a
+        var c = loIdx; var d = rows.size             // upper bound: first ts ≥ hi
+        while (c < d) { val mid = (c + d) ushr 1; if (ts(rows[mid]) < hi) c = mid + 1 else d = mid }
+        val hiIdx = c
+        return if (loIdx == 0 && hiIdx == rows.size) rows else rows.subList(loIdx, hiIdx)
+    }
+
+    /** The pure recipe, exactly as before — extracted so [stageSession] can memoize it. */
+    private fun stageSessionUncached(
         start: Long, end: Long, grav: List<GravitySample>,
         hr: List<HrSample>, rr: List<RrInterval>, resp: List<RespSample>,
     ): List<StageSegment> {
@@ -126,10 +199,18 @@ object SleepStagerV2 {
 
     // ── Feature extraction ───────────────────────────────────────────────────────────────────────────
 
+    /** Prefix-sum bundle over the integer-second HR axis (one O(1) windowed population std each).
+     *  `axisLo` = first covered second; the three arrays are length (coveredSeconds + 1), index i holding the
+     *  cumulative total over [axisLo, axisLo+i). Destructured by [features]. */
+    private data class StdPrefix(
+        val axisLo: Long, val sum: DoubleArray, val sumSq: DoubleArray, val cnt: IntArray,
+    )
+
     /**
      * Build the per-epoch recipe features over a 30 s wall-clock-aligned grid covering [start, end].
-     * Streams are the FULL (un-clipped) sorted streams, so the 5-/11-min HR windows and the RSA beat window
-     * can reach across the session edges.
+     * Streams are clipped by [stageSession] to [start − PAD_LO, end + PAD_HI) — the only seconds these
+     * windows ever read — so the 5-/11-min HR windows and the RSA beat window still see every second they
+     * need; samples outside that window were never consulted, so the output is unchanged.
      */
     private fun features(
         start: Long, end: Long, grav: List<GravitySample>, hr: List<HrSample>, rr: List<RrInterval>,
@@ -156,14 +237,48 @@ object SleepStagerV2 {
         val rrBy = HashMap<Long, MutableList<Double>>()
         for (r in rr) rrBy.getOrPut(r.ts) { ArrayList() }.add(r.rrMs.toDouble())
 
+        // PERF (v7.0.2 / #707): stdOfSeconds was called twice per epoch over centred ~300 s and ~720 s
+        // windows, each call allocating a fresh boxed ArrayList<Double> and re-walking the window — O(epochs ×
+        // windowSeconds) ≈ ~1,000,000 short-lived boxed Doubles per night, a primary heap-churn source under
+        // the OOM. Replace it with ONE forward pass of prefix sums over the integer-second axis: cumulative
+        // present-count, cumulative HR value, and cumulative HR value². Each window's population std is then
+        // O(1): n = countΔ, mean = sumΔ/n, std = sqrt(max(0, sumSqΔ/n − mean²)). The under-root is clamped to
+        // 0 only to absorb a tiny floating-point negative on a near-constant window (algebraically it is the
+        // variance, never negative). Semantics are preserved exactly: still returns null when fewer than 2
+        // present samples fall in the window. The axis spans only present HR seconds; a window edge beyond
+        // the data clamps to the axis (those out-of-range seconds carried no sample in the old loop either).
+        val (axisLo, sumPx, sumSqPx, cntPx) = run {
+            if (secHR.isEmpty()) return@run StdPrefix(0L, DoubleArray(1), DoubleArray(1), IntArray(1))
+            var lo = Long.MAX_VALUE; var hi = Long.MIN_VALUE
+            for (k in secHR.keys) { if (k < lo) lo = k; if (k > hi) hi = k }
+            val len = (hi - lo + 1).toInt()
+            // Prefix arrays are length len+1: index i holds the cumulative total over the FIRST i seconds
+            // [lo, lo+i), so a half-open window [qlo, qhi) is prefix[qhi-lo] − prefix[qlo-lo].
+            val sP = DoubleArray(len + 1); val sqP = DoubleArray(len + 1); val cP = IntArray(len + 1)
+            for (i in 0 until len) {
+                val v = secHR[lo + i]
+                sP[i + 1] = sP[i] + (v ?: 0.0)
+                sqP[i + 1] = sqP[i] + (if (v != null) v * v else 0.0)
+                cP[i + 1] = cP[i] + (if (v != null) 1 else 0)
+            }
+            StdPrefix(lo, sP, sqP, cP)
+        }
+        val axisHiExclusive = axisLo + (cntPx.size - 1)  // one past the last covered second
+
         fun stdOfSeconds(lo: Long, hi: Long): Double? {
-            val vals = ArrayList<Double>()
-            var s = lo
-            while (s < hi) { secHR[s]?.let { vals.add(it) }; s++ }
-            if (vals.size < 2) return null
-            val m = vals.sum() / vals.size
-            val v = vals.sumOf { (it - m) * (it - m) } / vals.size
-            return sqrt(v)
+            if (cntPx.size <= 1) return null
+            // Clamp the query to the covered axis; out-of-range seconds held no sample in the old loop.
+            val qLo = lo.coerceIn(axisLo, axisHiExclusive)
+            val qHi = hi.coerceIn(axisLo, axisHiExclusive)
+            if (qHi <= qLo) return null
+            val a = (qLo - axisLo).toInt(); val b = (qHi - axisLo).toInt()
+            val n = cntPx[b] - cntPx[a]
+            if (n < 2) return null
+            val sum = sumPx[b] - sumPx[a]
+            val sumSq = sumSqPx[b] - sumSqPx[a]
+            val mean = sum / n
+            val variance = sumSq / n - mean * mean
+            return sqrt(if (variance < 0.0) 0.0 else variance)
         }
 
         // PASS 1 — every per-epoch quantity EXCEPT the move fraction, and pool every per-second jerk so the

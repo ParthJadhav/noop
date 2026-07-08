@@ -15,6 +15,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.draw.drawWithCache
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -26,6 +28,8 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import java.util.Locale
@@ -42,6 +46,52 @@ import kotlin.math.roundToInt
 //   LineChart  — line with optional soft gradient fill, height driven by Modifier
 //   BarChart   — vertical bars from a zero baseline
 //   Hypnogram  — proportional sleep-stage strip (deep / rem / light / awake)
+
+// MARK: - Accessibility summaries
+//
+// Each chart primitive contributes exactly ONE semantics node via `Modifier.clearAndSetSemantics`, so the
+// Compose accessibility delegate never walks a per-bar/per-band/per-point subtree (the giant semantics
+// tree the a11y walk re-copied on every scroll was a contributor to the #707 OOM). The node carries a
+// concise spoken summary (count + latest/low/high, or per-stage totals) — O(1) instead of O(elements).
+// These are pure helpers; they change NO drawing.
+
+/** One-line spoken summary of a numeric series: count + latest + low/high. Empty → "No data". */
+private fun seriesSummary(values: List<Double>, noun: String): String {
+    val clean = values.filter { it.isFinite() }
+    if (clean.isEmpty()) return "$noun, no data"
+    val last = clean.last()
+    val lo = clean.min()
+    val hi = clean.max()
+    return "$noun, ${clean.size} points, latest ${formatLineValue(last)}, " +
+        "low ${formatLineValue(lo)}, high ${formatLineValue(hi)}"
+}
+
+/** Per-stage total summary for the Hypnogram (deep · REM · light · awake, naming only stages present). */
+private fun hypnogramSummary(stages: List<Pair<String, Float>>): String {
+    if (stages.isEmpty()) return "Sleep stages, no data"
+    // Weights are relative widths, not minutes, so report the share of the night in each stage.
+    val total = stages.map { if (it.second.isFinite() && it.second > 0f) it.second else 0f }.sum()
+    if (total <= 0f) return "Sleep stages, no data"
+    val order = listOf("deep", "rem", "light", "awake")
+    val byStage = LinkedHashMap<String, Float>()
+    for (key in order) byStage[key] = 0f
+    stages.forEach { (name, w) ->
+        val v = if (w.isFinite() && w > 0f) w else 0f
+        val key = when (name.trim().lowercase()) {
+            "deep" -> "deep"; "rem" -> "rem"; "light" -> "light"; "awake", "wake" -> "awake"; else -> "light"
+        }
+        byStage[key] = (byStage[key] ?: 0f) + v
+    }
+    val parts = order.mapNotNull { key ->
+        val v = byStage[key] ?: 0f
+        if (v <= 0f) null else {
+            val pct = (v / total * 100f).roundToInt()
+            val label = if (key == "rem") "REM" else key.replaceFirstChar { it.uppercase() }
+            "$pct percent $label"
+        }
+    }
+    return if (parts.isEmpty()) "Sleep stages, no data" else "Sleep stages, " + parts.joinToString(", ")
+}
 
 // MARK: - Shared geometry helpers
 
@@ -107,28 +157,37 @@ fun Sparkline(
     modifier: Modifier = Modifier,
     color: Color = Palette.accent,
 ) {
-    Canvas(
+    // PERF (#scroll-jank): the point mapping + Path were rebuilt inside the Canvas draw lambda EVERY
+    // frame. drawWithCache tessellates the Path ONCE (keyed on the values + size — the cache block
+    // re-runs only when those change) and the cached draw lambda just replays it on every scroll frame.
+    // Pixel-identical: same pointsFor geometry, same strokePx/cap/join, same empty→drawBaseline state.
+    // ONE collapsed semantics node (see "Accessibility summaries"): the delegate reads a single trend
+    // summary instead of walking the canvas. clearAndSetSemantics drops any child nodes (there are none
+    // here) and contributes exactly this contentDescription. Changes no drawing.
+    val axSummary = seriesSummary(values, "Trend")
+    Box(
         modifier = modifier
             .fillMaxWidth()
-            .height(Metrics.sparklineHeight),
-    ) {
-        val strokePx = 2f
-        val pad = strokePx
-        val pts = pointsFor(values, size.width, size.height, pad, pad)
-        if (pts.isEmpty()) {
-            drawBaseline()
-            return@Canvas
-        }
-        val path = Path().apply {
-            moveTo(pts.first().x, pts.first().y)
-            for (i in 1 until pts.size) lineTo(pts[i].x, pts[i].y)
-        }
-        drawPath(
-            path = path,
-            color = color,
-            style = Stroke(width = strokePx, cap = StrokeCap.Round, join = StrokeJoin.Round),
-        )
-    }
+            .height(Metrics.sparklineHeight)
+            .clearAndSetSemantics { contentDescription = axSummary }
+            .drawWithCache {
+                val strokePx = 2f
+                val pad = strokePx
+                val pts = pointsFor(values, size.width, size.height, pad, pad)
+                if (pts.isEmpty()) {
+                    onDrawBehind { drawBaseline() }
+                } else {
+                    val path = Path().apply {
+                        moveTo(pts.first().x, pts.first().y)
+                        for (i in 1 until pts.size) lineTo(pts[i].x, pts[i].y)
+                    }
+                    val stroke = Stroke(width = strokePx, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                    onDrawBehind {
+                        drawPath(path = path, color = color, style = stroke)
+                    }
+                }
+            },
+    )
 }
 
 // MARK: - LineChart
@@ -150,6 +209,11 @@ fun LineChart(
     // tap/swipe-to-inspect interaction opt in explicitly (Sleep, Trends, the Vital Signs detail).
     selectionEnabled: Boolean = false,
     dragSelectionEnabled: Boolean = true,
+    // Selection-label formatter (#463): the tap/drag pinpoint read-out draws the RAW plotted value by
+    // default; screens whose surrounding chrome converts values for display (Trends' Effort chart on
+    // the 0-21 scale) pass their axis formatter so the label can't leak the stored scale as a bare
+    // unconverted number. Default null keeps every other caller byte-identical.
+    formatValue: ((Double) -> String)? = null,
 ) {
     val cleanValues = remember(values) { values.filter { it.isFinite() } }
     var selectedIndex by remember(cleanValues) { mutableIntStateOf(-1) }
@@ -199,6 +263,10 @@ fun LineChart(
         Modifier
     }
 
+    // ONE collapsed semantics node for the whole chart (line + fill + selection marker subtree) so the
+    // accessibility delegate reads a single trend summary rather than descending into the canvas. The
+    // summary uses the same finite-filtered values the line draws. Changes no drawing or interaction.
+    val axSummary = seriesSummary(cleanValues, "Trend")
     Box(
         modifier = modifier
             .fillMaxWidth()
@@ -207,80 +275,106 @@ fun LineChart(
             // past the edges. Compose Canvas does NOT clip by default — macOS parity for
             // TrendChart.swift's `.chartPlotStyle { $0.clipped() }` + `.clipped()`.
             .clipToBounds()
+            .clearAndSetSemantics { contentDescription = axSummary }
             .then(interactiveModifier),
     ) {
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            val strokePx = 2.5f
-            val topPad = strokePx + 4f
-            val bottomPad = strokePx + 4f
-            val pts = pointsFor(cleanValues, size.width, size.height, topPad, bottomPad)
-            if (pts.isEmpty()) {
-                drawBaseline()
-                return@Canvas
-            }
-
-            // Soft gradient fill under the curve.
-            if (fill) {
-                val fillPath = Path().apply {
-                    moveTo(pts.first().x, size.height)
-                    lineTo(pts.first().x, pts.first().y)
-                    for (i in 1 until pts.size) lineTo(pts[i].x, pts[i].y)
-                    lineTo(pts.last().x, size.height)
-                    close()
-                }
-                drawPath(
-                    path = fillPath,
-                    brush = Brush.verticalGradient(
-                        colors = listOf(
-                            color.copy(alpha = StrandAlpha.chartFillStrong),
-                            color.copy(alpha = StrandAlpha.chartFillSoft),
-                            Color.Transparent,
-                        ),
-                        startY = 0f,
-                        endY = size.height,
-                    ),
+        // PERF (#scroll-jank): the fill Path, the line Path AND the verticalGradient Brush were all
+        // rebuilt inside the draw lambda every frame. Hoist the whole STATIC chart (baseline / fill /
+        // line) into drawWithCache, keyed on (cleanValues, color, fill) + the implicit size — it
+        // tessellates once and replays on scroll. The fast-moving SELECTION marker stays in a thin
+        // separate drawWithContent overlay so a cursor drag re-issues only the marker, never the chart.
+        // The pre-laid Paint for the value label is remembered, not allocated per draw. Pixel-identical:
+        // same pointsFor geometry, same strokePx/pads, same gradient stops, same marker + label drawing.
+        val markerPaint = remember(color) {
+            android.graphics.Paint().apply {
+                isAntiAlias = true
+                textSize = 30f
+                this.color = color.copy(alpha = StrandAlpha.chartLabel).toArgb()
+                typeface = android.graphics.Typeface.create(
+                    android.graphics.Typeface.DEFAULT,
+                    android.graphics.Typeface.BOLD,
                 )
-            }
-
-            // The line itself.
-            val linePath = Path().apply {
-                moveTo(pts.first().x, pts.first().y)
-                for (i in 1 until pts.size) lineTo(pts[i].x, pts[i].y)
-            }
-            drawPath(
-                path = linePath,
-                color = color,
-                style = Stroke(width = strokePx, cap = StrokeCap.Round, join = StrokeJoin.Round),
-            )
-
-            // Tap-to-pinpoint: vertical marker + dot + value text.
-            if (selectionEnabled && selectedIndex in pts.indices) {
-                val p = pts[selectedIndex]
-                drawLine(
-                    color = color.copy(alpha = StrandAlpha.chartMarker),
-                    start = Offset(p.x, 0f),
-                    end = Offset(p.x, size.height),
-                    strokeWidth = 1.5f,
-                    cap = StrokeCap.Round,
-                )
-                drawCircle(color = color, radius = 5f, center = p)
-                drawCircle(color = Palette.surfaceBase.copy(alpha = StrandAlpha.chartShadow), radius = 9f, center = p)
-                drawCircle(color = color, radius = 4.5f, center = p)
-                drawContext.canvas.nativeCanvas.apply {
-                    val paint = android.graphics.Paint().apply {
-                        isAntiAlias = true
-                        textSize = 30f
-                        this.color = color.copy(alpha = StrandAlpha.chartLabel).toArgb()
-                        typeface = android.graphics.Typeface.create(
-                            android.graphics.Typeface.DEFAULT,
-                            android.graphics.Typeface.BOLD,
-                        )
-                    }
-                    val label = formatLineValue(cleanValues[selectedIndex])
-                    drawText(label, 8f, 32f, paint)
-                }
             }
         }
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .drawWithCache {
+                    val strokePx = 2.5f
+                    val topPad = strokePx + 4f
+                    val bottomPad = strokePx + 4f
+                    val pts = pointsFor(cleanValues, size.width, size.height, topPad, bottomPad)
+                    if (pts.isEmpty()) {
+                        onDrawBehind { drawBaseline() }
+                    } else {
+                        val fillPath = if (fill) {
+                            Path().apply {
+                                moveTo(pts.first().x, size.height)
+                                lineTo(pts.first().x, pts.first().y)
+                                for (i in 1 until pts.size) lineTo(pts[i].x, pts[i].y)
+                                lineTo(pts.last().x, size.height)
+                                close()
+                            }
+                        } else {
+                            null
+                        }
+                        val fillBrush = if (fill) {
+                            Brush.verticalGradient(
+                                colors = listOf(
+                                    color.copy(alpha = StrandAlpha.chartFillStrong),
+                                    color.copy(alpha = StrandAlpha.chartFillSoft),
+                                    Color.Transparent,
+                                ),
+                                startY = 0f,
+                                endY = size.height,
+                            )
+                        } else {
+                            null
+                        }
+                        val linePath = Path().apply {
+                            moveTo(pts.first().x, pts.first().y)
+                            for (i in 1 until pts.size) lineTo(pts[i].x, pts[i].y)
+                        }
+                        val lineStroke = Stroke(width = strokePx, cap = StrokeCap.Round, join = StrokeJoin.Round)
+                        onDrawBehind {
+                            // Soft gradient fill under the curve.
+                            if (fillPath != null && fillBrush != null) {
+                                drawPath(path = fillPath, brush = fillBrush)
+                            }
+                            // The line itself.
+                            drawPath(path = linePath, color = color, style = lineStroke)
+                        }
+                    }
+                }
+                // Tap-to-pinpoint marker — a thin per-frame overlay so a drag rebuilds only this, not
+                // the chart. Recomputes the single selected point from the same pointsFor geometry.
+                .drawWithContent {
+                    drawContent()
+                    if (selectionEnabled && selectedIndex >= 0) {
+                        val strokePx = 2.5f
+                        val topPad = strokePx + 4f
+                        val bottomPad = strokePx + 4f
+                        val pts = pointsFor(cleanValues, size.width, size.height, topPad, bottomPad)
+                        if (selectedIndex in pts.indices) {
+                            val p = pts[selectedIndex]
+                            drawLine(
+                                color = color.copy(alpha = StrandAlpha.chartMarker),
+                                start = Offset(p.x, 0f),
+                                end = Offset(p.x, size.height),
+                                strokeWidth = 1.5f,
+                                cap = StrokeCap.Round,
+                            )
+                            drawCircle(color = color, radius = 5f, center = p)
+                            drawCircle(color = Palette.surfaceBase.copy(alpha = StrandAlpha.chartShadow), radius = 9f, center = p)
+                            drawCircle(color = color, radius = 4.5f, center = p)
+                            drawContext.canvas.nativeCanvas.apply {
+                                val label = lineChartSelectionLabel(cleanValues[selectedIndex], formatValue)
+                                drawText(label, 8f, 32f, markerPaint)
+                            }
+                        }
+                    }
+                },
+        )
     }
 }
 
@@ -299,7 +393,15 @@ fun MultiLineChart(
             .filter { it.values.size >= 2 }
     }
 
-    Canvas(modifier = modifier.fillMaxWidth()) {
+    // ONE collapsed semantics node: summarise across all series (count of lines + overall low/high) so
+    // the a11y delegate reads a single line rather than walking the canvas. Changes no drawing.
+    val axSummary = run {
+        val all = cleanSeries.flatMap { it.values }
+        if (all.isEmpty()) "Trends, no data"
+        else "Trends, ${cleanSeries.size} series, low ${formatLineValue(all.min())}, high ${formatLineValue(all.max())}"
+    }
+
+    Canvas(modifier = modifier.fillMaxWidth().clearAndSetSemantics { contentDescription = axSummary }) {
         if (cleanSeries.isEmpty()) {
             drawBaseline()
             return@Canvas
@@ -336,6 +438,11 @@ private fun nearestIndexForX(count: Int, width: Float, x: Float): Int {
     return raw.coerceIn(0, count - 1)
 }
 
+/** The tap/drag pinpoint label: the caller's display formatter when supplied (#463), else the raw
+ *  near-integer-collapsing default. Split out so the fallback choice is JVM-testable. */
+internal fun lineChartSelectionLabel(value: Double, formatValue: ((Double) -> String)?): String =
+    formatValue?.invoke(value) ?: formatLineValue(value)
+
 private fun formatLineValue(value: Double): String {
     if (!value.isFinite()) return "-"
     val rounded = value.roundToInt().toDouble()
@@ -369,10 +476,28 @@ fun BarChart(
 ) {
     val cleanValues = remember(values) { values.map { if (it.isFinite() && it > 0.0) it else 0.0 } }
     var selectedIndex by remember(cleanValues) { mutableIntStateOf(-1) }
+    // Pre-laid value-label Paint, remembered rather than allocated inside the draw block (the old code
+    // built a fresh android.graphics.Paint every draw). Keyed on color so it tracks a tint change.
+    val barLabelPaint = remember(color) {
+        android.graphics.Paint().apply {
+            isAntiAlias = true
+            textSize = 30f
+            this.color = color.copy(alpha = StrandAlpha.chartLabel).toArgb()
+            typeface = android.graphics.Typeface.create(
+                android.graphics.Typeface.DEFAULT,
+                android.graphics.Typeface.BOLD,
+            )
+        }
+    }
+    val unselectedColor = remember(color) { color.copy(alpha = StrandAlpha.unselectedBar) }
 
+    // ONE collapsed semantics node so the a11y delegate reads a single bar-series summary instead of
+    // walking every bar. Summarises the (zeroed-non-finite) source values the bars are scaled from.
+    val axSummary = seriesSummary(cleanValues, "Bars")
     Box(
         modifier = modifier
             .fillMaxWidth()
+            .clearAndSetSemantics { contentDescription = axSummary }
             .then(
                 if (selectionEnabled) {
                     Modifier.pointerInput(cleanValues) {
@@ -391,55 +516,87 @@ fun BarChart(
                 } else {
                     Modifier
                 },
-            ),
-    ) {
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            val clean = cleanValues
-            val maxV = clean.maxOrNull() ?: 0.0
-            if (clean.isEmpty() || maxV <= 0.0 || size.width <= 0f || size.height <= 0f) {
-                drawBaseline()
-                return@Canvas
-            }
-
-            val topPad = 4f
-            val usableH = (size.height - topPad).coerceAtLeast(1f)
-            val slot = size.width / clean.size
-            val barWidth = (slot * 0.64f).coerceAtLeast(1f)
-            val capRadius = (barWidth / 2f)
-
-            clean.forEachIndexed { i, v ->
-                val norm = (v / maxV).toFloat().coerceIn(0f, 1f)
-                val barHeight = (norm * usableH).coerceAtLeast(if (v > 0.0) 1f else 0f)
-                if (barHeight <= 0f) return@forEachIndexed
-                val cx = slot * i + slot / 2f
-                val left = cx - barWidth / 2f
-                val top = size.height - barHeight
-                drawLine(
-                    color = if (selectionEnabled && i == selectedIndex) color else color.copy(alpha = StrandAlpha.unselectedBar),
-                    start = Offset(cx, size.height),
-                    end = Offset(cx, (top + capRadius).coerceAtMost(size.height)),
-                    strokeWidth = barWidth,
-                    cap = StrokeCap.Round,
-                )
-                @Suppress("UNUSED_EXPRESSION") left
-            }
-
-            if (selectionEnabled && selectedIndex in clean.indices) {
-                drawContext.canvas.nativeCanvas.apply {
-                    val paint = android.graphics.Paint().apply {
-                        isAntiAlias = true
-                        textSize = 30f
-                        this.color = color.copy(alpha = StrandAlpha.chartLabel).toArgb()
-                        typeface = android.graphics.Typeface.create(
-                            android.graphics.Typeface.DEFAULT,
-                            android.graphics.Typeface.BOLD,
-                        )
-                    }
-                    drawText(formatLineValue(clean[selectedIndex]), 8f, 32f, paint)
+            )
+            // PERF (#scroll-jank): the per-bar geometry (max, slot, bar width/height, x positions) was
+            // recomputed inside the Canvas draw lambda every frame. Hoist the geometry into
+            // drawWithCache (keyed on cleanValues + the implicit size) into a list of bar segments; the
+            // onDrawBehind just replays them — and reads selectedIndex per-frame so a tap re-tints one
+            // bar without rebuilding geometry. When values can exceed the pixel width the source is
+            // mean-bucket-downsampled to ~one bar per horizontal pixel first (visually identical: a 0.64×
+            // bar at sub-pixel slots was an unreadable smear; the bucket mean preserves the silhouette).
+            .drawWithCache {
+                val w = size.width
+                val h = size.height
+                // Mean-bucket-downsample so there is at most ~one bar per horizontal pixel. Above that the
+                // 0.64×-slot bars overlap into a solid block anyway, so the bucket mean is pixel-identical
+                // while cutting the bar count (and the per-frame work) to the visible resolution.
+                // Only downsample when selection is OFF: an interactive BarChart maps the user's tapped
+                // selectedIndex against the FULL-resolution cleanValues, so collapsing the drawn bars
+                // would desync the highlight + label. Interactive charts carry small bounded counts
+                // (days), so they never hit this path anyway; the downsample targets dense static bars.
+                val maxBars = w.toInt().coerceAtLeast(1)
+                val clean = if (!selectionEnabled && cleanValues.size > maxBars && maxBars >= 1) {
+                    meanBucketDownsample(cleanValues, maxBars)
+                } else {
+                    cleanValues
                 }
-            }
-        }
+                val maxV = clean.maxOrNull() ?: 0.0
+                if (clean.isEmpty() || maxV <= 0.0 || w <= 0f || h <= 0f) {
+                    onDrawBehind { drawBaseline() }
+                } else {
+                    val topPad = 4f
+                    val usableH = (h - topPad).coerceAtLeast(1f)
+                    val slot = w / clean.size
+                    val barWidth = (slot * 0.64f).coerceAtLeast(1f)
+                    val capRadius = (barWidth / 2f)
+                    // Precompute each bar's x centre + top y once.
+                    data class BarSeg(val cx: Float, val top: Float)
+                    val bars = ArrayList<BarSeg>(clean.size)
+                    clean.forEachIndexed { i, v ->
+                        val norm = (v / maxV).toFloat().coerceIn(0f, 1f)
+                        val barHeight = (norm * usableH).coerceAtLeast(if (v > 0.0) 1f else 0f)
+                        if (barHeight <= 0f) return@forEachIndexed
+                        val cx = slot * i + slot / 2f
+                        val top = h - barHeight
+                        bars.add(BarSeg(cx, top))
+                    }
+                    onDrawBehind {
+                        bars.forEachIndexed { i, seg ->
+                            drawLine(
+                                color = if (selectionEnabled && i == selectedIndex) color else unselectedColor,
+                                start = Offset(seg.cx, h),
+                                end = Offset(seg.cx, (seg.top + capRadius).coerceAtMost(h)),
+                                strokeWidth = barWidth,
+                                cap = StrokeCap.Round,
+                            )
+                        }
+                        if (selectionEnabled && selectedIndex in clean.indices) {
+                            drawContext.canvas.nativeCanvas.apply {
+                                drawText(formatLineValue(clean[selectedIndex]), 8f, 32f, barLabelPaint)
+                            }
+                        }
+                    }
+                }
+            },
+    )
+}
+
+/** Mean-bucket-downsample [values] to about [target] buckets, averaging each contiguous run. Used so a
+ *  BarChart with more values than horizontal pixels collapses to ~one bar per pixel without changing the
+ *  visible silhouette. Returns the input unchanged when it already fits. */
+private fun meanBucketDownsample(values: List<Double>, target: Int): List<Double> {
+    val n = values.size
+    if (target < 1 || n <= target) return values
+    val out = ArrayList<Double>(target)
+    for (b in 0 until target) {
+        val lo = (b.toLong() * n / target).toInt()
+        val hi = (((b + 1).toLong() * n / target).toInt()).coerceAtMost(n)
+        if (hi <= lo) { out.add(values[lo.coerceIn(0, n - 1)]); continue }
+        var sum = 0.0
+        for (i in lo until hi) sum += values[i]
+        out.add(sum / (hi - lo))
     }
+    return out
 }
 
 // MARK: - Hypnogram
@@ -461,43 +618,50 @@ fun Hypnogram(
     stages: List<Pair<String, Float>>,
     modifier: Modifier,
 ) {
-    Canvas(
+    // PERF (#scroll-jank): the weights sum + per-segment fraction/width geometry was recomputed inside
+    // the Canvas draw lambda every frame. Hoist it into drawWithCache (keyed on stages + the implicit
+    // size) as a list of (color,left,width) segments; the onDrawBehind just replays them. The inset
+    // well + the empty/zero-weight state are preserved exactly.
+    // ONE collapsed semantics node (per-stage share) so the a11y delegate reads a single sleep-stage
+    // summary instead of walking each band — the Android twin of the iOS Hypnogram's single node.
+    val axSummary = hypnogramSummary(stages)
+    Box(
         modifier = modifier
             .fillMaxWidth()
-            .height(Metrics.segmentBarHeight),
-    ) {
-        val w = size.width
-        val h = size.height
-        if (w <= 0f || h <= 0f) return@Canvas
-
-        // Inset well background so the strip reads as a recessed track.
-        drawRoundedTrack(Palette.surfaceInset)
-
-        val weights = stages.map { it.second }.map { if (it.isFinite() && it > 0f) it else 0f }
-        val total = weights.sum()
-        if (stages.isEmpty() || total <= 0f) {
-            // Baseline-only state: leave the inset well visible.
-            return@Canvas
-        }
-
-        var x = 0f
-        val gap = if (stages.size > 1) 1.5f else 0f
-        stages.forEachIndexed { i, (name, _) ->
-            val frac = weights[i] / total
-            val segW = (w * frac)
-            if (segW <= 0f) return@forEachIndexed
-            val drawW = (segW - if (i < stages.size - 1) gap else 0f).coerceAtLeast(0f)
-            if (drawW > 0f) {
-                drawSegment(
-                    color = stageColor(name),
-                    left = x,
-                    width = drawW,
-                    height = h,
-                )
-            }
-            x += segW
-        }
-    }
+            .height(Metrics.segmentBarHeight)
+            .clearAndSetSemantics { contentDescription = axSummary }
+            .drawWithCache {
+                val w = size.width
+                val h = size.height
+                val weights = stages.map { it.second }.map { if (it.isFinite() && it > 0f) it else 0f }
+                val total = weights.sum()
+                if (w <= 0f || h <= 0f || stages.isEmpty() || total <= 0f) {
+                    // Inset well only (or nothing if degenerate) — matches the old baseline-only state.
+                    onDrawBehind {
+                        if (w > 0f && h > 0f) drawRoundedTrack(Palette.surfaceInset)
+                    }
+                } else {
+                    val segs = ArrayList<Triple<Color, Float, Float>>(stages.size)
+                    var x = 0f
+                    val gap = if (stages.size > 1) 1.5f else 0f
+                    stages.forEachIndexed { i, (name, _) ->
+                        val frac = weights[i] / total
+                        val segW = (w * frac)
+                        if (segW <= 0f) return@forEachIndexed
+                        val drawW = (segW - if (i < stages.size - 1) gap else 0f).coerceAtLeast(0f)
+                        if (drawW > 0f) segs.add(Triple(stageColor(name), x, drawW))
+                        x += segW
+                    }
+                    onDrawBehind {
+                        // Inset well background so the strip reads as a recessed track.
+                        drawRoundedTrack(Palette.surfaceInset)
+                        segs.forEach { (c, left, width) ->
+                            drawSegment(color = c, left = left, width = width, height = h)
+                        }
+                    }
+                }
+            },
+    )
 }
 
 // MARK: - SegmentBar
@@ -514,25 +678,38 @@ fun SegmentBar(
     modifier: Modifier,
     height: Dp = Metrics.segmentBarHeight,
 ) {
-    Canvas(modifier = modifier.fillMaxWidth().height(height)) {
+    // PERF (#scroll-jank): same hoist as Hypnogram — the weight sum + per-segment widths move into
+    // drawWithCache (keyed on segments + the implicit size); the draw lambda replays the segment list.
+    // ONE collapsed semantics node so the a11y delegate doesn't walk each segment. The segments are a
+    // caller-supplied colour breakdown with no inherent label, so the summary is just the segment count.
+    val axSummary = if (segments.isEmpty()) "Breakdown, no data" else "Breakdown, ${segments.size} segments"
+    Box(modifier = modifier.fillMaxWidth().height(height).clearAndSetSemantics { contentDescription = axSummary }.drawWithCache {
         val w = size.width
         val h = size.height
-        if (w <= 0f || h <= 0f) return@Canvas
-        drawRoundedTrack(Palette.surfaceInset)
         val weights = segments.map { it.second }.map { if (it.isFinite() && it > 0f) it else 0f }
         val total = weights.sum()
-        if (segments.isEmpty() || total <= 0f) return@Canvas
-        var x = 0f
-        val gap = if (segments.size > 1) 1.5f else 0f
-        segments.forEachIndexed { i, (color, _) ->
-            val frac = weights[i] / total
-            val segW = w * frac
-            if (segW <= 0f) return@forEachIndexed
-            val drawW = (segW - if (i < segments.size - 1) gap else 0f).coerceAtLeast(0f)
-            if (drawW > 0f) drawSegment(color = color, left = x, width = drawW, height = h)
-            x += segW
+        if (w <= 0f || h <= 0f || segments.isEmpty() || total <= 0f) {
+            onDrawBehind {
+                if (w > 0f && h > 0f) drawRoundedTrack(Palette.surfaceInset)
+            }
+        } else {
+            val segs = ArrayList<Triple<Color, Float, Float>>(segments.size)
+            var x = 0f
+            val gap = if (segments.size > 1) 1.5f else 0f
+            segments.forEachIndexed { i, (color, _) ->
+                val frac = weights[i] / total
+                val segW = w * frac
+                if (segW <= 0f) return@forEachIndexed
+                val drawW = (segW - if (i < segments.size - 1) gap else 0f).coerceAtLeast(0f)
+                if (drawW > 0f) segs.add(Triple(color, x, drawW))
+                x += segW
+            }
+            onDrawBehind {
+                drawRoundedTrack(Palette.surfaceInset)
+                segs.forEach { (c, left, width) -> drawSegment(color = c, left = left, width = width, height = h) }
+            }
         }
-    }
+    })
 }
 
 private fun DrawScope.drawRoundedTrack(color: Color) {
@@ -644,10 +821,14 @@ fun TimelineChart(
         points.filter { it.ts in windowStart..windowEnd && it.value.isFinite() }
     }
 
+    // ONE collapsed semantics node (summary of the VISIBLE window) so the a11y delegate reads a single
+    // line instead of walking the canvas; recomputes as the zoom/pan window changes. Changes no drawing.
+    val axSummary = seriesSummary(vis.map { it.value }, "Timeline")
     Box(
         modifier = modifier
             .fillMaxWidth()
             .clipToBounds()
+            .clearAndSetSemantics { contentDescription = axSummary }
             .pointerInput(bounds) {
                 detectTransformGestures { centroid, pan, zoom, _ ->
                     val width = size.width.toFloat().coerceAtLeast(1f)

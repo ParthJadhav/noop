@@ -154,7 +154,7 @@ object FitnessAgeEngine {
             FitnessReadinessItem("waist", "Waist (optional)",
                 if (hasWaist) FitnessReadinessStatus.SATISFIED else FitnessReadinessStatus.MISSING,
                 required = false, role = FitnessReadinessRole.UNLOCKS_VO2MAX,
-                detail = if (hasWaist) "Sharpens VO₂max" else "Optional — sharpens VO₂max"),
+                detail = if (hasWaist) "Sharpens VO₂max" else "Optional - sharpens VO₂max"),
         )
         val confidence = when {
             !hasAge || !hasSex || rhrDays < minCoverageDays -> FitnessAgeConfidence.NOT_READY

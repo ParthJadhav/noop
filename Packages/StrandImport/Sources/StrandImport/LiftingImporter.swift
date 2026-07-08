@@ -429,7 +429,7 @@ public extension LiftingSession {
         parts.append("\(setCount) set\(setCount == 1 ? "" : "s")")
         if exerciseCount > 0 { parts.append("\(exerciseCount) exercise\(exerciseCount == 1 ? "" : "s")") }
         var note = "Strength · " + parts.joined(separator: " · ")
-        if includeTitle, let title, !title.isEmpty { note = "\(title) — " + note }
+        if includeTitle, let title, !title.isEmpty { note = "\(title) - " + note }
         return note
     }
 }

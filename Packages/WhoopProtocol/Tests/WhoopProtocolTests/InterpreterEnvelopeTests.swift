@@ -6,7 +6,9 @@ final class InterpreterEnvelopeTests: XCTestCase {
 
     func testRealtimeDataEnvelopeAndStaticFields() {
         let frame = Self.hex("aa1800ff28020f3de10128663c0000000000000000000000da855212")
-        let out = parseFrame(frame)
+        // collectFields: this test asserts on the annotated fields array, which is opt-in
+        // diagnostics (D#742). FastPathParityTests pins the default fast path.
+        let out = parseFrame(frame, collectFields: true)
         XCTAssertTrue(out.ok)
         XCTAssertEqual(out.typeName, "REALTIME_DATA")
         XCTAssertEqual(out.seq, 2)
@@ -37,7 +39,8 @@ final class InterpreterEnvelopeTests: XCTestCase {
     }
 
     func testInvalidFrame() {
-        let out = parseFrame([0x01, 0x02])
+        // collectFields:true so rawHex is populated (D#969 gates rawHex on collectFields).
+        let out = parseFrame([0x01, 0x02], collectFields: true)
         XCTAssertFalse(out.ok)
         XCTAssertEqual(out.typeName, "INVALID/FRAGMENT")
         XCTAssertEqual(out.rawHex, "0102")

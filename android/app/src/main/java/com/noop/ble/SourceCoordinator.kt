@@ -7,6 +7,7 @@ import com.noop.data.PairedDeviceRow
 import com.noop.data.SourceKind
 import com.noop.data.StreamBatch
 import com.noop.data.WhoopRepository
+import com.noop.oura.OuraRingGen
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -107,6 +108,22 @@ class SourceCoordinator(
     private val _sensorMetrics = MutableStateFlow(StandardHrSource.SensorMetrics())
     val sensorMetrics: StateFlow<StandardHrSource.SensorMetrics> = _sensorMetrics.asStateFlow()
 
+    /** The active Oura source's live adopt outcome, mirrored so the Add-Oura wizard can leave its Adopting
+     *  step (success -> close, failed -> the honest Failed step). [AdoptPhase.Idle] whenever no Oura source
+     *  is live, so a stale outcome never drives a wizard transition. Mirrors Swift `AppModel.ouraAdoptPhase`. */
+    private val _ouraAdoptPhase = MutableStateFlow(OuraLiveSource.AdoptPhase.Idle)
+    val ouraAdoptPhase: StateFlow<OuraLiveSource.AdoptPhase> = _ouraAdoptPhase.asStateFlow()
+
+    /** The active Oura source's honest needs-pairing message (null when none). The wizard treats a non-null
+     *  value during Adopting as an honest failure too (covers no-ack / ack!=OK paths). null whenever no Oura
+     *  source is live. Mirrors Swift `AppModel.ouraNeedsPairing`. */
+    private val _ouraNeedsPairing = MutableStateFlow<String?>(null)
+    val ouraNeedsPairing: StateFlow<String?> = _ouraNeedsPairing.asStateFlow()
+
+    /** Collects the active Oura source's adoptPhase / needsPairing into the mirrors above; cancelled and
+     *  nulled on teardown so a forgotten ring never leaks a stale outcome. */
+    private var ouraStateJob: kotlinx.coroutines.Job? = null
+
     /** The lazily-created generic-strap source. null until the first switch to a strap; reused after. */
     private var standardSource: StandardHrSource? = null
     /** The lazily-created FTMS gym-equipment source. null until the first switch to a gym machine. An FTMS
@@ -117,7 +134,14 @@ class SourceCoordinator(
      *  to a "huami" device. Like the others it's a non-WHOOP live source sharing the same strap edge —
      *  exactly one of the non-WHOOP sources is ever live at a time. */
     private var huamiSource: HuamiHrSource? = null
-    /** The deviceId the active non-WHOOP source ([standardSource]/[ftmsSource]/[huamiSource]) runs for. */
+    /** The lazily-created EXPERIMENTAL Oura ring source (gen3 / gen4 / gen5). null until the first switch
+     *  to an "oura" device. Like the others it's a non-WHOOP live source sharing the same strap edge:
+     *  exactly one of the non-WHOOP sources is ever live at a time. Owns its OWN scanner/GATT and never
+     *  touches the WHOOP BLE client; surfaces only the ring's OWN raw signals + open event tags (NOOP
+     *  computes its own Charge/Rest), never Oura's encrypted readiness/sleep scores. */
+    private var ouraSource: OuraLiveSource? = null
+    /** The deviceId the active non-WHOOP source ([standardSource]/[ftmsSource]/[huamiSource]/[ouraSource])
+     *  runs for. */
     private var activeStrapId: String? = null
     /** The WHOOP registry id we last pointed the connection at, so a WHOOP→WHOOP switch is detected and a
      *  repeat activation of the SAME WHOOP is a no-op. null until the first WHOOP activation. (MW-3) */
@@ -128,6 +152,11 @@ class SourceCoordinator(
     /** The last active id we reconciled, so a repeated [onActiveDeviceChanged] for the same id is a no-op
      *  (mirrors Swift's `removeDuplicates()` on the published active id). */
     private var lastSeenId: String? = null
+    /** The address of the strap the WHOOP link is CURRENTLY connected to, learned from
+     *  [connectedPeripheralChanged]. Lets a WHOOP→WHOOP make-active adopt IN PLACE when the newly-activated
+     *  row is the same physical strap (#74 keep): a stop/start churn there would drop the live link and
+     *  reconnect through the scan path. Cleared on disconnect (null address). */
+    private var connectedWhoopAddress: String? = null
 
     /**
      * Reconcile once against the CURRENT active id (launch). For a single-WHOOP install this resolves to
@@ -164,6 +193,10 @@ class SourceCoordinator(
      *   • it already matches → nothing to write.
      */
     fun connectedPeripheralChanged(address: String?) {
+        // Track the live strap's address for the WHOOP->WHOOP adopt-in-place skip (#74). A null address is a
+        // disconnect/never-connected republish: clear it so a later make-active can't wrongly match a stale
+        // link, then fall through to the existing ignore.
+        connectedWhoopAddress = address
         if (address == null) return
         scope.launch {
             val activeId = registry.activeDeviceId() ?: return@launch
@@ -207,7 +240,7 @@ class SourceCoordinator(
         } catch (t: Throwable) {
             lastSeenId = null
             log("SourceCoordinator: device switch to '$id' failed: ${t.javaClass.simpleName}: ${t.message}")
-            straplog("HR-strap: activating this device failed (${t.javaClass.simpleName}: ${t.message}) — " +
+            straplog("HR-strap: activating this device failed (${t.javaClass.simpleName}: ${t.message}) - " +
                 "staying on the previous source. Please share this log so we can fix it.")
         }
     }
@@ -240,6 +273,13 @@ class SourceCoordinator(
                 // existing WHOOP flow — kicked off elsewhere on launch — uses it. For the seeded "my-whoop"
                 // (peripheralId null, id "my-whoop") this is setWhoopPreferredAddress(null) and NO
                 // setActiveDeviceId / NO scan / NO disconnect: byte-for-byte today's behaviour.
+                pointWhoop(id, peripheralId)
+            }
+            peripheralId != null && peripheralId.equals(connectedWhoopAddress, ignoreCase = true) -> {
+                // WHOOP → the SAME physical strap (make-active on the row we're already connected to, e.g. the
+                // pick-same-strap Add flow): adopt IN PLACE. A stop/start churn here would drop the #74-kept
+                // live link and force a scan reconnect (wrong-family default + OS-bond status=133). Just
+                // re-point the targeting so samples land under this id; the connection is untouched.
                 pointWhoop(id, peripheralId)
             }
             else -> {
@@ -282,8 +322,9 @@ class SourceCoordinator(
         val address = row?.peripheralId
 
         // Route by sourceKind: an FTMS gym machine runs the FtmsSource; an EXPERIMENTAL Huami device
-        // (Amazfit / Zepp / Mi Band) runs the HuamiHrSource; everything else is a generic HR strap on
-        // StandardHrSource. All are non-WHOOP live sources sharing this same strap edge.
+        // (Amazfit / Zepp / Mi Band) runs the HuamiHrSource; an EXPERIMENTAL Oura ring runs the
+        // OuraLiveSource; everything else is a generic HR strap on StandardHrSource. All are non-WHOOP
+        // live sources sharing this same strap edge.
         if (row?.sourceKind == SourceKind.ftms.name) {
             val source = FtmsSource(
                 context = ctx,
@@ -307,6 +348,47 @@ class SourceCoordinator(
             )
             if (!address.isNullOrEmpty()) source.connect(address) else source.scan()
             huamiSource = source
+        } else if (row?.sourceKind == SourceKind.oura.name) {
+            val repo = requireNotNull(repository) { "SourceCoordinator.repository is required to persist Oura samples" }
+            // The ring generation is carried on the row's model ("Oura Ring 3/4/5"); recover it so the
+            // transport clamps the MTU + picks the gen-appropriate live-HR enable command set. Defaults to
+            // gen3 if the model is missing/unrecognised (OuraRingGen.from).
+            val ringGen = OuraRingGen.from(row?.model ?: "")
+            val source = OuraLiveSource(
+                context = ctx,
+                deviceId = id,
+                ringGen = ringGen,
+                liveSink = { hr, rr -> liveSink(hr, rr) },   // ring HR + R-R → the existing live recorder
+                // The 16-byte application install key, read from the at-rest-encrypted key store keyed by
+                // this ring's device id. INJECTED, never hardcoded; null drives OuraLiveSource's honest
+                // needs-pairing path (no faked data). Read fresh on each connect so a key provisioned
+                // mid-session (the adopt install) is picked up on the post-install re-auth.
+                authKey = { OuraInstallKeyStore.load(ctx, id) },
+                persist = { batch: StreamBatch, deviceId: String ->
+                    scope.launch { runCatching { repo.insert(batch, deviceId) } }
+                },
+                log = straplog,           // Oura connect/auth/stream lifecycle → the SAME exported strap log (#421)
+                onBattery = batterySink,  // ring battery → the same live state the WHOOP strap battery uses
+            )
+            // CONSUME the one-shot adopt-intent the wizard armed after its irreversible-consent gate AND its
+            // second "Take over" confirm (and ONLY then). True permits the DANGEROUS post-factory-reset key
+            // install for THIS session; the Advanced-key path and every later read-only reconnect read false,
+            // so they NEVER provision a key (OURA_PROTOCOL.md s3.2). One-shot by design: a single consent
+            // provisions ONE install. setAdoptIntent must run BEFORE connect (the driver is built per connect
+            // with allowKeyInstall wired from it).
+            if (OuraInstallKeyStore.consumePendingAdopt(ctx, id)) {
+                source.setAdoptIntent(true)
+                straplog("Oura: adopt consent granted - this session may install NOOP's key")
+            }
+            // Mirror this source's live adopt outcome + honest needs-pairing message so the wizard can leave
+            // its Adopting step on a confirmed streaming (success) or an honest Failed. Reset on teardown.
+            ouraStateJob?.cancel()
+            ouraStateJob = scope.launch {
+                launch { source.adoptPhase.collect { _ouraAdoptPhase.value = it } }
+                launch { source.needsPairing.collect { _ouraNeedsPairing.value = it } }
+            }
+            if (!address.isNullOrEmpty()) source.connect(address) else source.scan()
+            ouraSource = source
         } else {
             val repo = requireNotNull(repository) { "SourceCoordinator.repository is required to persist strap samples" }
             val source = StandardHrSource(
@@ -336,12 +418,18 @@ class SourceCoordinator(
         onStrap = true
     }
 
-    /** Stop whichever non-WHOOP source (standard strap, FTMS machine, or Huami device) is live, and drop
-     *  the reference. Idempotent. Exactly one is ever live, but we stop all defensively. */
+    /** Stop whichever non-WHOOP source (standard strap, FTMS machine, Huami device, or Oura ring) is live,
+     *  and drop the reference. Idempotent. Exactly one is ever live, but we stop all defensively. */
     private fun tearDownNonWhoopSource() {
         standardSource?.stop(); standardSource = null
         ftmsSource?.stop(); ftmsSource = null
         huamiSource?.stop(); huamiSource = null
+        ouraSource?.stop(); ouraSource = null
+        // Stop mirroring the (now torn-down) Oura source and clear the mirrors so a stale adopt outcome /
+        // needs-pairing message never outlives the source or drives a later wizard transition.
+        ouraStateJob?.cancel(); ouraStateJob = null
+        _ouraAdoptPhase.value = OuraLiveSource.AdoptPhase.Idle
+        _ouraNeedsPairing.value = null
         // A stale speed/cadence/power readout must not outlive the strap session (the source's own stop()
         // already pushes an empty SensorMetrics, but reset here too so leaving for WHOOP / FTMS / Huami —
         // none of which feed this flow — is clean and immediate).

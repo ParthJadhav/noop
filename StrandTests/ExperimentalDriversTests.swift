@@ -1,4 +1,5 @@
 import XCTest
+import Combine
 @testable import Strand
 import WhoopStore
 
@@ -111,5 +112,52 @@ final class ExperimentalDriversTests: XCTestCase {
             id: "garmin-1", brand: "Garmin", model: "Forerunner 265", peripheralId: "BB",
             sourceKind: .liveBLE, capabilities: [.hr, .hrv], status: .paired, addedAt: 0, lastSeenAt: 0)
         XCTAssertFalse(SourceCoordinator.isWhoop(garmin))
+    }
+
+    // MARK: - Apple Watch is a HealthKit source, not a BLE peripheral
+
+    /// REGRESSION GUARD: activating the Apple Watch (`apple-health`, `.liveAppleWatch`, `peripheralId: nil`)
+    /// must NOT touch the BLE world. The watch is a HealthKit pseudo-device read entirely by
+    /// `HealthKitBridge`. If `SourceCoordinator` ever routed it through `switchToStrap` it would
+    /// `stopWhoop()` (tearing down a live WHOOP) and then BLE-scan a peripheral that doesn't exist.
+    /// This asserts both never happen: `stopWhoop` is not called, and no `StandardHRSource` is started
+    /// (which would synchronously emit an "HR-strap:" line through the strap log on `scan()`).
+    @MainActor
+    func testActivatingAppleWatchDoesNotStopWhoopOrStartABLESource() async throws {
+        // Real in-memory store + registry, matching how `AppModel.wireSourceCoordinator` builds them.
+        let store = try await WhoopStore.inMemory()
+        let registry = DeviceRegistry(store: DeviceRegistryStore(dbQueue: store.registryWriter))
+        registry.reload()   // seeds 'my-whoop' active from migration v15
+
+        // Register the Apple Watch exactly as `AppleWatchDevice.device(...)` would: HealthKit source,
+        // nil peripheralId, `.liveAppleWatch`.
+        registry.add(PairedDevice(
+            id: "apple-health", brand: "Apple", model: "Apple Watch",
+            peripheralId: nil, sourceKind: .liveAppleWatch,
+            capabilities: [.hr, .hrv, .sleep], status: .paired, addedAt: 0, lastSeenAt: 0))
+        registry.setActive("apple-health")
+
+        var stopWhoopCalls = 0
+        var startWhoopCalls = 0
+        var strapLogLines: [String] = []
+
+        let coordinator = SourceCoordinator(
+            registry: registry,
+            live: LiveState(),
+            storeHandle: { nil },
+            startWhoop: { startWhoopCalls += 1 },
+            stopWhoop: { stopWhoopCalls += 1 },
+            setWhoopPreferredPeripheral: { _ in },
+            setWhoopActiveDeviceId: { _ in },
+            connectedPeripheralUUID: Empty<String?, Never>().eraseToAnyPublisher(),
+            straplog: { strapLogLines.append($0) })
+
+        // Drive the transition directly (the same call `start()`'s subscription makes on an active-id change).
+        coordinator.activeDeviceChanged(to: "apple-health")
+
+        XCTAssertEqual(stopWhoopCalls, 0, "Activating the Apple Watch must NOT tear down the live WHOOP link")
+        XCTAssertEqual(startWhoopCalls, 0, "The HealthKit watch source must not re-scan WHOOP")
+        XCTAssertFalse(strapLogLines.contains(where: { $0.hasPrefix("HR-strap:") }),
+                       "No StandardHRSource should be started for a HealthKit pseudo-device")
     }
 }

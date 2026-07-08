@@ -298,7 +298,7 @@ object RangeReportEngine {
         } else {
             val up = s.trend == ReportTrend.RISING
             val good = up == s.metric.higherIsBetter
-            if (good) " — a good sign" else " — worth a look"
+            if (good) " - a good sign" else " - worth a look"
         }
         val unit = if (s.metric.unit.isEmpty()) "" else " ${s.metric.unit}"
         return "${s.metric.label} is $word (avg ${round1(s.firstHalfMean)}$unit → " +

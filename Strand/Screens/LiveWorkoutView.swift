@@ -13,18 +13,26 @@ import WhoopStore
 /// effort is the running `ActiveWorkout.liveStrain` (StrainScorer over the captured window).
 struct LiveWorkoutView: View {
     @EnvironmentObject private var model: AppModel
-    /// The same shared `LiveState` the app injects at its root (StrandApp). Observed here so the additive
-    /// sensor readout (speed / cadence / power from a connected standard fitness sensor) refreshes as
-    /// packets arrive — `model.live` is its own ObservableObject, so SwiftUI wouldn't see its @Published
-    /// changes through `model` alone. HR / zone / effort still come from `model` (smoothed bpm + scorers),
-    /// untouched.
-    @EnvironmentObject private var live: LiveState
+    // PERF (scroll/recompose): this screen deliberately does NOT observe `LiveState` directly. A connected
+    // strap publishes `LiveState` ~1 Hz (HR + each R-R packet, plus sensor frames), and an
+    // `@EnvironmentObject live` here would invalidate the WHOLE body on every tick — the HR hero, effort
+    // gauge, zone rail and stats grid all re-evaluate even though they read from `model` (smoothed bpm +
+    // scorers), not `live`. The only region that genuinely needs `live` is the additive sensor readout
+    // (speed / cadence / power), so it's extracted into the small `SensorRowIfPresent` leaf below that
+    // owns its OWN `@EnvironmentObject live`. A sensor/R-R packet now re-renders just that row, not the
+    // hero. (`model.live` is its own ObservableObject, so the leaf's `live` is the one that sees the
+    // @Published changes — exactly as the parent's direct observation did before.)
     let onClose: () -> Void
 
     /// Effort display scale (#268) — routes the live Effort read-out through the shared helper so it
     /// matches every other surface. Display-only; the captured value stays stored 0–100.
     @AppStorage(UnitPrefs.effortScaleKey) private var effortScaleRaw = EffortScale.hundred.rawValue
     private var effortScale: EffortScale { UnitPrefs.resolveEffortScale(effortScaleRaw) }
+
+    /// Keep the screen awake while recording (#703). Opt-in, default off; the toggle lives in Settings.
+    /// Read here so we can hold the idle timer off only while this in-exercise screen is up and release it
+    /// the moment it leaves, which is exactly the bounded usage Apple asks for. iOS-only (no-op on Mac).
+    @AppStorage("workoutKeepScreenOn") private var keepScreenOn = false
 
     private var zoneSet: HRZoneSet { HRZones.zones(maxHR: Double(model.profile.hrMax)) }
     private var zone: Int { model.bpm.map { zoneSet.zoneNumber(forBPM: Double($0)) } ?? 0 }
@@ -42,7 +50,10 @@ struct LiveWorkoutView: View {
                 ForEach(Array(cards.enumerated()), id: \.offset) { index, card in
                     card.staggeredAppear(index: index)
                 }
-                if live.hasSensorMetrics { sensorRow.staggeredAppear(index: 5) }
+                // Live-observing leaf: renders the sensor row (and its entrance stagger) only when a
+                // standard fitness sensor is feeding metrics, refreshing on its own packets without
+                // re-rendering the HR hero / effort gauge above (scroll-stutter isolation).
+                SensorRowIfPresent()
                 Spacer(minLength: NoopMetrics.space3)
                 endButton
             }
@@ -58,6 +69,24 @@ struct LiveWorkoutView: View {
         }
         // If the workout ended elsewhere (process restart cleared it), close the screen.
         .onChangeCompat(of: model.activeWorkout == nil) { gone in if gone { onClose() } }
+        // Arm the realtime HR stream while the in-exercise screen is up (#681). On a WHOOP 5/MG live HR
+        // only flows while the puffin realtime stream is armed; previously only the Live tab armed it, so
+        // starting a manual workout straight from Workouts (Live never opened) left `model.bpm == nil` —
+        // captureWorkoutSample bailed on every sample and endWorkout silently discarded the empty
+        // session. Ref-counted in AppModel, so when this sheet sits over an already-armed Live tab the
+        // two balance and neither disarms the other (mirrors Android LiveWorkoutScreen's DisposableEffect
+        // requestRealtimeHr/releaseRealtimeHr). Balanced: one start on appear, one stop on disappear.
+        .onAppear {
+            model.startRealtimeHR()
+            // Hold the display awake for the session only if the user opted in (#703).
+            if keepScreenOn { ScreenIdle.keepAwake(true) }
+        }
+        .onDisappear {
+            model.stopRealtimeHR()
+            // Always release on the way out so the system idle timer resumes. Even if the toggle was
+            // flipped off mid-workout, this clears any hold we placed.
+            ScreenIdle.keepAwake(false)
+        }
     }
 
     private var header: some View {
@@ -154,10 +183,10 @@ struct LiveWorkoutView: View {
                 }
             }
             if let band = zoneSet.zones.first(where: { $0.number == zone }) {
-                Text("Zone \(zone): \(Int(band.lower))–\(Int(band.upper)) bpm (\(Int(band.lowerPct * 100))–\(Int(band.upperPct * 100))% max HR)")
+                Text("Zone \(zone): \(Int(band.lower))-\(Int(band.upper)) bpm (\(Int(band.lowerPct * 100))-\(Int(band.upperPct * 100))% max HR)")
                     .font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
             } else {
-                Text("Warming up — keep moving to climb into Zone 1.")
+                Text("Warming up. Keep moving to climb into Zone 1.")
                     .font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
             }
         }
@@ -166,35 +195,12 @@ struct LiveWorkoutView: View {
     private var statsGrid: some View {
         let w = model.activeWorkout
         return HStack(spacing: NoopMetrics.gap) {
-            stat("AVG", (w?.avgHr ?? 0) > 0 ? "\(w!.avgHr)" : "—",
+            stat(String(localized: "AVG"), (w?.avgHr ?? 0) > 0 ? "\(w!.avgHr)" : "—",
                  tint: (w?.avgHr ?? 0) > 0 ? StrandPalette.metricRose : StrandPalette.textPrimary)
-            stat("PEAK", (w?.peakHr ?? 0) > 0 ? "\(w!.peakHr)" : "—",
+            stat(String(localized: "PEAK"), (w?.peakHr ?? 0) > 0 ? "\(w!.peakHr)" : "—",
                  tint: (w?.peakHr ?? 0) > 0 ? StrandPalette.metricRose : StrandPalette.textPrimary)
-            stat("EFFORT", UnitFormatter.effortDisplay(w?.liveStrain ?? 0, scale: effortScale),
+            stat(String(localized: "EFFORT"), UnitFormatter.effortDisplay(w?.liveStrain ?? 0, scale: effortScale),
                  tint: StrandPalette.strainColor(w?.liveStrain ?? 0))
-        }
-    }
-
-    /// Additive readout for a connected standard fitness sensor (a footpod / bike speed-cadence sensor /
-    /// power meter) feeding RSC/CSC/CPS ALONGSIDE heart rate. Only the fields the sensor actually sent
-    /// render — each tile is dropped when its value is absent, and the whole row is hidden when nothing is
-    /// present (`live.hasSensorMetrics`), so a plain HR-only workout looks exactly as before. Honest units:
-    /// speed km/h, cadence per-minute (steps for running / rpm for cycling), power watts. Reuses the same
-    /// metric tile as the HR stats grid above; tinted with the Effort world so it reads as part of the
-    /// hero, not a competing accent. Nothing here touches HR / zone / effort.
-    private var sensorRow: some View {
-        let speed = LiveState.formatSpeedKmh(live.sensorSpeedKmh)
-        let cadence = LiveState.formatCadence(live.sensorCadence)
-        let power = LiveState.formatPowerWatts(live.sensorPowerWatts)
-        return VStack(alignment: .leading, spacing: 8) {
-            Text("SENSOR")
-                .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
-                .foregroundStyle(StrandPalette.textSecondary)
-            HStack(spacing: NoopMetrics.gap) {
-                if let speed { stat("SPEED", "\(speed) km/h", tint: StrandPalette.effortColor) }
-                if let cadence { stat("CADENCE", "\(cadence)/min", tint: StrandPalette.effortColor) }
-                if let power { stat("POWER", "\(power) W", tint: StrandPalette.effortColor) }
-            }
         }
     }
 
@@ -229,12 +235,66 @@ struct LiveWorkoutView: View {
 
     private static func zoneName(_ zone: Int) -> String {
         switch zone {
-        case 1: return "Recovery"
-        case 2: return "Fat burn"
-        case 3: return "Aerobic"
-        case 4: return "Threshold"
-        case 5: return "Maximum"
+        case 1: return String(localized: "Recovery")
+        case 2: return String(localized: "Fat burn")
+        case 3: return String(localized: "Aerobic")
+        case 4: return String(localized: "Threshold")
+        case 5: return String(localized: "Maximum")
         default: return ""
+        }
+    }
+}
+
+// MARK: - Live-observing leaf (scroll-stutter isolation)
+
+/// Additive readout for a connected standard fitness sensor (a footpod / bike speed-cadence sensor /
+/// power meter) feeding RSC/CSC/CPS ALONGSIDE heart rate. Only the fields the sensor actually sent
+/// render — each tile is dropped when its value is absent, and the WHOLE block (row + entrance stagger)
+/// is hidden when nothing is present (`live.hasSensorMetrics`), so a plain HR-only workout looks exactly
+/// as before. Honest units: speed km/h, cadence per-minute (steps for running / rpm for cycling), power
+/// watts. Tinted with the Effort world so it reads as part of the hero, not a competing accent. Nothing
+/// here touches HR / zone / effort.
+///
+/// This is a standalone leaf that owns its OWN `@EnvironmentObject live` (the parent `LiveWorkoutView`
+/// no longer observes `LiveState`), so an incoming sensor / R-R packet re-renders only this row, not the
+/// HR hero / effort gauge / zone rail above. The gate, layout and `staggeredAppear(index: 5)` are
+/// preserved verbatim, so the rendered output is byte-for-byte the previous inline code.
+private struct SensorRowIfPresent: View {
+    @EnvironmentObject private var live: LiveState
+
+    var body: some View {
+        if live.hasSensorMetrics {
+            let speed = LiveState.formatSpeedKmh(live.sensorSpeedKmh)
+            let cadence = LiveState.formatCadence(live.sensorCadence)
+            let power = LiveState.formatPowerWatts(live.sensorPowerWatts)
+            VStack(alignment: .leading, spacing: 8) {
+                Text("SENSOR")
+                    .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
+                    .foregroundStyle(StrandPalette.textSecondary)
+                HStack(spacing: NoopMetrics.gap) {
+                    if let speed { stat(String(localized: "SPEED"), "\(speed) km/h", tint: StrandPalette.effortColor) }
+                    if let cadence { stat(String(localized: "CADENCE"), "\(cadence)/min", tint: StrandPalette.effortColor) }
+                    if let power { stat(String(localized: "POWER"), "\(power) W", tint: StrandPalette.effortColor) }
+                }
+            }
+            .staggeredAppear(index: 5)
+        }
+    }
+
+    /// Same metric tile as `LiveWorkoutView.stat` (the HR stats grid) — duplicated here, unchanged, so the
+    /// leaf is self-contained and the rendered tile is identical.
+    private func stat(_ title: String, _ value: String, tint: Color = StrandPalette.textPrimary) -> some View {
+        NoopCard(padding: 14, tint: tint) {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(title)
+                    .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
+                    .foregroundStyle(StrandPalette.textSecondary)
+                Text(value)
+                    .font(StrandFont.number(26))
+                    .foregroundStyle(tint)
+                    .lineLimit(1).minimumScaleFactor(0.6)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }

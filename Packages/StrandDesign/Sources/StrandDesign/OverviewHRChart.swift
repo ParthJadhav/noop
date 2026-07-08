@@ -1,3 +1,6 @@
+#if !os(watchOS)
+// OverviewHRChart is a Swift Charts view with .onContinuousHover / MagnificationGesture pan-zoom
+// (none available on watchOS); the watch never shows it, so the whole file is excluded there.
 import SwiftUI
 import Charts
 
@@ -59,6 +62,10 @@ public struct OverviewHRChart: View {
     public var xRange: ClosedRange<Date>?
     public var height: CGFloat
     public var showsHover: Bool
+    /// iPhone touch scrub (#979 spin-off): when true, touch-and-hold pins the hover crosshair under the
+    /// finger and dragging scrubs it — driving the SAME readout layer the Mac pointer hover uses. Off by
+    /// default so every existing call site keeps its exact touch behaviour; the Deep Timeline opts in.
+    public var touchScrub: Bool
     public var valueFormat: (Double) -> String
     public var dateFormat: (Date) -> String
 
@@ -85,6 +92,7 @@ public struct OverviewHRChart: View {
         xRange: ClosedRange<Date>? = nil,
         height: CGFloat = 220,
         showsHover: Bool = true,
+        touchScrub: Bool = false,
         workoutTint: Color = StrandPalette.strain033,
         zoomDomain: Binding<ClosedRange<Date>?> = .constant(nil),
         zoomBounds: ClosedRange<Date>? = nil,
@@ -102,6 +110,7 @@ public struct OverviewHRChart: View {
         self.xRange = xRange
         self.height = height
         self.showsHover = showsHover
+        self.touchScrub = touchScrub
         self.workoutTint = workoutTint
         self._zoomDomain = zoomDomain
         self.zoomBounds = zoomBounds
@@ -110,12 +119,33 @@ public struct OverviewHRChart: View {
         self.averageValue = sorted.isEmpty
             ? valueRange.lowerBound
             : sorted.map(\.value).reduce(0, +) / Double(sorted.count)
+        // Deep Timeline (the only caller that supplies `zoomBounds`) keeps full resolution so pinch-zoom
+        // into sub-windows stays crisp. The default-binding case here is `zoomBounds == nil`, so the
+        // static Today chart downsamples. `zoomBounds` is the stable discriminator (set once, never
+        // toggles) — unlike the live `zoomDomain`, which is nil until the user first zooms.
+        self.displayPoints = (zoomBounds != nil)
+            ? sorted
+            : ChartDownsample.minMaxBucketed(sorted, threshold: ChartDownsample.markThreshold,
+                                             targetCount: ChartDownsample.targetVertices)
     }
 
     @State private var hoverX: CGFloat? = nil
     /// The zoom window captured at the start of a magnify/drag gesture, so the gesture is applied
     /// against a stable anchor instead of compounding each frame.
     @State private var gestureAnchorDomain: ClosedRange<Date>? = nil
+    #if os(iOS)
+    /// True while a touch scrub is engaged (the hold completed). Only used to fire the engage haptic
+    /// exactly once per scrub — the sequenced gesture can report `.second(true, nil)` more than once.
+    @State private var scrubEngaged = false
+    #endif
+
+    /// PERF: the 24h HR line can carry hundreds of samples — more than the ~360pt plot has pixels, so most
+    /// are sub-pixel pure draw cost. This is the point set actually handed to the line/area marks:
+    /// full resolution in the Deep Timeline (where the user pinches into sub-windows), else
+    /// min/max-per-bucket down to ~the plot pixel width. Min/max bucketing keeps every visible spike, so
+    /// the static Today chart is pixel-identical. Computed ONCE in `init` (not per body/hover eval) so
+    /// it's memoized on `points`; hover / markers / accessibility stay on the full `points`.
+    private let displayPoints: [TrendPoint]
 
     /// Smallest zoom window we allow (1 minute) — past this the line is just two points and pinch jitters.
     public static let minZoomSpan: TimeInterval = 60
@@ -144,6 +174,26 @@ public struct OverviewHRChart: View {
         }
         newLo = max(newLo, bounds.lowerBound.timeIntervalSince1970)
         return Date(timeIntervalSince1970: newLo)...Date(timeIntervalSince1970: max(newLo + 1, newHi))
+    }
+
+    // MARK: Annotation scoping (pure, testable in isolation)
+
+    /// The single sleep to band for a visible window: the LONGEST candidate overlapping it — the main
+    /// night, never an afternoon nap — the same pick the classic Today makes for its whole-day HR chart.
+    /// Extracted pure so the Deep Timeline's annotation parity (#979 spin-off) is headless-testable.
+    /// Overlap is half-open-ish like Today's filter: a sleep ending exactly at the window start (or
+    /// starting exactly at its end) does NOT count — it contributes zero visible band.
+    public static func mainSleep(_ candidates: [SleepSpan], overlapping window: ClosedRange<Date>) -> SleepSpan? {
+        candidates
+            .filter { $0.end > window.lowerBound && $0.start < window.upperBound }
+            .max(by: { $0.end.timeIntervalSince($0.start) < $1.end.timeIntervalSince($1.start) })
+    }
+
+    /// The workout spans overlapping a visible window (a glyph for an out-of-window workout would be
+    /// clamp-dragged to the plot edge and lie about its time). Edge-touching spans are kept — mirrors
+    /// the classic Today's inclusive workout filter. Order preserved. Pure.
+    public static func workouts(_ candidates: [WorkoutSpan], overlapping window: ClosedRange<Date>) -> [WorkoutSpan] {
+        candidates.filter { $0.end >= window.lowerBound && $0.start <= window.upperBound }
     }
 
     /// The visible domain after panning `base` by `deltaSeconds`, clamped into `bounds` (span preserved). Pure.
@@ -230,7 +280,7 @@ public struct OverviewHRChart: View {
             .foregroundStyle(StrandPalette.sleepDeep.opacity(0.32))
         }
 
-        ForEach(points) { p in
+        ForEach(displayPoints) { p in
             AreaMark(x: .value("Time", p.date), y: .value("BPM", p.value))
                 .interpolationMethod(.catmullRom)
                 .foregroundStyle(
@@ -243,7 +293,7 @@ public struct OverviewHRChart: View {
                     )
                 )
         }
-        ForEach(points) { p in
+        ForEach(displayPoints) { p in
             LineMark(x: .value("Time", p.date), y: .value("BPM", p.value))
                 .interpolationMethod(.catmullRom)
                 .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
@@ -333,6 +383,38 @@ public struct OverviewHRChart: View {
         }
     }
 
+    #if os(iOS)
+    /// Touch-and-hold-then-drag scrub (#979 spin-off). The stationary hold (0.25 s within 8 pt) is the
+    /// gate that separates scrubbing from the pan drag (min 6 pt) and pinch that own immediate movement.
+    /// LongPressGesture reports no location, so the crosshair appears from the drag phase's coordinates —
+    /// in practice the first micro-movement of a held finger, which is immediate; the engage haptic marks
+    /// the mode switch the instant the hold lands. Drives the SAME `hoverX` the Mac pointer hover drives,
+    /// so the readout (crosshair + dot + tooltip) is byte-identical across input methods.
+    private var touchScrubGesture: some Gesture {
+        LongPressGesture(minimumDuration: 0.25, maximumDistance: 8)
+            .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .local))
+            .onChanged { value in
+                guard case .second(true, let drag) = value else { return }
+                if !scrubEngaged {
+                    scrubEngaged = true
+                    StrandHaptic.selection.play()
+                }
+                if let drag {
+                    // Non-animating transaction, same reason as hover (TrendChart #104 flicker).
+                    var tx = Transaction()
+                    tx.disablesAnimations = true
+                    withTransaction(tx) { hoverX = drag.location.x }
+                }
+            }
+            .onEnded { _ in
+                scrubEngaged = false
+                var tx = Transaction()
+                tx.disablesAnimations = true
+                withTransaction(tx) { hoverX = nil }
+            }
+    }
+    #endif
+
     // MARK: Body
 
     public var body: some View {
@@ -378,17 +460,39 @@ public struct OverviewHRChart: View {
                         }
                     }
                 }
+                #if os(iOS)
+                // #979 spin-off — touch scrub. onContinuousHover above is pointer-only, so on iPhone the
+                // crosshair readout was unreachable (the collapsed a11y summary was the only datum
+                // affordance; cf. CompareView's touch-scrub note). Touch-and-hold claims the touch for
+                // scrubbing, then dragging moves the crosshair; lift clears it. Gating behind the hold is
+                // what keeps zoom/pan untouched: an immediate drag exceeds the hold's max distance and
+                // still pans (ZoomPanModifier), pinch still zooms, double-tap still resets. `.subviews`
+                // masks the gesture entirely on the call sites that don't opt in.
+                .gesture(touchScrubGesture, including: (touchScrub && showsHover) ? .all : .subviews)
+                #endif
             }
         }
         .frame(height: height)
-        // Deep-Timeline zoom/pan: only active when a zoom binding is supplied (the Deep Timeline). Every
-        // other call site passes the default `.constant(nil)`, so the static chart keeps its exact gestures.
+        // Zoom/pan: active whenever a zoom binding is supplied (the Deep Timeline and the Today HR chart).
+        // Every other call site passes the default `.constant(nil)`, so those static charts keep their exact
+        // gestures. The modifier itself reads Reduce Motion, so the double-tap reset snaps when it's on.
+        // #829 follow-up: keyed on `zoomBounds` (the stable "a zoom binding was supplied" discriminator the
+        // init comment names, set once by the two zooming call sites, nil everywhere else), NOT on the live
+        // `zoomDomain`, which is nil until the user first zooms, so keying on it left the gestures unmounted
+        // in exactly the state where the first pinch has to land. `apply` below normalises a window that
+        // covers the full clamp bounds back to nil, so an un-zoomed drag (a pan of the whole day into
+        // itself) never flips the hint/Reset row into its "Zoomed in" state.
         .modifier(ZoomPanModifier(
-            isActive: zoomDomain != nil,
+            isActive: zoomBounds != nil,
+            isZoomed: { zoomDomain != nil },
             current: { xDomain },
             bounds: zoomClampBounds,
             anchor: $gestureAnchorDomain,
-            apply: { newDomain in zoomDomain = newDomain },
+            apply: { newDomain in
+                zoomDomain = (newDomain.lowerBound <= zoomClampBounds.lowerBound
+                              && newDomain.upperBound >= zoomClampBounds.upperBound) ? nil : newDomain
+            },
+            reset: { zoomDomain = nil },
             zoom: { base, scale, frac, bounds in Self.zoomed(base, scale: scale, anchorFraction: frac, bounds: bounds) },
             pan: { base, dx, plotWidth, bounds in
                 // Map a horizontal drag (points) to seconds across the current visible span.
@@ -410,20 +514,20 @@ public struct OverviewHRChart: View {
     /// chart shows visually, so the collapsed element still conveys the whole picture (cf. the Android
     /// OverviewHRChart semantics).
     private var accessibilitySummary: String {
-        guard !points.isEmpty else { return "No heart-rate data" }
+        guard !points.isEmpty else { return String(localized: "No heart-rate data", bundle: .module) }
         let values = points.map(\.value)
         let lo = values.min() ?? valueRange.lowerBound
         let hi = values.max() ?? valueRange.upperBound
-        var parts = ["\(points.count) readings",
-                     "average \(valueFormat(averageValue)) bpm",
-                     "range \(valueFormat(lo)) to \(valueFormat(hi))"]
+        var parts = [String(localized: "\(points.count) readings", bundle: .module),
+                     String(localized: "average \(valueFormat(averageValue)) bpm", bundle: .module),
+                     String(localized: "range \(valueFormat(lo)) to \(valueFormat(hi))", bundle: .module)]
         if let sleep {
-            parts.append("asleep \(Self.hoursMinutes(sleep.end.timeIntervalSince(sleep.start)))")
+            parts.append(String(localized: "asleep \(Self.hoursMinutes(sleep.end.timeIntervalSince(sleep.start)))", bundle: .module))
         }
         if let recovery { parts.append(recovery.label) }
         if let effort { parts.append(effort.label) }
         if !workouts.isEmpty {
-            parts.append(workouts.count == 1 ? "1 workout" : "\(workouts.count) workouts")
+            parts.append(workouts.count == 1 ? String(localized: "1 workout", bundle: .module) : String(localized: "\(workouts.count) workouts", bundle: .module))
         }
         return parts.joined(separator: ", ")
     }
@@ -503,14 +607,28 @@ private struct SleepBandLabel: View {
 
 private struct ZoomPanModifier: ViewModifier {
     let isActive: Bool
+    /// True while the window is zoomed in (a reset is meaningful). Read at double-tap time so a tap on the
+    /// already-full-day chart does nothing rather than re-triggering a no-op animation.
+    let isZoomed: () -> Bool
     let current: () -> ClosedRange<Date>
     let bounds: ClosedRange<Date>
     @Binding var anchor: ClosedRange<Date>?
     let apply: (ClosedRange<Date>) -> Void
+    /// Drop the zoom window back to the full extent (sets the bound `zoomDomain` to nil).
+    let reset: () -> Void
     let zoom: (ClosedRange<Date>, Double, Double, ClosedRange<Date>) -> ClosedRange<Date>
     let pan: (ClosedRange<Date>, CGFloat, CGFloat, ClosedRange<Date>) -> ClosedRange<Date>
 
     @State private var plotWidth: CGFloat = 1
+    // Reduce Motion: the reset snaps instantly when on, otherwise it eases out (the gesture frames
+    // themselves are never animated, per the per-frame apply below, so only the reset honours this).
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// Reset the window, snapping when Reduce Motion is on and easing otherwise.
+    private func resetZoom() {
+        guard isZoomed() else { return }
+        withAnimation(NoopMotion.gated(StrandMotion.interactive, reduced: reduceMotion)) { reset() }
+    }
 
     func body(content: Content) -> some View {
         guard isActive else { return AnyView(content) }
@@ -531,6 +649,12 @@ private struct ZoomPanModifier: ViewModifier {
             }
             .onEnded { _ in anchor = nil }
 
+        // Double-tap anywhere on the plot resets to the full window: the discoverable "back out" affordance
+        // both platforms share (alongside the explicit Reset button the host shows). It does NOT add an
+        // accessibility action: the chart collapses to one labelled VoiceOver element with a static value, so
+        // a hidden tap gesture here is invisible to VoiceOver and never steals its double-tap-to-activate.
+        let doubleTapReset = TapGesture(count: 2).onEnded { resetZoom() }
+
         let measured = content.background(
             GeometryReader { geo in
                 Color.clear.onAppear { plotWidth = geo.size.width }
@@ -540,10 +664,12 @@ private struct ZoomPanModifier: ViewModifier {
 
         #if os(macOS)
         // macOS has no pinch in this context; drag pans. Scroll-to-zoom is handled by the Deep Timeline
-        // host's scroll modifier (it owns the NSEvent monitor); here we wire pan + a double-tap reset.
-        return AnyView(measured.gesture(drag))
+        // host's scroll modifier (it owns the NSEvent monitor); here we wire pan + the double-tap reset.
+        return AnyView(measured.gesture(drag).simultaneousGesture(doubleTapReset))
         #else
-        return AnyView(measured.gesture(magnify).simultaneousGesture(drag))
+        return AnyView(measured.gesture(magnify)
+            .simultaneousGesture(drag)
+            .simultaneousGesture(doubleTapReset))
         #endif
     }
 }
@@ -573,4 +699,5 @@ private struct ZoomPanModifier: ViewModifier {
     .background(StrandPalette.surfaceBase)
     .preferredColorScheme(.dark)
 }
+#endif
 #endif

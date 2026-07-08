@@ -195,4 +195,41 @@ final class GpsRouteMathTests: XCTestCase {
         XCTAssertNil(map[RouteStore.key(startTs: 1_000_000, sport: "Running")])
         XCTAssertNotNil(map[RouteStore.key(startTs: 1_000_000 + total - 1, sport: "Running")])
     }
+
+    // MARK: - Re-key on edit (#10)
+
+    /// #10: editing a GPS workout's sport or start re-keys its DB row, so its route must move to the new
+    /// natural key too or the detail view loses the route + distance. This pins the exact re-key sequence
+    /// Repository.saveManualWorkout runs in the changed-key branch (load old, store new, remove old): the
+    /// route ends up under the NEW key only, byte-identical, with no orphan left behind.
+    func testRouteStoreReKeyOnNaturalKeyChangePreservesRoute() {
+        let defaults = freshDefaults()
+        let route = WorkoutRoute(polyline: RouteMath.encode([a, b]),
+                                 distanceM: RouteMath.totalMeters([a, b]))
+        // The original session's route, keyed by its old (startTs, sport).
+        RouteStore.store(route, startTs: 1_700_000_000, sport: "Running", into: defaults)
+
+        // Re-key to a new sport AND a new start, exactly as the save path does on an edit.
+        if let old = RouteStore.load(startTs: 1_700_000_000, sport: "Running", from: defaults) {
+            RouteStore.store(old, startTs: 1_700_000_500, sport: "Walking", into: defaults)
+            RouteStore.remove(startTs: 1_700_000_000, sport: "Running", from: defaults)
+        }
+
+        // Route lives under the NEW key, unchanged; the OLD key is clear (no orphan, no distance ghost).
+        XCTAssertEqual(RouteStore.load(startTs: 1_700_000_500, sport: "Walking", from: defaults), route)
+        XCTAssertNil(RouteStore.load(startTs: 1_700_000_000, sport: "Running", from: defaults))
+        XCTAssertEqual(RouteStore.loadMap(from: defaults).count, 1)
+    }
+
+    /// #10 guard: a workout with NO recorded route stays a clean no-op on edit. The load returns nil, so
+    /// the save path's `if let` never stores or removes anything, and the side-store stays empty.
+    func testRouteStoreReKeyNoRouteIsNoOp() {
+        let defaults = freshDefaults()
+        if let old = RouteStore.load(startTs: 1_700_000_000, sport: "Running", from: defaults) {
+            RouteStore.store(old, startTs: 1_700_000_500, sport: "Walking", into: defaults)
+            RouteStore.remove(startTs: 1_700_000_000, sport: "Running", from: defaults)
+        }
+        XCTAssertNil(RouteStore.load(startTs: 1_700_000_500, sport: "Walking", from: defaults))
+        XCTAssertTrue(RouteStore.loadMap(from: defaults).isEmpty)
+    }
 }

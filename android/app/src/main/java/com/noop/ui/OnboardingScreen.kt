@@ -379,7 +379,7 @@ private fun WelcomeStep() {
             )
             Spacer(Modifier.height(12.dp))
             Text(
-                "A private window into your recovery, sleep and strain — read straight from your strap, kept only on this phone.",
+                "A private window into your recovery, sleep and strain. Read straight from your strap, kept only on this phone.",
                 style = NoopType.body,
                 color = Palette.textTertiary,
                 textAlign = TextAlign.Center,
@@ -447,7 +447,7 @@ private fun BluetoothStep() {
                 icon = Icons.Filled.Lock,
                 tint = Palette.statusPositive,
                 title = "Nothing leaves your phone",
-                message = "NOOP talks to your strap directly over Bluetooth Low Energy. There is no server in the middle — the connection is local, and so is every reading it pulls in.",
+                message = "NOOP talks to your strap directly over Bluetooth Low Energy. There's no server in the middle. The connection is local, and so is every reading it pulls in.",
             )
             Checkline("When Android asks, allow Bluetooth so NOOP can scan and connect.")
             Checkline("WHOOP 5.0/MG may need pairing mode the first time, with the official WHOOP app closed.")
@@ -509,7 +509,7 @@ private fun ConnectStep(viewModel: AppViewModel) {
         subtitle = when {
             live.bonded -> "Bonded. You can keep going."
             bleGranted -> "NOOP starts looking as soon as this step appears. You can keep going while it bonds."
-            else -> "Allow Bluetooth and tap Scan to find your strap — or keep going and connect later."
+            else -> "Allow Bluetooth and tap Scan to find your strap, or keep going and connect later."
         },
     ) {
         Column(
@@ -660,8 +660,10 @@ private fun ProfileStep() {
     val context = LocalContext.current
     val profile = remember { ProfileStore.from(context.applicationContext) }
     // Imperial/Metric display preference (D#103). The stored profile is always SI; the steppers keep
-    // operating in SI and only the DISPLAYED value re-labels to lb / ft-in.
-    val unitSystem = UnitPrefs.system(context)
+    // operating in SI and only the DISPLAYED value re-labels to lb / ft-in. Held in remembered state
+    // (#781) so the Units control below can flip it live. SharedPreferences isn't reactive, so the
+    // picker writes through to NoopPrefs AND updates this state to re-render the Weight/Height labels.
+    var unitSystem by remember { mutableStateOf(UnitPrefs.system(context)) }
     var rev by remember { mutableIntStateOf(0) }
     fun mutate(block: () -> Unit) {
         block()
@@ -693,6 +695,24 @@ private fun ProfileStep() {
                             ?: ONBOARDING_SEX_OPTIONS[0],
                         label = { it.label },
                         onSelect = { mutate { profile.sex = it.tag } },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+                ThinDivider()
+                // Units control (#781). Onboarding read `unitSystem` for the Weight/Height display but
+                // had no way to set it, so US users were locked to kg/cm until they found Settings →
+                // Units. Mirror the Sex picker idiom; the stored profile stays SI either way, only the
+                // displayed labels re-format (lb / ft-in). Same key Settings → Units writes.
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Overline("Units", color = Palette.textTertiary)
+                    SegmentedPillControl(
+                        items = listOf(UnitSystem.METRIC, UnitSystem.IMPERIAL),
+                        selection = unitSystem,
+                        label = { if (it == UnitSystem.METRIC) "Metric" else "Imperial" },
+                        onSelect = {
+                            unitSystem = it
+                            NoopPrefs.setUnitSystem(context, it)
+                        },
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }
@@ -749,6 +769,9 @@ private fun ImportStep(viewModel: AppViewModel) {
             val summary = withContext(Dispatchers.IO) {
                 runCatching { block() }.getOrElse { ImportSummary.failure("Import", it.message ?: "failed") }
             }
+            // Import & Data Ingest test mode (Test Centre): emit the parser / per-stage / day-delta trace,
+            // tagged IMPORT, iff the mode is on. Gated zero-cost when off; shared with the Data Sources flow.
+            emitImportTrace(context, viewModel, summary)
             busy = false
             status = summary.message
             Toast.makeText(context, summary.message, Toast.LENGTH_LONG).show()
@@ -767,7 +790,7 @@ private fun ImportStep(viewModel: AppViewModel) {
         PermissionController.createRequestPermissionResultContract(),
     ) { granted ->
         if (granted.any { it in HealthConnectImporter.PERMISSIONS }) {
-            runImport { HealthConnectImporter.import(context, viewModel.repo) }
+            runImport { HealthConnectImporter.import(context, viewModel.repo, ProfileStore.from(context).heightCm) }
         } else {
             val message = "Health Connect access not granted."
             status = message
@@ -785,7 +808,7 @@ private fun ImportStep(viewModel: AppViewModel) {
                 HealthConnectImporter.client(context).permissionController.getGrantedPermissions()
             }.getOrDefault(emptySet())
             if (granted.any { it in HealthConnectImporter.PERMISSIONS }) {
-                runImport { HealthConnectImporter.import(context, viewModel.repo) }
+                runImport { HealthConnectImporter.import(context, viewModel.repo, ProfileStore.from(context).heightCm) }
             } else {
                 hcPermissionLauncher.launch(HealthConnectImporter.PERMISSIONS)
             }
@@ -794,7 +817,7 @@ private fun ImportStep(viewModel: AppViewModel) {
 
     StepShell(
         title = "Bring your history",
-        subtitle = "Optional — import now, or skip and return to Data Sources later.",
+        subtitle = "Optional: import now, or skip and return to Data Sources later.",
     ) {
         Column(
             modifier = Modifier.fillMaxWidth(),
@@ -865,9 +888,9 @@ private fun NotificationsStep() {
                 icon = Icons.Filled.Bluetooth,
                 tint = Palette.statusPositive,
                 title = "A quiet, ongoing status",
-                message = "NOOP holds the Bluetooth link open in the background so your data stays current. One low-priority notification shows it's connected — nothing noisy.",
+                message = "NOOP holds the Bluetooth link open in the background so your data stays current. One low-priority notification shows it's connected. Nothing noisy.",
             )
-            Checkline("Wrist alerts — strain nudges and your smart alarm — arrive as notifications too.")
+            Checkline("Wrist alerts (strain nudges and your smart alarm) arrive as notifications too.")
             Checkline("When Android asks, allow notifications so NOOP can keep you informed.")
         }
     }
@@ -884,7 +907,7 @@ private fun AppearanceStep() {
 
     StepShell(
         title = "Make it yours",
-        subtitle = "NOOP follows your system by default — or pick Light or Dark. You can change this any time in Settings → Appearance.",
+        subtitle = "NOOP follows your system by default, or pick Light or Dark. You can change this any time in Settings → Appearance.",
     ) {
         Column(
             modifier = Modifier.fillMaxWidth(),
@@ -1041,7 +1064,7 @@ private fun DoneStep() {
             )
             Spacer(Modifier.height(10.dp))
             Text(
-                "Every beat, every night, every day — woven into one quiet picture of you. Welcome to NOOP.",
+                "Every beat, every night, every day, woven into one quiet picture of you. Welcome to NOOP.",
                 style = NoopType.body,
                 color = Palette.textSecondary,
                 textAlign = TextAlign.Center,

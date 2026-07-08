@@ -38,23 +38,28 @@ while [ $# -gt 0 ]; do
   ASSETS+=("$1"); shift
 done
 
-# ── iOS asset name compatibility ─────────────────────────────────────────────
-# AltStore caches a source's downloadURL. Older cached sources point at
-# NOOP-v<V>-ios.ipa; the current source points at NOOP-v<V>.ipa. To make BOTH
-# resolve (so a stranded user never hits "file doesn't exist" mid-update), every
-# release uploads the IPA under BOTH names. We make a sibling "-ios.ipa" copy of
-# any NOOP-v*.ipa here and append it to the asset list. (See docs/SAFEGUARDS.md
-# is unrelated; this is the AltStore fix from the v5.2.5 "-ios" 404 report.)
+# ── iOS asset: ONE canonical name ────────────────────────────────────────────
+# The iOS .ipa ships under a SINGLE name: NOOP-v<V>-ios.ipa, which every doc
+# (README, docs/IOS.md, the wiki) and the AltStore source point at. We used to
+# upload BOTH NOOP-v<V>.ipa and a -ios alias for backward-compat with a v5.2.5
+# cached-source 404, but that transition is long done, and two byte-identical iOS
+# files only confused users about which to install. So: rename any plain
+# NOOP-v*.ipa to its -ios name and ship exactly one iOS file.
+NEW_ASSETS=()
 for f in ${ASSETS[@]+"${ASSETS[@]}"}; do
   case "$f" in
     *NOOP-v*.ipa)
-      if [ -f "$f" ] && [ "${f%-ios.ipa}" = "$f" ]; then   # a real .ipa that isn't already -ios
-        alias_f="${f%.ipa}-ios.ipa"
-        cp -f "$f" "$alias_f" 2>/dev/null && ASSETS+=("$alias_f") \
-          && echo "  + iOS alias: $(basename "$alias_f")"
+      if [ -f "$f" ] && [ "${f%-ios.ipa}" = "$f" ]; then   # a plain .ipa -> ship ONLY as -ios
+        ios_f="${f%.ipa}-ios.ipa"
+        cp -f "$f" "$ios_f" 2>/dev/null && NEW_ASSETS+=("$ios_f") \
+          && echo "  iOS asset: $(basename "$ios_f")"
+      else
+        NEW_ASSETS+=("$f")
       fi ;;
+    *) NEW_ASSETS+=("$f") ;;
   esac
 done
+ASSETS=("${NEW_ASSETS[@]}")
 # rebuild the forgejo arg list from the (now alias-expanded) assets + notes,
 # so the mirror uploads exactly the same set as GitHub.
 FORGE_ARGS=(${ASSETS[@]+"${ASSETS[@]}"} -- "$NOTES")

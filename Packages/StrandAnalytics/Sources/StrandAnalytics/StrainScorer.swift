@@ -75,7 +75,7 @@ public enum StrainScorer {
     ]
 
     /// TRIMP accumulation method.
-    public enum Method: Sendable { case edwards, banister }
+    public enum Method: Sendable, Hashable { case edwards, banister }
 
     // MARK: - HRmax helpers
 
@@ -212,6 +212,29 @@ public enum StrainScorer {
                               method: Method = .edwards,
                               sex: String = "male",
                               denominator: Double = strainDenominator) -> Double? {
+        // v7.0.2 perf (#707): TRIMP integrates over the day's HR stream; called once per day in the post-sync
+        // scoring loop AND from the Today view (which re-reads on each live-HR tick). Memoize on the HR
+        // fingerprint + every scalar that steers the score, so an identical re-request is a lookup. The
+        // result is a single `Double?`; the HR array is not retained.
+        let key = StrainKey(
+            hr: StreamFingerprint.of(hr, ts: { $0.ts }, quant: { Int($0.bpm) }),
+            maxHR: maxHR, restingHR: restingHR, method: method,
+            sexF: sex.lowercased().hasPrefix("f"), denom: denominator)
+        return strainCache.value(key) {
+            strainUncached(hr, maxHR: maxHR, restingHR: restingHR, method: method, sex: sex, denominator: denominator)
+        }
+    }
+
+    /// Key folds `sex` to the single bit the recipe reads (`hasPrefix("f")`) so "female"/"f"/"F" all hit.
+    private struct StrainKey: Hashable {
+        let hr: StreamFingerprint
+        let maxHR: Double?; let restingHR: Double; let method: Method
+        let sexF: Bool; let denom: Double
+    }
+    private static let strainCache = AnalyticsMemoCache<StrainKey, Double?>(capacity: 48)
+
+    private static func strainUncached(_ hr: [HRSample], maxHR: Double?, restingHR: Double,
+                                       method: Method, sex: String, denominator: Double) -> Double? {
         let effMax = maxHR ?? Double(defaultMaxHR())
         // Enough data to trust the score: a dense stream (≥ minReadings) OR a sparse-but-sustained
         // one spanning ≥ minSpanSeconds with a sample floor (#482 — the 5/MG's ~30 s HR cadence).

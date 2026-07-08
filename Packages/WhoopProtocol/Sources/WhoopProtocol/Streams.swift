@@ -57,6 +57,56 @@ public struct SkinTempSample: Equatable, Codable {
     }
 }
 
+/// Convert a raw `skin_temp_raw` register value to °C, DEVICE-FAMILY-AWARE (#938).
+///
+/// The two families bank skin temp on DIFFERENT scales, and applying one family's scale to the other
+/// is a real decode bug: the historical `skin_temp_raw` field is a RAW ADC on the WHOOP 4.0 (v24
+/// `@72`, "degC computed server-side" per the schema) but a CENTIDEGREE register on the 5/MG (v18
+/// `@73`). A single family-blind `raw/100` sent every 4.0 night ~8 °C low, below the 28 °C worn gate,
+/// so skin temp and the illness signal vanished (issue #938, reporter dpguglielmi's 4.0 capture).
+///
+/// - `.whoop5`: `raw / 100`. PROVEN on real 5/MG captures — `Whoop5HistoricalTests` reads worn 3057 =
+///   30.6 °C and off-wrist 2247 = 22.5 °C, physically right on both ends. Unchanged.
+///
+/// - `.whoop4`: a single-anchor affine map. The 4.0 firmware (41.17.6.0) banks byte-72 at 1 Hz
+///   ON-WRIST ONLY, so there is ONE solid anchor and NO clean off-wrist room anchor from the strap.
+///   The reporter's doff/don capture gives a steady worn resting value of raw ~826 (worn steady
+///   ~830–865; a no-contact floor ~510–520 at removal, then banking stops). Under `/100` that worn
+///   value reads ~8.3 °C — impossible for a wrist streaming a resting HR (~52 bpm). We anchor the
+///   worn value at a defensible nocturnal wrist skin temperature (33.0 °C ↔ raw 826) and carry a
+///   PROVISIONAL slope until a second calibration point exists. Because the downstream use is a
+///   deviation from the user's OWN nightly baseline (`skinTempDevC`), the offset is what must be right
+///   to clear the absolute 28–42 °C worn gate + 20–42 °C baseline clamp; a slope error only rescales
+///   the deviation and stays directionally correct. All 4.0 values APPROXIMATE.
+///
+///   TODO(#938): replace the provisional slope with the exact two-point anchor once a second worn
+///   point at a markedly different ambient (the reporter offered a colder + a warmer room) pins the
+///   ADC→°C transfer — including whether it is linear at all. Until then this is a defensible
+///   worn-range mapping, NOT a claimed-accurate absolute thermometer.
+public func skinTempCelsius(raw: Int, family: DeviceFamily) -> Double {
+    switch family {
+    case .whoop5:
+        return Double(raw) / 100.0
+    case .whoop4:
+        // Anchor: worn resting raw 826 → 33.0 °C. Provisional slope 0.05 °C per raw unit (a ~35-unit
+        // worn-steady spread ≈ ~1.75 °C of nocturnal variation, within the plausible band). See TODO above.
+        return Whoop4SkinTemp.anchorCelsius
+            + (Double(raw) - Whoop4SkinTemp.anchorRaw) * Whoop4SkinTemp.provisionalSlopeCPerRaw
+    }
+}
+
+/// WHOOP 4.0 (v24) skin-temp mapping constants (#938). Named so the single provisional slope + anchor
+/// live in ONE place and the two-point-calibration TODO has an obvious home. Kept in lockstep with the
+/// Android `Whoop4SkinTemp`.
+public enum Whoop4SkinTemp {
+    /// Worn resting raw register value the anchor pins (reporter's steady worn baseline, ~826).
+    public static let anchorRaw: Double = 826.0
+    /// Physiological nocturnal wrist skin temperature the anchor raw maps to (°C).
+    public static let anchorCelsius: Double = 33.0
+    /// PROVISIONAL °C-per-raw-unit slope. TODO(#938): replace with the two-point anchor slope.
+    public static let provisionalSlopeCPerRaw: Double = 0.05
+}
+
 public struct RespSample: Equatable, Codable {
     public let ts: Int
     public let raw: Int
@@ -93,6 +143,20 @@ public struct StepSample: Equatable, Codable {
     }
 }
 
+/// The strap's OWN per-record band sleep_state (task #175). The Interpreter reads the high nibble of the
+/// v18 @81 flag byte (`(sb>>4)&3`) as 0 wake / 1 still / 2 asleep / 3 up. The BYTE and its offset are read
+/// off real captured frames (Whoop5HistoricalTests) exactly like every other v18 field; ONLY the
+/// meaning of the non-zero codes is community/structure inference (every real capture we hold reads 0, a
+/// worn daytime wake). So this stream is carried VERBATIM (the strap's own byte, never fabricated) and is
+/// surfaced/persisted as the strap's reported state, NOT trusted to override the derived hypnogram. It
+/// feeds the existing, already-verified H7 morning-stillness re-onset CONFIRM guard (KEEP-biased, never
+/// overrides) and a Deep Timeline display track. Mirrors Android `SleepStateRow`.
+public struct SleepStateSample: Equatable, Codable {
+    public let ts: Int
+    public let state: Int       // 0 wake / 1 still / 2 asleep / 3 up (band's own high-nibble code)
+    public init(ts: Int, state: Int) { self.ts = ts; self.state = state }
+}
+
 public struct Streams: Equatable, Codable {
     public var hr: [HRSample]
     public var rr: [RRInterval]
@@ -101,6 +165,10 @@ public struct Streams: Equatable, Codable {
     public var resp: [RespSample]
     public var gravity: [GravitySample]
     public var steps: [StepSample]
+    /// The strap's own per-record band sleep_state (#175), carried verbatim off @81's high nibble. Optional
+    /// signal (only 5/MG v18 records emit it today; a WHOOP 4.0 leaves it empty), consumed by the H7
+    /// re-onset CONFIRM guard and shown as a Deep Timeline track. Never overrides the derived stage.
+    public var sleepState: [SleepStateSample]
     /// PPG-derived per-second HR from the WHOOP 5.0 v26 optical buffer (issue #156). Kept separate from
     /// `hr` (the measured stream) so consumers can COALESCE without conflating the two sources.
     public var ppgHr: [PpgHrSample]
@@ -114,11 +182,12 @@ public struct Streams: Equatable, Codable {
     public init(hr: [HRSample] = [], rr: [RRInterval] = [],
                 spo2: [SpO2Sample] = [], skinTemp: [SkinTempSample] = [],
                 resp: [RespSample] = [], gravity: [GravitySample] = [],
-                steps: [StepSample] = [], ppgHr: [PpgHrSample] = [],
+                steps: [StepSample] = [], sleepState: [SleepStateSample] = [],
+                ppgHr: [PpgHrSample] = [],
                 events: [WhoopEvent] = [], battery: [BatterySample] = []) {
         self.hr = hr; self.rr = rr
         self.spo2 = spo2; self.skinTemp = skinTemp; self.resp = resp; self.gravity = gravity
-        self.steps = steps; self.ppgHr = ppgHr
+        self.steps = steps; self.sleepState = sleepState; self.ppgHr = ppgHr
         self.events = events; self.battery = battery
     }
 
@@ -127,11 +196,13 @@ public struct Streams: Equatable, Codable {
     /// diagnostic in `Backfiller.finishChunk` (#77).
     public var isEmpty: Bool {
         hr.isEmpty && rr.isEmpty && spo2.isEmpty && skinTemp.isEmpty && resp.isEmpty
-            && gravity.isEmpty && steps.isEmpty && ppgHr.isEmpty && events.isEmpty && battery.isEmpty
+            && gravity.isEmpty && steps.isEmpty && sleepState.isEmpty && ppgHr.isEmpty
+            && events.isEmpty && battery.isEmpty
     }
 
     private enum CodingKeys: String, CodingKey {
         case hr, rr, spo2, skinTemp = "skin_temp", resp, gravity, steps
+        case sleepState = "sleep_state"
         case ppgHr = "ppg_hr"
         case events, battery
     }
@@ -147,6 +218,7 @@ public struct Streams: Equatable, Codable {
         resp = try c.decodeIfPresent([RespSample].self, forKey: .resp) ?? []
         gravity = try c.decodeIfPresent([GravitySample].self, forKey: .gravity) ?? []
         steps = try c.decodeIfPresent([StepSample].self, forKey: .steps) ?? []
+        sleepState = try c.decodeIfPresent([SleepStateSample].self, forKey: .sleepState) ?? []
         ppgHr = try c.decodeIfPresent([PpgHrSample].self, forKey: .ppgHr) ?? []
         events = try c.decodeIfPresent([WhoopEvent].self, forKey: .events) ?? []
         battery = try c.decodeIfPresent([BatterySample].self, forKey: .battery) ?? []

@@ -135,4 +135,42 @@ class StepsEstimateEngineTest {
         assertTrue(status.canEstimate)
         assertEquals("Calibrated by hand", status.headline)
     }
+
+    // calibration STATUS surfaced on the tile (#760/#792 - k / days / confidence self-explain). Mirrors Swift.
+
+    @Test fun confidenceTierThresholds() {
+        assertEquals(StepsEstimateEngine.ConfidenceTier.LOW, StepsEstimateEngine.ConfidenceTier.from(0.0))
+        assertEquals(StepsEstimateEngine.ConfidenceTier.LOW, StepsEstimateEngine.ConfidenceTier.from(0.33))
+        assertEquals(StepsEstimateEngine.ConfidenceTier.MEDIUM, StepsEstimateEngine.ConfidenceTier.from(0.34))
+        assertEquals(StepsEstimateEngine.ConfidenceTier.MEDIUM, StepsEstimateEngine.ConfidenceTier.from(0.66))
+        assertEquals(StepsEstimateEngine.ConfidenceTier.HIGH, StepsEstimateEngine.ConfidenceTier.from(0.67))
+        assertEquals(StepsEstimateEngine.ConfidenceTier.HIGH, StepsEstimateEngine.ConfidenceTier.from(1.0))
+    }
+
+    @Test fun statusDetailCalibratedSurfacesKDaysAndConfidence() {
+        val status = StepsEstimateEngine.CalibrationStatus.Calibrated(
+            coefficient = 12.34, sampleDays = 6, confidence = 0.2,
+        )
+        assertEquals(StepsEstimateEngine.ConfidenceTier.LOW, status.confidenceTier)
+        assertEquals(12.34, status.coefficientOrNull!!, 1e-9)
+        assertEquals("k=12.3 from 6 days, low confidence", status.detail)
+        val one = StepsEstimateEngine.CalibrationStatus.Calibrated(
+            coefficient = 5.0, sampleDays = 1, confidence = 0.8,
+        )
+        assertEquals(StepsEstimateEngine.ConfidenceTier.HIGH, one.confidenceTier)
+        assertEquals("k=5.0 from 1 day, high confidence", one.detail)
+    }
+
+    @Test fun statusDetailManualAndNeedsMoreDays() {
+        val manual = StepsEstimateEngine.CalibrationStatus.Manual(coefficient = 9.5, sampleDays = 0)
+        assertEquals(StepsEstimateEngine.ConfidenceTier.HIGH, manual.confidenceTier)
+        assertEquals(9.5, manual.coefficientOrNull!!, 1e-9)
+        assertEquals("manual k=9.5", manual.detail)
+        val needs = StepsEstimateEngine.CalibrationStatus.NeedsMoreDays(have = 1, need = 3)
+        assertEquals(StepsEstimateEngine.ConfidenceTier.LOW, needs.confidenceTier)
+        assertNull(needs.coefficientOrNull)
+        assertEquals("calibrating: 1/3 days", needs.detail)
+        val over = StepsEstimateEngine.CalibrationStatus.NeedsMoreDays(have = 9, need = 3)
+        assertEquals("calibrating: 3/3 days", over.detail)
+    }
 }

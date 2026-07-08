@@ -280,4 +280,13 @@ data class DayResult(
      * zero series. Mirrors Swift `DayResult.sessionMotionByStart`. (H8)
      */
     val sessionMotionByStart: Map<Long, List<Double>> = emptyMap(),
+    /**
+     * Per-session per-epoch BAND sleep_state (#175), keyed by each matched session's detected start, on the
+     * same 30 s grid as `stagesJSON` / [sessionMotionByStart]. The strap's OWN @81 code (0 wake/1 still/2
+     * asleep/3 up) gridded per session, for the caller to persist via `WhoopRepository.persistSessionSleepState`.
+     * A session with no band-state samples is OMITTED (no key), so the caller persists NULL there rather than a
+     * fabricated array. Feeds the H7 re-onset CONFIRM guard on the NEXT pass; never overrides the derived
+     * hypnogram. Empty on a WHOOP 4.0. Mirrors Swift `DayResult.sessionSleepStateByStart`. (#175)
+     */
+    val sessionSleepStateByStart: Map<Long, List<Int>> = emptyMap(),
 )

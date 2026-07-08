@@ -31,7 +31,7 @@ final class DayOwnerReadIntegrationTests: XCTestCase {
 
     func testActiveStrapOwnsDayAndReadReturnsOnlyItsSamples() async throws {
         let store = try await WhoopStore.inMemory()    // migration v15 seeds active 'my-whoop'
-        let registry = DeviceRegistryStore(dbQueue: store.registryQueue)
+        let registry = DeviceRegistryStore(dbQueue: store.registryWriter)
 
         // A second source: an Oura CLOUD IMPORT (priority 2), paired but not active.
         try registry.add(PairedDevice(id: "oura-import", brand: "Oura", model: "Oura (import)",
@@ -64,7 +64,7 @@ final class DayOwnerReadIntegrationTests: XCTestCase {
     /// the import makes the import own the day, and the read returns only the import's samples.
     func testLockedOwnerOverridesAndReadFollowsIt() async throws {
         let store = try await WhoopStore.inMemory()
-        let registry = DeviceRegistryStore(dbQueue: store.registryQueue)
+        let registry = DeviceRegistryStore(dbQueue: store.registryWriter)
         try registry.add(PairedDevice(id: "oura-import", brand: "Oura", model: "Oura (import)",
                                       sourceKind: .cloudImport, capabilities: [.hr],
                                       status: .paired, addedAt: 1, lastSeenAt: 1))
@@ -87,7 +87,7 @@ final class DayOwnerReadIntegrationTests: XCTestCase {
     /// MUST resolve to 'my-whoop' so behaviour is byte-identical to the pre-I2 code.
     func testSingleDeviceResolvesToWhoopUnchanged() async throws {
         let store = try await WhoopStore.inMemory()
-        let registry = DeviceRegistryStore(dbQueue: store.registryQueue)
+        let registry = DeviceRegistryStore(dbQueue: store.registryWriter)
 
         let base = dayStart + 3 * 3_600
         _ = try await store.insert(Streams(hr: (0..<300).map { HRSample(ts: base + $0, bpm: 55) }), deviceId: "my-whoop")

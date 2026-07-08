@@ -27,6 +27,24 @@ NOOP builds on prior community reverse-engineering and interoperability work:
   about the live Mi-protobuf BLE stack in the roadmap's research notes. GPLv3; NOOP copies
   **none** of its code and has not built the live lane.
 
+## Oura ring (gen 3/4/5) protocol
+NOOP's Oura code is **original clean-room** work. The local BLE source
+(`Strand/BLE/OuraLiveSource.swift` + `android/.../ble/OuraLiveSource.kt`) and the JVM/Swift-pure
+`OuraProtocol` package (`Packages/OuraProtocol/`, `android/.../com/noop/oura/`) were written from
+**documented protocol facts only**, cited tersely in `docs/OURA_PROTOCOL.md`. The community
+reverse-engineering resources below were consulted as **facts-only references** (byte layouts,
+service/characteristic UUIDs, framing and auth shapes); **no RE source code is copied** into NOOP.
+- **`open_ring`**: consulted for protocol facts only. Licensed **GPL-3.0**; NOOP copies none of
+  its code and is not a derivative work of it.
+- **`open_oura`**, **`ringverse`**, **`relue`**: consulted for protocol facts only. These carry
+  **no license**, so NOOP treats them as reference documentation of observed behaviour only and
+  copies no code from them.
+
+NOOP reads only the ring's own decoded raw signals and its own open event tags, computes NOOP's
+own Charge/Rest, and **never** reads or displays Oura's encrypted readiness or sleep scores. The
+documented Oura file-import lane (`Packages/StrandImport/Sources/StrandImport/OuraExportParser.swift`)
+remains available as a fallback.
+
 ## Other
 - **GRDB.swift** (`groue/GRDB.swift`) — SQLite persistence (via Swift Package Manager).
 - **MarkdownUI** (`gonzalezreal/swift-markdown-ui`) — renders the AI Coach's Markdown

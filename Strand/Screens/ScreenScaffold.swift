@@ -36,8 +36,11 @@ struct ScreenScaffold<Content: View, Trailing: View>: View {
     var body: some View {
         ScrollView {
             column
-            .padding(28)
             #if os(iOS)
+            // Unified side margins matching the liquid home (16pt) so every page's cards + header line up
+            // to the same edges (2026-07-02); macOS keeps the classic 28 in the #else branch.
+            .padding(.horizontal, 16)
+            .padding(.top, 24)
             // The tab bar floats over the scroll content, so the last card sat hidden behind it.
             // Reserve extra bottom scroll room so every screen's final card clears the floating bar.
             .padding(.bottom, NoopMetrics.tabBarClearance)
@@ -47,13 +50,20 @@ struct ScreenScaffold<Content: View, Trailing: View>: View {
                    alignment: hSizeClass == .regular ? .center : .leading)
             .frame(maxWidth: .infinity, alignment: .center)
             #else
+            .padding(28)
             .frame(maxWidth: .infinity, alignment: .leading)
             #endif
         }
+        #if os(iOS)
+        // #697: stop a vertical scroll from drifting/bouncing the screen left-right. `.basedOnSize` only
+        // permits horizontal bounce when content genuinely overflows the width (it does not here, the column
+        // is width-capped), so the spurious horizontal rubber-band that caused the sideways drift is gone.
+        .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+        #endif
         // The flat canvas, plus an optional full-bleed TOP backdrop (Today's day-cycle scene) drawn behind
         // the scroll content — edge-to-edge under the status bar. The scene is CONFINED to the header+hero
         // band (see SceneScreenBackground.height) so it fades out ABOVE the dashboard cards, which then sit
-        // on the opaque canvas and stay fully legible (Aaron 2026-06-23: cards were "losing the data").
+        // on the opaque canvas and stay fully legible (2026-06-23: cards were "losing the data").
         .background(alignment: .top) {
             ZStack(alignment: .top) {
                 StrandPalette.surfaceBase
@@ -62,6 +72,11 @@ struct ScreenScaffold<Content: View, Trailing: View>: View {
             .ignoresSafeArea()
         }
         .modifier(RefreshableIfNeeded(onRefresh: onRefresh))
+        #if os(macOS)
+        // The mac window toolbar's default vibrant material washed the top of the liquid day-of-sky WHITE
+        // (the scroll-under-titlebar blend). Hide it so the sky reads edge-to-edge and dark, like iOS.
+        .toolbarBackground(.hidden, for: .windowToolbar)
+        #endif
     }
 
     /// The header + content column. `lazy` swaps the eager `VStack` for a `LazyVStack` so a long
@@ -86,7 +101,9 @@ struct ScreenScaffold<Content: View, Trailing: View>: View {
         HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
                 if let title {
-                    Text(title).font(StrandFont.title1).foregroundStyle(StrandPalette.textPrimary)
+                    // Match the liquid home's title face (SF Rounded 28) so every page's header reads
+                    // identically (2026-07-02 cohesion pass).
+                    Text(title).font(StrandFont.rounded(28)).foregroundStyle(StrandPalette.textPrimary)
                 }
                 if let subtitle {
                     Text(subtitle).font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
@@ -143,7 +160,7 @@ struct ComingSoon: View {
             }
         }
         .padding(20).frame(maxWidth: .infinity, alignment: .leading)
-        .frostedCardSurface(cornerRadius: 14)
+        .frostedCardSurface()
     }
 }
 
@@ -177,10 +194,10 @@ func relativeAgo(_ epochSeconds: TimeInterval,
                  now: TimeInterval = Date().timeIntervalSince1970) -> String {
     let d = max(0, Int(now - epochSeconds))
     switch d {
-    case ..<60:     return "just now"
-    case ..<3600:   return "\(d / 60) min ago"
-    case ..<86_400: return "\(d / 3600) h ago"
-    default:        return "\(d / 86_400) d ago"
+    case ..<60:     return String(localized: "just now")
+    case ..<3600:   return String(localized: "\(d / 60) min ago")
+    case ..<86_400: return String(localized: "\(d / 3600) h ago")
+    default:        return String(localized: "\(d / 86_400) d ago")
     }
 }
 

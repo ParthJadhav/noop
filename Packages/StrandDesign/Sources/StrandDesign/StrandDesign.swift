@@ -1,5 +1,7 @@
 import SwiftUI
-import Charts
+#if !os(watchOS)
+import Charts   // Swift Charts isn't used by the watch app; the ChartProxy shim below is watchOS-excluded.
+#endif
 
 // MARK: - iOS-17 / macOS-14 deprecation shims
 //
@@ -46,6 +48,7 @@ private extension View {
     }
 }
 
+#if !os(watchOS)
 public extension ChartProxy {
     /// macOS-13-safe plot rect: the optional `plotFrame` on iOS 17 / macOS 14, the
     /// deprecated non-optional `plotAreaFrame` otherwise. `.zero` on a nil anchor
@@ -59,6 +62,7 @@ public extension ChartProxy {
         }
     }
 }
+#endif
 
 /// Strand design system: palette, typography, motion, and signature components
 /// (Recovery Ring, Strain Gauge, Hypnogram, Trend/Sparkline charts, Year heat

@@ -1,6 +1,6 @@
 # Sleep & Recovery Guidance / Explainability Layer — Design
 
-**Status:** APPROVED (Aaron, 2026-06-20). Scope = all five components. Ships together with the sleep overhaul as 6.0.2 once both are verified to 99%.
+**Status:** APPROVED (2026-06-20). Scope = all five components. Ships together with the sleep overhaul as 6.0.2 once both are verified to 99%.
 
 ## Goal
 

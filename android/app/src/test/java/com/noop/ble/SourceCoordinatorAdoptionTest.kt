@@ -110,6 +110,21 @@ class SourceCoordinatorAdoptionTest {
             log = log,
         )
 
+    /** A coordinator that counts the WHOOP start/stop churn, for the make-active adopt-in-place tests. */
+    private fun churnCountingCoordinator(
+        dao: FakeRegistryDao,
+        starts: () -> Unit,
+        stops: () -> Unit,
+    ): SourceCoordinator = SourceCoordinator(
+        context = null,
+        registry = registryWith(dao),
+        repository = null,
+        liveSink = { _, _ -> },
+        startWhoop = starts,
+        stopWhoop = stops,
+        scope = CoroutineScope(Dispatchers.Unconfined),
+    )
+
     @Test
     fun nullPeripheralIdRowAdoptsConnectedAddress() = runBlocking {
         val dao = FakeRegistryDao().apply { devices["my-whoop"] = whoopRow("my-whoop", peripheralId = null) }
@@ -184,5 +199,63 @@ class SourceCoordinatorAdoptionTest {
         assertNull("a generic-strap active row must not adopt a WHOOP connection's address",
             dao.devices["polar-1"]!!.peripheralId)
         assertTrue(dao.devices.size == 1)
+    }
+
+    // ── make-active adopt-in-place (#74 keep) ───────────────────────────────────
+    // switchToWhoop: activating a WHOOP row that is the SAME physical strap already connected must NOT
+    // churn the link (no stopWhoop/startWhoop) - a churn there would drop the kept live link and force a
+    // scan reconnect. Activating a DIFFERENT WHOOP must still churn.
+
+    /** Seed two ACTIVE-capable WHOOP rows sharing the dao; only [activeId] is marked active. */
+    private fun daoWithTwoWhoops(
+        activeId: String,
+        activePeripheral: String?,
+        otherId: String,
+        otherPeripheral: String?,
+    ): FakeRegistryDao = FakeRegistryDao().apply {
+        devices[activeId] = whoopRow(activeId, activePeripheral)
+        // the other row is paired (not active) until we promote it
+        devices[otherId] = whoopRow(otherId, otherPeripheral).copy(status = DeviceStatus.paired.name)
+    }
+
+    @Test
+    fun makeActiveSameStrapAdoptsInPlaceWithoutChurn() = runBlocking {
+        // Two WHOOP rows for the SAME physical strap (pick-same-strap Add flow): identical peripheralId.
+        val dao = daoWithTwoWhoops(
+            activeId = "my-whoop", activePeripheral = "AA:BB:CC:DD:EE:01",
+            otherId = "whoop-aabbccddee01", otherPeripheral = "AA:BB:CC:DD:EE:01",
+        )
+        var starts = 0
+        var stops = 0
+        val coordinator = churnCountingCoordinator(dao, starts = { starts++ }, stops = { stops++ })
+
+        coordinator.start()                                     // first WHOOP activation, no churn
+        coordinator.connectedPeripheralChanged("AA:BB:CC:DD:EE:01") // link is live on this strap
+        // Make the second (same-strap) row active, then reconcile it.
+        dao.demoteActive(); dao.promote("whoop-aabbccddee01", 200)
+        coordinator.onActiveDeviceChanged("whoop-aabbccddee01")
+
+        assertEquals("same-strap make-active must not stop the live link", 0, stops)
+        assertEquals("same-strap make-active must not rescan", 0, starts)
+    }
+
+    @Test
+    fun makeActiveDifferentStrapStillChurns() = runBlocking {
+        // Two WHOOP rows for DIFFERENT physical straps: switching must drop + reconnect.
+        val dao = daoWithTwoWhoops(
+            activeId = "my-whoop", activePeripheral = "AA:BB:CC:DD:EE:01",
+            otherId = "whoop-aabbccddee02", otherPeripheral = "AA:BB:CC:DD:EE:02",
+        )
+        var starts = 0
+        var stops = 0
+        val coordinator = churnCountingCoordinator(dao, starts = { starts++ }, stops = { stops++ })
+
+        coordinator.start()
+        coordinator.connectedPeripheralChanged("AA:BB:CC:DD:EE:01")
+        dao.demoteActive(); dao.promote("whoop-aabbccddee02", 200)
+        coordinator.onActiveDeviceChanged("whoop-aabbccddee02")
+
+        assertEquals("a different WHOOP must drop the current link", 1, stops)
+        assertEquals("a different WHOOP must reconnect", 1, starts)
     }
 }

@@ -187,7 +187,7 @@ struct MarkerEditorView: View {
 
     private var customMarkerFields: some View {
         VStack(alignment: .leading, spacing: 12) {
-            field("Name") {
+            field(String(localized: "Name")) {
                 TextField("e.g. Magnesium", text: $customName)
                     .textFieldStyle(.plain)
                     .font(StrandFont.body)
@@ -198,7 +198,7 @@ struct MarkerEditorView: View {
                     .overlay(inputShape.strokeBorder(StrandPalette.hairline, lineWidth: 1))
                     .accessibilityLabel("Custom marker name")
             }
-            field("Unit") {
+            field(String(localized: "Unit")) {
                 TextField("e.g. mmol/L", text: $customUnit)
                     .textFieldStyle(.plain)
                     .font(StrandFont.body)
@@ -228,13 +228,13 @@ struct MarkerEditorView: View {
                     } else {
                         valueField
                     }
-                    field("Date taken") {
+                    field(String(localized: "Date taken")) {
                         DatePicker("", selection: $takenAt, in: ...Date(),
                                    displayedComponents: [.date, .hourAndMinute])
                             .labelsHidden()
                             .accessibilityLabel("Date and time taken")
                     }
-                    field("Note (optional)") {
+                    field(String(localized: "Note (optional)")) {
                         TextField("e.g. fasting, morning draw", text: $note)
                             .textFieldStyle(.plain)
                             .font(StrandFont.body)
@@ -245,8 +245,8 @@ struct MarkerEditorView: View {
                             .overlay(inputShape.strokeBorder(StrandPalette.hairline, lineWidth: 1))
                             .accessibilityLabel("Optional note")
                     }
-                    field("Reference range from my report (optional)") {
-                        TextField("e.g. 2.0–5.0 (your report's own range)", text: $referenceText)
+                    field(String(localized: "Reference range from my report (optional)")) {
+                        TextField("e.g. 2.0-5.0 (your report's own range)", text: $referenceText)
                             .textFieldStyle(.plain)
                             .font(StrandFont.body)
                             .foregroundStyle(StrandPalette.textPrimary)
@@ -256,7 +256,7 @@ struct MarkerEditorView: View {
                             .overlay(inputShape.strokeBorder(StrandPalette.hairline, lineWidth: 1))
                             .accessibilityLabel("Reference range from your own report, optional")
                     }
-                    Text("NOOP never fills this in — it only shows back exactly what you type from your own report.")
+                    Text("NOOP never fills this in. It only shows back exactly what you type from your own report.")
                         .font(StrandFont.footnote)
                         .foregroundStyle(StrandPalette.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -299,12 +299,12 @@ struct MarkerEditorView: View {
     private var bloodPressureFields: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 14) {
-                field("Systolic") {
-                    numberBox(placeholder: "e.g. 120", text: $valueText, unit: "mmHg", field: .value)
+                field(String(localized: "Systolic")) {
+                    numberBox(placeholder: String(localized: "e.g. 120"), text: $valueText, unit: "mmHg", field: .value)
                         .accessibilityLabel("Systolic blood pressure in mmHg")
                 }
-                field("Diastolic") {
-                    numberBox(placeholder: "e.g. 80", text: $diastolicText, unit: "mmHg", field: .diastolic)
+                field(String(localized: "Diastolic")) {
+                    numberBox(placeholder: String(localized: "e.g. 80"), text: $diastolicText, unit: "mmHg", field: .diastolic)
                         .accessibilityLabel("Diastolic blood pressure in mmHg")
                 }
             }
@@ -333,7 +333,7 @@ struct MarkerEditorView: View {
     // MARK: - Disclaimer + footer
 
     private var disclaimerNote: some View {
-        Text("Lab Book keeps your own numbers — it doesn't test, read, or judge them, and it's not medical advice. Everything stays on \(Platform.deviceNounPhrase).")
+        Text("Lab Book keeps your own numbers. It doesn't test, read, or judge them, and it's not medical advice. Everything stays on \(Platform.deviceNounPhrase).")
             .font(StrandFont.footnote)
             .foregroundStyle(StrandPalette.textTertiary)
             .fixedSize(horizontal: false, vertical: true)
@@ -401,7 +401,7 @@ struct MarkerEditorView: View {
               let factor = MarkerUnits.factorToCanonical(markerKey: markerKey, from: activeUnit) else {
             return ""
         }
-        return "× \(MarkerUnits.factorLabel(factor)) on save."
+        return String(localized: "× \(MarkerUnits.factorLabel(factor)) on save.")
     }
 
     // MARK: - Build the draft rows

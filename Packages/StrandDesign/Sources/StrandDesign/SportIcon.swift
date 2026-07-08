@@ -21,12 +21,22 @@ public func sportSymbol(_ sport: String) -> String {
     case s.contains("strength") || s.contains("weight") || s.contains("lift"):
                                                      return "dumbbell.fill"
     case s.contains("box"):                         return "figure.boxing"
+    case s.contains("martial") || s.contains("jiu") || s.contains("judo") || s.contains("karate"):
+                                                     return "figure.martial.arts"
     case s.contains("hiit") || s.contains("functional"):
                                                      return "figure.highintensity.intervaltraining"
     case s.contains("elliptical"):                  return "figure.elliptical"
+    case s.contains("snowboard"):                   return "figure.snowboarding"
     case s.contains("ski"):                         return "figure.skiing.downhill"
-    case s.contains("tennis"):                      return "figure.tennis"
+    // "padel"/"pickleball" deliberately precede "tennis" so they don't get swallowed by a
+    // broader racket match; all the racket sports share the tennis glyph (no dedicated SF Symbol).
+    case s.contains("padel") || s.contains("pickle") || s.contains("tennis")
+        || s.contains("squash") || s.contains("racquet") || s.contains("badminton"):
+                                                     return "figure.tennis"
+    case s.contains("volleyball"):                  return "figure.volleyball"
+    case s.contains("stretch"):                     return "figure.flexibility"
     case s.contains("golf"):                        return "figure.golf"
+    case s.contains("bowl"):                        return "figure.bowling"
     case s.contains("soccer") || s.contains("football"):
                                                      return "figure.soccer"
     case s.contains("basketball"):                  return "figure.basketball"

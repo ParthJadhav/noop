@@ -254,6 +254,13 @@ object WhoopCsvImporter {
         // French (issue #79): physiological_cycles.csv keeps its English name; sleep/workouts renamed.
         "sommeil.csv" -> SLEEPS_NAME
         "entrainements.csv", "entraînements.csv" -> WORKOUTS_NAME
+        // Brazilian Portuguese (issue #692): unlike es/fr, WHOOP localizes ALL FOUR filenames here,
+        // cycles included. Names from a real pt-BR export. Folded + unfolded variants because the
+        // filename is lowercased but not diacritic-folded; header sniffing is the backstop if it mojibakes.
+        "ciclos_fisiológicos.csv", "ciclos_fisiologicos.csv" -> CYCLES_NAME
+        "sonos.csv" -> SLEEPS_NAME
+        "treinos.csv" -> WORKOUTS_NAME
+        "entradas_diário.csv", "entradas_diario.csv" -> JOURNAL_NAME
         else -> null
     }
 

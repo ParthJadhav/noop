@@ -66,10 +66,28 @@ public struct WearableExportImporter {
         let sleeps = Array(parsed.sleeps.sorted { $0.start < $1.start }.prefix(Self.maxRows))
 
         if days.isEmpty && sleeps.isEmpty {
+            // A lone Oura `heartrate.csv` is a raw HR-sample file, not a daily summary, so it carries no
+            // recovery/sleep/HRV NOOP can map. Say so plainly and point at the right file (#857) instead of
+            // a brand-generic "no usable data".
+            if brand == .oura, Self.onlyHeartRateCSV(files) {
+                throw ImportError.emptyExport(
+                    "That file is Oura's raw heart-rate log, which has no daily sleep or recovery values to "
+                    + "import. Export your Oura data as JSON (Account → Export Data), or pick the daily/readiness "
+                    + "CSV, and import that instead.")
+            }
             throw ImportError.emptyExport("\(brand.displayName) export held no sleep or daily wellness data")
         }
         return WearableImportResult(brand: brand, days: days, sleeps: sleeps,
                                     summary: Self.summarize(brand: brand, days: days, sleeps: sleeps))
+    }
+
+    /// True when every collected file is a raw heart-rate CSV (no daily-summary CSV/JSON among them): the
+    /// exact case in #857 where the user picked Oura's `heartrate.csv`.
+    static func onlyHeartRateCSV(_ files: [String: Data]) -> Bool {
+        guard !files.isEmpty else { return false }
+        return files.keys.allSatisfy { name in
+            name.hasSuffix(".csv") && (name.contains("heartrate") || name.contains("heart_rate"))
+        }
     }
 
     /// Pure entry point for tests: parse already-loaded files (lowercased filename → bytes) of a known
@@ -104,13 +122,24 @@ public struct WearableExportImporter {
         }
         // Oura: a single account-export JSON (often "oura_*"), or one whose top-level keys are Oura's.
         if names.contains(where: { $0.contains("oura") }) { return .oura }
+        // Oura CSV export: the per-category files a user can download alongside (or instead of) the JSON,
+        // e.g. `heartrate.csv` / `readiness.csv` / `sleep.csv`. Routing these to Oura (rather than failing
+        // brand detection) lets the importer give an HONEST per-file outcome instead of an opaque error
+        // (#857): a daily-summary CSV imports, a lone raw `heartrate.csv` reports "no daily wellness data".
+        if names.contains(where: { ouraCSVFilenames.contains(where: $0.contains) }) { return .oura }
 
-        // Content probe: look at the JSON shape of the sample files.
-        for data in files.values.prefix(8) {
+        // Content probe: look at the shape of the sample files (JSON keys, or an Oura CSV header).
+        for (name, data) in files.prefix(8) {
             if let b = brandFromJSONShape(data) { return b }
+            if name.hasSuffix(".csv"), OuraExportParser.looksLikeOuraCSV(CSVTable(data: data).normalizedHeaders) {
+                return .oura
+            }
         }
         return nil
     }
+
+    /// Filename fragments that identify an Oura per-category CSV export (lowercased, substring match).
+    static let ouraCSVFilenames: [String] = ["heartrate", "heart_rate", "readiness", "sleep_periods"]
 
     /// Probe a JSON blob's top-level / sample-element keys to spot a brand even when the filename
     /// gives nothing away. Bounded: only the first object is inspected.
@@ -224,6 +253,9 @@ public struct WearableExportImporter {
             return name.contains("sleep") || name.contains("heart") || name.contains("step")
                 || name.contains("stress") || name.contains("activit") || name.contains("readiness")
                 || name.contains("wellness") || name.contains("rhr")
+                // Oura's daily-summary CSV can be named generically (#857): keep the common names so the
+                // summary file reaches the parser instead of being filtered out.
+                || name.contains("oura") || name.contains("daily") || name.contains("trend")
         }
         // JSON: name-based wellness hints (covers Fitbit/Garmin per-day files + Oura's single export).
         let hints = ["sleep", "heart", "rate", "step", "stress", "activit", "readiness",

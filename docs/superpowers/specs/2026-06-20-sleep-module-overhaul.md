@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-20
 **Trigger:** pikapik487 (#525, #547) asked for a full sleep-pipeline hygiene check rather than more targeted patches. Confirmed by a 4-dimension consistency audit (9 findings), a focused root-cause of the two headline symptoms, and domain research on how main-sleep selection should actually work.
-**Status:** Diagnosis complete, design proposed, NOT yet built. Holding for Aaron's approval of the approach.
+**Status:** Diagnosis complete, design proposed, NOT yet built. Holding for approval of the approach.
 
 ---
 
@@ -82,7 +82,7 @@ Add, both platforms: longest block with a daytime-gap onset + shorter overnight 
 4. **Honesty:** By-Day source badge + the per-day observability line.
 5. **Verify:** full 3-platform gate + the new edge-case tests + an adversarial re-review of the scoring math. Then hold.
 
-## 4. Open questions for Aaron
+## 4. Open questions
 - **Main-night rule:** ship v1 (broad overnight band + duration score) now and v2 (habitual-midsleep anchor) as a follow-up, or build the habitual anchor straight away? v1 fixes pikapik; v2 is the fully-robust shift-worker answer.
 - **Nap vs sleep cutoff:** the research convergence is ~3h for "real sleep not a nap." NOOP currently scores shorter main sleeps. Keep scoring short main sleeps (no hard 3h floor, just the score), or adopt a soft 3h "this is a nap" lean?
 - **Scope:** do all of section 2 in one verified update, or split (core selector first, parity/honesty second)?

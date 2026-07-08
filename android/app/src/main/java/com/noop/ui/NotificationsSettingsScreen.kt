@@ -98,7 +98,7 @@ internal enum class NotifCategory(
 ) {
     Email("Email", Icons.Filled.Email, BuzzPattern.Double),
     Messaging("Messaging", Icons.Filled.Chat, BuzzPattern.Single),
-    Meetings("Meetings & Calls", Icons.Filled.Videocam, BuzzPattern.Triple),
+    Meetings("Meetings", Icons.Filled.Videocam, BuzzPattern.Triple),
     Calendar("Calendar & Reminders", Icons.Filled.CalendarMonth, BuzzPattern.Double),
 }
 
@@ -122,7 +122,10 @@ private val notifCatalog: List<NotifApp> = listOf(
     NotifApp("com.google.android.apps.messaging", "Messages", NotifCategory.Messaging, Icons.Filled.Chat),
     NotifApp("com.Slack", "Slack", NotifCategory.Messaging, Icons.Filled.Chat),
     NotifApp("org.telegram.messenger", "Telegram", NotifCategory.Messaging, Icons.Filled.Chat),
-    NotifApp("com.microsoft.teams", "Microsoft Teams", NotifCategory.Meetings, Icons.Filled.Videocam),
+    // Teams' ringing-call notifications are handled by the Calls card below (VoIP path). This
+    // per-app row covers everything else Teams sends to the shade (chats, @-mentions, channel
+    // posts), which read as messages, so it lives under Messaging with the chat glyph.
+    NotifApp("com.microsoft.teams", "Microsoft Teams", NotifCategory.Messaging, Icons.Filled.Chat),
     NotifApp("us.zoom.videomeetings", "Zoom", NotifCategory.Meetings, Icons.Filled.Videocam),
     NotifApp("com.google.android.calendar", "Calendar", NotifCategory.Calendar, Icons.Filled.CalendarMonth),
 )
@@ -264,7 +267,7 @@ fun NotificationsSettingsScreen(vm: AppViewModel) {
         AlertSection(
             icon = Icons.Filled.NotificationsActive,
             title = "Wrist alerts",
-            blurb = "When on, NOOP taps your wrist for the apps you pick below — so you can leave " +
+            blurb = "When on, NOOP taps your wrist for the apps you pick below, so you can leave " +
                 "your phone and still feel what matters.",
         ) {
             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -389,7 +392,7 @@ fun NotificationsSettingsScreen(vm: AppViewModel) {
                 label = "All other apps",
                 help = "Also buzz for apps that aren't in the lists above (e.g. BeReal). Android " +
                     "doesn't let NOOP see every installed app, so this is how you cover the rest. " +
-                    "Can be chatty — quiet hours and \"only when worn\" still apply.",
+                    "Can be chatty; quiet hours and \"only when worn\" still apply.",
                 checked = allOtherApps,
                 onChange = {
                     allOtherApps = it
@@ -441,7 +444,7 @@ fun NotificationsSettingsScreen(vm: AppViewModel) {
             icon = Icons.Filled.NotificationsActive,
             title = "Daily reports",
             blurb = "Optional phone notifications, off by default. These arrive after your strap syncs " +
-                "and NOOP scores the data — so they land soon after, not the exact second you wake or " +
+                "and NOOP scores the data, so they land soon after, not the exact second you wake or " +
                 "finish a workout. Everything is worked out on this phone.",
         ) {
             FormToggleRow(

@@ -1,3 +1,6 @@
+#if !os(watchOS)
+// StrainGauge uses .onContinuousHover + ChartHover tooltips (unavailable on watchOS); the watch
+// uses GlowRing instead, so the whole view is excluded there. iOS/macOS unchanged.
 import SwiftUI
 
 // MARK: - Strain Gauge (§9.1 strain ramp)
@@ -59,11 +62,11 @@ public struct StrainGauge: View {
     /// fraction (not the raw value) so the bands read the same on the 0–100 and 0–21 display scales.
     private var strainWord: String {
         switch fraction {
-        case ..<(6.0 / 21):   return "LIGHT"
-        case ..<(10.0 / 21):  return "MODERATE"
-        case ..<(14.0 / 21):  return "STRENUOUS"
-        case ..<(18.0 / 21):  return "HIGH"
-        default:              return "ALL-OUT"
+        case ..<(6.0 / 21):   return String(localized: "LIGHT", bundle: .module)
+        case ..<(10.0 / 21):  return String(localized: "MODERATE", bundle: .module)
+        case ..<(14.0 / 21):  return String(localized: "STRENUOUS", bundle: .module)
+        case ..<(18.0 / 21):  return String(localized: "HIGH", bundle: .module)
+        default:              return String(localized: "ALL-OUT", bundle: .module)
         }
     }
 
@@ -148,4 +151,5 @@ public struct StrainGauge: View {
     .background(StrandPalette.surfaceBase)
     .preferredColorScheme(.dark)
 }
+#endif
 #endif

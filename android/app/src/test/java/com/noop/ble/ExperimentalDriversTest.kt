@@ -81,7 +81,9 @@ class ExperimentalDriversTest {
     fun recogniseGarmin() {
         assertEquals(ExperimentalBrand.GARMIN, ExperimentalBrand.recognise("Garmin Forerunner 265"))
         assertEquals(ExperimentalBrand.GARMIN, ExperimentalBrand.recognise("fenix 7"))
-        assertEquals(ExperimentalBrand.GARMIN, ExperimentalBrand.recognise("vivoactive 5"))
+        // Accented branding (Garmin markets it as "vívoactive") must fold to the ASCII token. Parity
+        // with Swift ExperimentalDriversTests.testRecogniseGarmin.
+        assertEquals(ExperimentalBrand.GARMIN, ExperimentalBrand.recognise("vívoactive 5"))
     }
 
     @Test

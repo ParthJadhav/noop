@@ -115,7 +115,7 @@ fun FusedRecordScreen(
         if (record.rows.isEmpty()) {
             DataPendingNote(
                 title = "Nothing to fuse yet",
-                body = "Import a WHOOP export, Health Connect or a second band and your best-sourced record builds here — on this device.",
+                body = "Import a WHOOP export, Health Connect or a second band and your best-sourced record builds here, on this device.",
             )
         } else {
             NoopCard(padding = 0.dp) {
@@ -152,7 +152,7 @@ private fun DayBadgeRow(owner: FusionSource?) {
     val text = if (owner != null) {
         "Today's scores owned by ${owner.displayName}"
     } else {
-        "Scores still calibrating — no single day-owner yet"
+        "Scores still calibrating, no single day-owner yet"
     }
     Row(
         verticalAlignment = Alignment.CenterVertically,
@@ -192,7 +192,7 @@ private fun PrivacyNote(deviceNoun: String) {
             modifier = Modifier.size(13.dp),
         )
         Text(
-            "Fused on $deviceNoun. Nothing leaves it — no account, no cloud.",
+            "Fused on $deviceNoun. Nothing leaves it: no account, no cloud.",
             style = NoopType.footnote,
             color = Palette.textTertiary,
         )
@@ -203,7 +203,7 @@ private fun PrivacyNote(deviceNoun: String) {
 @Composable
 private fun DisclaimerNote() {
     Text(
-        "NOOP picks the best-sourced number and shows you where each came from. It's for wellness and curiosity — it doesn't diagnose or replace medical advice.",
+        "NOOP picks the best-sourced number and shows you where each came from. It's for wellness and curiosity. It doesn't diagnose or replace medical advice.",
         style = NoopType.footnote,
         color = Palette.textTertiary,
         modifier = Modifier.padding(horizontal = 4.dp),
@@ -332,7 +332,7 @@ private fun AgreementLine(point: FusedMetricPoint, onCompare: () -> Unit) {
 
 private fun conflictSummary(point: FusedMetricPoint): String {
     val other = point.contributors.drop(1).firstOrNull() ?: return "Tap to compare"
-    return "${other.source.displayName} says ${FusionFormat.value(other.value, point.metric)} — tap to compare"
+    return "${other.source.displayName} says ${FusionFormat.value(other.value, point.metric)}. Tap to compare"
 }
 
 // MARK: - Conflict-compare dialog
@@ -385,7 +385,7 @@ private fun ConflictCompareDialog(row: FusedRow, onDismiss: () -> Unit) {
                             modifier = Modifier.size(16.dp),
                         )
                         Text(
-                            "NOOP shows the ${winner.source.displayName} reading because it ${winner.reason} for this metric — a higher-trust source here, not a verdict that the others are wrong.",
+                            "NOOP shows the ${winner.source.displayName} reading because it ${winner.reason} for this metric: a higher-trust source here, not a verdict that the others are wrong.",
                             style = NoopType.subhead,
                             color = Palette.textSecondary,
                         )

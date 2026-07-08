@@ -39,6 +39,17 @@ enum PuffinExperiment {
 
     static var keepRealtimeForDataEnabled: Bool { UserDefaults.standard.bool(forKey: keepRealtimeForDataKey) }
 
+    /// Opt-in "Overnight only" refinement of Continuous HRV capture (#927): arm the dense realtime stream
+    /// only inside the nightly window (the reused quiet-hours window convention: minutes since local
+    /// midnight, wrap-aware, 22:00 to 07:00 by default) instead of 24/7, roughly halving the battery
+    /// cost. Composed with the base toggle so existing users need no migration: base on + this off reads
+    /// ALWAYS (the pre-#927 behaviour). Default OFF. Read by BLEManager at EVERY arm site (re-derived at
+    /// arm time, never precomputed; see ContinuousHrvSchedule). Mirrors the Android
+    /// `NoopPrefs.KEY_CONTINUOUS_HRV_OVERNIGHT`.
+    static let continuousHrvOvernightOnlyKey = "noopContinuousHrvOvernightOnly"
+
+    static var continuousHrvOvernightOnlyEnabled: Bool { UserDefaults.standard.bool(forKey: continuousHrvOvernightOnlyKey) }
+
     /// Opt-in "Experimental sleep staging (V2)": re-stage each detected night with `SleepStagerV2` — a
     /// transparent cardiorespiratory recipe (reimplemented from contributor PR #600) that recovers deep/REM
     /// better than the shipped V1 stager on its author's n=1 validation. Pure analysis switch: it changes

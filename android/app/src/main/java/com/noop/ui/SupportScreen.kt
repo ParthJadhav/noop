@@ -86,7 +86,7 @@ fun SupportScreen() {
                     style = NoopType.subhead, color = Palette.textSecondary,
                 )
                 Text(
-                    "I keep this project anonymous, so crypto is the only way to chip in — no Patreon, no PayPal, no name attached. Quick, global, and private for both of us.",
+                    "I keep this project anonymous, so crypto is the only way to chip in - no Patreon, no PayPal, no name attached. Quick, global, and private for both of us.",
                     style = NoopType.footnote, color = Palette.accent,
                 )
                 Column {
@@ -123,7 +123,7 @@ fun SupportScreen() {
                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     Text("Get in touch", style = NoopType.headline, color = Palette.textPrimary)
                     Text(
-                        "Questions, feedback, bugs — thenoopapp@gmail.com",
+                        "Questions, feedback, bugs - thenoopapp@gmail.com",
                         style = NoopType.subhead, color = Palette.textSecondary,
                     )
                 }

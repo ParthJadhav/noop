@@ -8,6 +8,8 @@ import com.noop.data.SkinTempSample
 import com.noop.data.RespSample
 import com.noop.data.RrInterval
 import com.noop.data.StepSample
+import com.noop.protocol.DeviceFamily
+import com.noop.protocol.skinTempCelsius
 import org.json.JSONObject
 import java.time.Instant
 import java.time.ZoneOffset
@@ -161,6 +163,11 @@ object AnalyticsEngine {
         // seeds a personal baseline from these means across nights and re-derives skinTempDevC in pass 2
         // (same two-pass shape as avgHrv→recovery). (PR #85)
         skinTemp: List<SkinTempSample> = emptyList(),
+        // Device family that wrote [skinTemp], so the raw→°C conversion picks the right scale (#938):
+        // 5/MG banks CENTIDEGREES (raw/100), the WHOOP 4.0 v24 field is a RAW ADC on a different scale.
+        // Default WHOOP5 keeps every 5/MG + pure-function caller byte-identical; IntelligenceEngine passes
+        // the day owner's real family.
+        skinTempFamily: DeviceFamily = DeviceFamily.WHOOP5,
         profile: UserProfile,
         baselines: ProfileBaselines = ProfileBaselines(),
         maxHROverride: Double? = null,
@@ -196,12 +203,21 @@ object AnalyticsEngine {
         // empty keeps pure-function callers/tests free of it; IntelligenceEngine threads the night window's
         // persisted band state. Mirrors Swift. (#531 / H8 consume)
         bandSleepState: List<Pair<Long, Int>> = emptyList(),
+        // Opt-in experimental sleep staging (V2). When true, detected nights are staged by [SleepStagerV2]
+        // instead of V1. Default false keeps V1 the byte-identical default for pure-function callers/tests;
+        // IntelligenceEngine threads PuffinExperiment.from(context).experimentalSleepV2. Mirrors Swift. (V7 / #690)
+        useSleepStagerV2: Boolean = false,
+        // Sleep & Rest test-mode trace sink (E11). null = byte-identical default. When non-null the gate
+        // trace from detectSleep and the Rest sub-score line are forwarded line-by-line. Mirrors Swift.
+        traceSink: ((String) -> Unit)? = null,
     ): DayResult {
 
         // ── Sleep detection + staging ─────────────────────────────────────────
         val allSessions = SleepStager.detectSleep(
             hr = hr, rr = rr, resp = resp, gravity = gravity, tzOffsetSeconds = tzOffsetSeconds,
             wristOff = wristOff, bandSleepState = bandSleepState,
+            useSleepStagerV2 = useSleepStagerV2,
+            traceSink = traceSink,
         )
         // Sessions attributed to `day` = those whose end falls on `day` (LOCAL day, #277). `day` is
         // the caller's local-day key; attribute by the same offset so the bucket and the key agree.
@@ -244,13 +260,25 @@ object AnalyticsEngine {
         for (s in mainGroup) {
             val m = SleepStager.hypnogramMetrics(s)
             val inBed = (s.end - s.start).toDouble()
-            inBedS += inBed                       // SUM each fragment's in-bed (excludes the wake gap)
+            inBedS += inBed                       // each fragment's own in-bed span (the gap is added below)
             effWeighted += s.efficiency * inBed   // in-bed-weighted efficiency across the group
             deepS += m.deepMin * 60.0
             remS += m.remMin * 60.0
             lightS += m.lightMin * 60.0
             tstS += m.tstS
             disturbances += m.disturbances
+        }
+        // OUT-OF-BED time BETWEEN bridged fragments is AWAKE (#777/#705): a main night bridged from two
+        // fragments split by a 20-min wake gap was reporting that gap as nowhere (it is in no fragment's
+        // [start,end) span), so 20+ min of real awake read as ~4 min - a v7.1 regression, multi-reporter.
+        // Fold the gap into AWAKE by extending the in-bed denominator (in-bed = asleep + awake; tstS is
+        // unchanged), so efficiency and the Rest composite both reflect it. ONE shared definition with the
+        // edit/recompute seam ([SleepStageTotals.interFragmentAwakeSeconds]), so the two paths agree and the
+        // denominator is never double-counted. A bridged gap also counts as one disturbance. Mirrors Swift.
+        val gapAwakeS = SleepStageTotals.interFragmentAwakeSeconds(mainGroup.map { it.start to it.end })
+        if (gapAwakeS > 0.0) {
+            inBedS += gapAwakeS                   // the gap is fully awake: extends in-bed, adds 0 to effWeighted
+            disturbances += 1
         }
         val efficiency = if (inBedS > 0) effWeighted / inBedS else 0.0
 
@@ -300,7 +328,7 @@ object AnalyticsEngine {
         // mean is harvested; IntelligenceEngine seeds the baseline from those means and re-derives the
         // deviation in pass 2 (mirrors avgHrv→recovery). Computed BEFORE Charge so the Charge skin-temp
         // penalty can read it. APPROXIMATE. (PR #85)
-        val nightlySkinTempC = wornNightlySkinTempC(matched, hr, skinTemp)
+        val nightlySkinTempC = wornNightlySkinTempC(matched, hr, skinTemp, skinTempFamily)
         val skinTempDevC: Double? = nightlySkinTempC?.let { v ->
             baselines.skinTemp?.takeIf { it.usable }?.let { round2(Baselines.deviation(v, it).delta) }
         }
@@ -317,6 +345,17 @@ object AnalyticsEngine {
             sleepNeedHours = sleepNeedHours,
             consistency = sleepConsistency,
         )
+        // Sleep & Rest test mode (E11): emit the Rest sub-score breakdown for this night, reusing the
+        // IDENTICAL inputs `rest` consumed above so the trace can never disagree with the score. Emitted
+        // only when a trace is requested and this day scored a night. Mirrors Swift.
+        if (traceSink != null && matched.isNotEmpty()) {
+            traceSink(RestScorer.subScoreLine(
+                tstSeconds = tstS, inBedSeconds = inBedS, efficiency = efficiency,
+                restorativeSeconds = deepS + remS,
+                needHours = sleepNeedHours ?: RestScorer.defaultSleepNeedHours,
+                consistency = sleepConsistency, deepSeconds = deepS,
+                groupFragments = mainGroup.size, groupInBedSeconds = inBedS))
+        }
 
         // ── Recovery / Charge ─────────────────────────────────────────────────
         var recovery: Double? = null
@@ -475,6 +514,21 @@ object AnalyticsEngine {
             if (motion.isNotEmpty()) sessionMotionByStart[s.start] = motion
         }
 
+        // ── Per-session per-epoch BAND sleep_state (#175) ─────────────────────
+        // Grid the strap's OWN band sleep_state (the SAME [bandSleepState] samples the H7 guard consumes)
+        // onto each matched session's 30 s epochs, for the caller to persist beside `stagesJSON`. This is the
+        // source the band-state chain lacked (persist → next pass's H7 re-onset CONFIRM). A session whose
+        // window carries no band samples is omitted (no key) → the caller persists NULL, an absent signal
+        // stays absent. Empty on a WHOOP 4.0. The band code is carried verbatim; it NEVER overrides the
+        // derived hypnogram, only confirms a borderline morning re-onset. Mirrors Swift.
+        val sessionSleepStateByStart = HashMap<Long, List<Int>>()
+        if (bandSleepState.isNotEmpty()) {
+            for (s in matched) {
+                val states = SleepStager.sessionEpochSleepState(s.start, s.end, bandSleepState)
+                if (states.isNotEmpty()) sessionSleepStateByStart[s.start] = states
+            }
+        }
+
         return DayResult(
             daily = daily,
             sleepSessions = matched,
@@ -487,6 +541,7 @@ object AnalyticsEngine {
             effortConfidence = effortConfidence,
             restConfidence = restConfidence,
             sessionMotionByStart = sessionMotionByStart,
+            sessionSleepStateByStart = sessionSleepStateByStart,
         )
     }
 
@@ -503,34 +558,101 @@ object AnalyticsEngine {
      * concurrent HR sample reads a worn, alive BPM (the strap streams HR only on-wrist), and (c) the
      * value is in the plausible worn range — so an on-charger interval drifting to ambient (which still
      * passes the strap's looser 20–45 decode gate, e.g. the ~22 °C off-wrist decode fixture) can't
-     * poison the nightly mean. Uses the decoder's /100 scale. All values APPROXIMATE. (PR #85)
+     * poison the nightly mean.
+     *
+     * The raw→°C conversion is DEVICE-FAMILY-AWARE (#938): 5/MG stores CENTIDEGREES (°C = raw/100), but
+     * the WHOOP 4.0 v24 field@72 is a RAW ADC on a different scale — running it through /100 read every
+     * worn 4.0 night ~8 °C, below the 28 °C worn gate, so kept=0 and skin temp + the illness signal
+     * vanished (issue #938). The shared [skinTempCelsius] picks the right scale; [family] defaults to
+     * WHOOP5 so every existing 5/MG + pure-function caller is byte-identical. All values APPROXIMATE.
      */
     internal fun wornNightlySkinTempC(
         sessions: List<DetectedSleep>,
         hr: List<HrSample>,
         skinTemp: List<SkinTempSample>,
+        family: DeviceFamily = DeviceFamily.WHOOP5,
         minSamples: Int = MIN_SKIN_TEMP_SAMPLES_INLINE,
-    ): Double? {
-        if (sessions.isEmpty() || skinTemp.isEmpty()) return null
-        val wornSeconds = HashSet<Long>(hr.size)
-        for (h in hr) if (h.bpm in 30..220) wornSeconds.add(h.ts)
-        var sum = 0.0
-        var n = 0
-        for (t in skinTemp) {
-            if (t.ts !in wornSeconds) continue
-            if (sessions.none { t.ts in it.start..it.end }) continue
-            val c = t.raw / 100.0
-            if (c < SKIN_TEMP_MIN_C || c > SKIN_TEMP_MAX_C) continue
-            sum += c
-            n++
-        }
-        return if (n >= minSamples) sum / n else null
-    }
+    ): Double? = skinTempFunnel(sessions, hr, skinTemp, family, minSamples).mean
 
     /** Plausible worn skin-temperature range (°C). Off-wrist/charging samples drift to ambient and are
      *  excluded; the strap's own decode gate is the looser 20–45. (PR #85) */
     private const val SKIN_TEMP_MIN_C: Double = 28.0
     private const val SKIN_TEMP_MAX_C: Double = 42.0
+
+    // ── Skin-temp funnel diagnostic (#752) ──────────────────────────────────────────────────────────
+
+    /**
+     * Why nightly skin temp funneled toward absent for one night. Counts are over the night's raw skin-temp
+     * samples; each sample is attributed to the FIRST gate that dropped it, in the SAME order
+     * [wornNightlySkinTempC] applies (not-worn → out-of-window → out-of-range → kept), so the four drop
+     * buckets plus [kept] sum to [totalSamples]. Pure + deterministic; shares the exact gate logic with the
+     * real computation, so it explains the SAME mean the app uses. Mirrors Swift `SkinTempFunnelDiagnostic`.
+     * (#752)
+     */
+    data class SkinTempFunnelDiagnostic(
+        val totalSamples: Int,
+        val droppedNotWorn: Int,
+        val droppedOutOfWindow: Int,
+        val droppedOutOfRange: Int,
+        val kept: Int,
+        val minSamples: Int,
+        val mean: Double?,
+    ) {
+        /** True when the night produced no usable mean - the case this diagnostic exists to triage. */
+        val isAbsent: Boolean get() = mean == null
+
+        /** One human-readable line for the caller to LOG. No I/O here - the engine stays pure. */
+        val summary: String
+            get() = "skin-temp-funnel: $totalSamples samples → kept $kept/$minSamples " +
+                "(mean=${mean?.let { String.format(java.util.Locale.US, "%.2f°C", it) } ?: "absent"}); " +
+                "dropped[notWorn=$droppedNotWorn, outOfWindow=$droppedOutOfWindow, " +
+                "outOfRange=$droppedOutOfRange]"
+    }
+
+    /**
+     * Read-only skin-temp funnel for one night (#752). Re-runs the SAME wear/window/range gates
+     * [wornNightlySkinTempC] uses (and produces the IDENTICAL mean), additionally counting where each
+     * sample dropped, so an absent skin temp is self-explaining. [wornNightlySkinTempC] is a thin wrapper
+     * over this, so the two can never disagree. Pure + deterministic. Mirrors Swift `skinTempFunnel`. (#752)
+     */
+    fun skinTempFunnel(
+        sessions: List<DetectedSleep>,
+        hr: List<HrSample>,
+        skinTemp: List<SkinTempSample>,
+        family: DeviceFamily = DeviceFamily.WHOOP5,
+        minSamples: Int = MIN_SKIN_TEMP_SAMPLES_INLINE,
+    ): SkinTempFunnelDiagnostic {
+        val total = skinTemp.size
+        // No sessions ⇒ every sample is out of window; no samples ⇒ an empty funnel. Either way the mean is
+        // null, exactly as [wornNightlySkinTempC]'s early return produced before.
+        if (sessions.isEmpty() || skinTemp.isEmpty()) {
+            return SkinTempFunnelDiagnostic(
+                totalSamples = total, droppedNotWorn = 0,
+                droppedOutOfWindow = if (sessions.isEmpty()) total else 0,
+                droppedOutOfRange = 0, kept = 0, minSamples = minSamples, mean = null,
+            )
+        }
+        val wornSeconds = HashSet<Long>(hr.size)
+        for (h in hr) if (h.bpm in 30..220) wornSeconds.add(h.ts)
+        var sum = 0.0
+        var kept = 0
+        var notWorn = 0
+        var outOfWindow = 0
+        var outOfRange = 0
+        for (t in skinTemp) {
+            if (t.ts !in wornSeconds) { notWorn++; continue }
+            if (sessions.none { t.ts in it.start..it.end }) { outOfWindow++; continue }
+            val c = skinTempCelsius(t.raw, family)   // #938: family-aware (5/MG=raw/100, 4.0=raw ADC map)
+            if (c < SKIN_TEMP_MIN_C || c > SKIN_TEMP_MAX_C) { outOfRange++; continue }
+            sum += c
+            kept++
+        }
+        val mean = if (kept >= minSamples) sum / kept else null
+        return SkinTempFunnelDiagnostic(
+            totalSamples = total, droppedNotWorn = notWorn, droppedOutOfWindow = outOfWindow,
+            droppedOutOfRange = outOfRange, kept = kept, minSamples = minSamples, mean = mean,
+        )
+    }
 }
 
 /*
@@ -628,6 +750,46 @@ object RestScorer {
             wRestorative * restorativeScore +
             wConsistency * consistencyScore
         return (weighted * 100.0).roundToInt() / 100.0
+    }
+
+    /**
+     * Sleep & Rest test-mode (E11) diagnostic line for the Rest composite. Recomputes the four weighted
+     * sub-scores from the SAME inputs `rest()` reads (on the 0..1 scale, byte-aligned with the Swift
+     * `Rest.subScoreLine`), and reuses `rest()` for the final `composite=` value so the trace can never
+     * disagree with the score. `groupFragments` / `groupInBedSeconds` describe the main-night GROUP
+     * composition (#525/#561). Pure, side-effect-free, no em-dashes. Mirrors Swift exactly.
+     */
+    fun subScoreLine(
+        tstSeconds: Double, inBedSeconds: Double, efficiency: Double, restorativeSeconds: Double,
+        needHours: Double, consistency: Double?, deepSeconds: Double?,
+        groupFragments: Int, groupInBedSeconds: Double,
+    ): String {
+        fun clamp01(x: Double) = maxOf(0.0, minOf(1.0, x))
+        fun r2(x: Double) = Math.round(x * 100.0) / 100.0
+        val needSeconds = maxOf(needHours, 0.1) * 3600.0
+        val durationScore = clamp01(tstSeconds / needSeconds)
+        val efficiencyScore = clamp01(efficiency)
+        val deepFactor = if (deepSeconds != null && tstSeconds > 0 && deepShareTarget > 0) {
+            val adequacy = clamp01((deepSeconds / tstSeconds) / deepShareTarget)
+            deepFloorFactor + (1.0 - deepFloorFactor) * adequacy
+        } else 1.0
+        val restorativeScore = if (tstSeconds > 0)
+            clamp01((restorativeSeconds / tstSeconds) / restorativeTargetShare) * deepFactor else 0.0
+        val consistencyScore = clamp01(consistency ?: NEUTRAL_CONSISTENCY)
+        // Reuse the real scorer for the composite (cannot diverge). `rest()` takes deep + REM separately;
+        // restorative = deep + REM, so REM = restorative - deep. null deep -> 0 deep (no-adequacy path).
+        val composite = rest(
+            asleepSeconds = tstSeconds, efficiency = efficiency,
+            deepSeconds = deepSeconds ?: 0.0,
+            remSeconds = restorativeSeconds - (deepSeconds ?: 0.0),
+            sleepNeedHours = needHours, consistency = consistency,
+        ) ?: 0.0
+        return "rest composite=${r2(composite)} " +
+            "dur=${r2(durationScore)}*wDur=$wDuration " +
+            "eff=${r2(efficiencyScore)}*wEff=$wEfficiency " +
+            "restor=${r2(restorativeScore)}*wRestor=$wRestorative deepFactor=${r2(deepFactor)} " +
+            "consist=${r2(consistencyScore)}*wConsist=$wConsistency " +
+            "group=$groupFragments groupInBedMin=${(groupInBedSeconds / 60).toInt()}"
     }
 
     /**

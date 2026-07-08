@@ -9,8 +9,9 @@ import XCTest
 /// missing trailing `[0x00, 0x00]` is a haptic-mode field. We now send the same 9 bytes; these tests
 /// pin that layout so the field can never silently regress to the silent 7-byte form again.
 ///
-/// NOTE: the *buzz itself* is still unconfirmed — no WHOOP 4.0 owner has reported a strap-driven wake
-/// firing with this frame yet. These tests pin the bytes we send; they do not assert the strap wakes.
+/// NOTE: the buzz is confirmed on-device by the capture author (PR #535, 2026-06-20): a real WHOOP 4.0
+/// buzzes at the specified time with this 9-byte frame. These tests pin the bytes we send; they do not
+/// assert the strap wakes.
 final class SetAlarmPayloadTests: XCTestCase {
 
     func testLength_isNineBytes() {

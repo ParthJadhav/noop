@@ -378,7 +378,7 @@ class HuamiHrSource(
 
     private fun announceNeedsPairing() {
         if (_needsPairing.value != null) return
-        val msg = "This band needs a pairing handshake NOOP can't do yet. Live data isn't available — try " +
+        val msg = "This band needs a pairing handshake NOOP can't do yet. Live data isn't available - try " +
             "exporting from the Zepp app and importing the file instead."
         _needsPairing.value = msg
         log("Huami: $msg")

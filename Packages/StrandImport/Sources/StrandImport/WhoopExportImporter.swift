@@ -62,6 +62,13 @@ public struct WhoopExportImporter {
         // French (issue #79): physiological_cycles.csv keeps its English name; sleep/workouts renamed.
         case "sommeil.csv":               return sleepsName
         case "entrainements.csv", "entraînements.csv": return workoutsName
+        // Brazilian Portuguese (issue #692): unlike es/fr, WHOOP localizes ALL FOUR filenames here,
+        // cycles included. Names taken from a real pt-BR export. Folded + unfolded variants because the
+        // filename is lowercased but not diacritic-folded; header sniffing is the backstop if it mojibakes.
+        case "ciclos_fisiológicos.csv", "ciclos_fisiologicos.csv": return cyclesName
+        case "sonos.csv":                 return sleepsName
+        case "treinos.csv":               return workoutsName
+        case "entradas_diário.csv", "entradas_diario.csv": return journalName
         default:                          return nil
         }
     }

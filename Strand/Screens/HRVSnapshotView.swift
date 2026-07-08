@@ -219,24 +219,24 @@ struct HRVSnapshotView: View {
         switch phase {
         case .idle:
             return bonded
-                ? "Sit still and breathe normally. Tap below to take a 60-second reading."
-                : "Connect your strap on the Live screen to take a reading."
+                ? String(localized: "Sit still and breathe normally. Tap below to take a 60-second reading.")
+                : String(localized: "Connect your strap on the Live screen to take a reading.")
         case .capturing:
-            return "Sit still, breathe normally. Keep your wrist relaxed and steady."
+            return String(localized: "Sit still, breathe normally. Keep your wrist relaxed and steady.")
         case .done:
             if let r = result, r.rmssd == nil {
-                return "Not enough clean beats — sit still and try again."
+                return String(localized: "Not enough clean beats. Sit still and try again.")
             }
-            return "Done. Save this reading to keep it in your trends."
+            return String(localized: "Done. Save this reading to keep it in your trends.")
         }
     }
 
     private var dialAccessibilityLabel: String {
         switch phase {
-        case .idle:      return "HRV reading not started"
-        case .capturing: return "Capturing. \(secondsRemaining) seconds remaining, \(captureBuffer.count) beats collected."
+        case .idle:      return String(localized: "HRV reading not started")
+        case .capturing: return String(localized: "Capturing. \(secondsRemaining) seconds remaining, \(captureBuffer.count) beats collected.")
         case .done:
-            return result?.rmssd.map { "RMSSD \(Int($0.rounded())) milliseconds" } ?? "Reading incomplete"
+            return result?.rmssd.map { String(localized: "RMSSD \(Int($0.rounded())) milliseconds") } ?? String(localized: "Reading incomplete")
         }
     }
 
@@ -257,7 +257,7 @@ struct HRVSnapshotView: View {
             .disabled(!bonded && phase != .capturing)
             .help(bonded
                   ? "Take a 60-second seated HRV reading from the live R-R stream."
-                  : "Connect your strap first — the reading needs the live R-R stream.")
+                  : "Connect your strap first. The reading needs the live R-R stream.")
 
             if phase == .done, let r = result, r.rmssd != nil {
                 Button {
@@ -277,9 +277,9 @@ struct HRVSnapshotView: View {
 
     private var primaryLabel: String {
         switch phase {
-        case .idle:      return "Take an HRV reading"
-        case .capturing: return "Cancel"
-        case .done:      return "Take another reading"
+        case .idle:      return String(localized: "Take an HRV reading")
+        case .capturing: return String(localized: "Cancel")
+        case .done:      return String(localized: "Take another reading")
         }
     }
 
@@ -299,7 +299,7 @@ struct HRVSnapshotView: View {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundStyle(StrandPalette.statusWarning)
                             .accessibilityHidden(true)
-                        Text("Not enough clean beats — sit still and try again. \(result.nClean) of \(result.nInput) beats survived filtering (need \(HRVAnalyzer.minBeats)).")
+                        Text("Not enough clean beats. Sit still and try again. \(result.nClean) of \(result.nInput) beats survived filtering (need \(HRVAnalyzer.minBeats)).")
                             .font(StrandFont.footnote)
                             .foregroundStyle(StrandPalette.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -308,8 +308,8 @@ struct HRVSnapshotView: View {
                     HStack(spacing: NoopMetrics.gap) {
                         metricTile("RMSSD", Self.format(result.rmssd, "%.0f"), "ms", StrandPalette.metricPurple)
                         metricTile("SDNN", Self.format(result.sdnn, "%.0f"), "ms", StrandPalette.restBright)
-                        metricTile("Mean HR", Self.format(Self.meanHR(meanNN: result.meanNN), "%.0f"), "bpm", StrandPalette.metricRose)
-                        metricTile("Beats", "\(result.nClean)", "used", StrandPalette.metricCyan)
+                        metricTile(String(localized: "Mean HR"), Self.format(Self.meanHR(meanNN: result.meanNN), "%.0f"), "bpm", StrandPalette.metricRose)
+                        metricTile(String(localized: "Beats"), "\(result.nClean)", String(localized: "used"), StrandPalette.metricCyan)
                     }
                 }
             }
@@ -411,8 +411,22 @@ struct HRVSnapshotView: View {
     /// End the capture and run the full cleaning analysis over everything collected.
     private func finish() {
         ScreenIdle.keepAwake(false)
-        result = HRVAnalyzer.analyze(rawRR: captureBuffer.map(Double.init),
-                                     maxRejectedFraction: HRVAnalyzer.defaultSpotMaxRejectedFraction)
+        let raw = captureBuffer.map(Double.init)
+        // HRV & Autonomic test mode (Group G): when the mode is on, emit the cleaning trace (nInput /
+        // nClean / rejected fraction, the range + Malik ectopic counts, the minBeats + spot gates,
+        // RMSSD/SDNN/meanNN) tagged `.hrv`. analyzeTrace returns the SAME HRVResult `analyze` would
+        // (it reuses analyze verbatim), so the headline RMSSD is byte-identical with the trace on or off.
+        // Zero cost when off: the gate is one UserDefaults bool read and analyzeTrace is never called, so
+        // the plain `analyze` path below runs untouched.
+        if TestCentre.active(.hrv) {
+            let (traced, lines) = HRVAnalyzer.analyzeTrace(
+                rawRR: raw, maxRejectedFraction: HRVAnalyzer.defaultSpotMaxRejectedFraction, path: "spot")
+            for line in lines { live.append(log: line, domain: .hrv) }
+            result = traced
+        } else {
+            result = HRVAnalyzer.analyze(rawRR: raw,
+                                         maxRejectedFraction: HRVAnalyzer.defaultSpotMaxRejectedFraction)
+        }
         phase = .done
     }
 

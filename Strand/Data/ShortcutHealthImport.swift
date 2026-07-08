@@ -130,8 +130,13 @@ enum ShortcutHealthImport {
     /// are skipped (forward-compatible). Days with no metric are dropped.
     static func parse(_ text: String) -> Parsed {
         var out = Parsed()
-        for raw in text.split(whereSeparator: { $0 == "\n" || $0 == "\r" }) {
-            let line = raw.trimmingCharacters(in: .whitespaces)
+        // Split on ANY newline via `Character.isNewline`. Critically, a CRLF (`\r\n`) is a SINGLE Swift
+        // Character (extended grapheme cluster), so an `$0 == "\n" || $0 == "\r"` predicate would NOT
+        // match it — a Windows/Shortcuts CRLF-terminated payload would then glue the line ending onto the
+        // next record's kind field ("\r\nW" ≠ "W") and silently DROP that valid record. `isNewline`
+        // matches CR, LF and the CRLF grapheme. Trim newlines too (not just spaces) as belt-and-braces.
+        for raw in text.split(whereSeparator: { $0.isNewline }) {
+            let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !line.isEmpty else { continue }
             let f = line.components(separatedBy: ",")
             guard let kind = f.first?.uppercased() else { continue }

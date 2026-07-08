@@ -50,6 +50,14 @@ enum UnitPrefs {
     /// resolves to `.hundred` (NOOP's native axis). Mirrored on Android by NoopPrefs("effort.scale").
     static let effortScaleKey = "effort.scale"
 
+    /// Display factor for the #268 Effort scale: the stored 0-100 value multiplied by this renders on
+    /// the user's chosen axis (1.0 for the native 0-100, 0.21 for the WHOOP-style 0-21). Display-only,
+    /// mirrors Android's effortDisplayFactor helper so digest sentences match the charts on both.
+    static func currentEffortDisplayFactor() -> Double {
+        let raw = UserDefaults.standard.string(forKey: effortScaleKey) ?? ""
+        return raw == EffortScale.whoop.rawValue ? 0.21 : 1.0
+    }
+
     /// Whether the live-HR Live Activity (Lock Screen + Dynamic Island) may show, iOS only (#336).
     /// Defaults to ON. The user can turn it off in Notifications settings without digging into iOS
     /// Settings — `liveActivityEnabled()` reads it default-true so an unset key keeps the old behaviour.

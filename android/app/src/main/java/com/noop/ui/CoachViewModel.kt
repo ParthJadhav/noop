@@ -20,12 +20,12 @@ import kotlinx.coroutines.launch
  *
  * Holds the [AiCoach] engine (built over the same Room-backed [WhoopRepository] the rest of
  * the app uses) and the chat state. The API key and the chosen provider/model are persisted
- * by [AiKeyStore] — the key encrypted at rest in the Android Keystore, the provider/model as
+ * by [AiKeyStore], the key encrypted at rest in the Android Keystore, the provider/model as
  * plain (non-secret) preferences.
  *
  * Privacy posture mirrors the engine: nothing is sent until the user has saved a key and asked
  * a question, and only a compact text summary of their own metrics plus their question leaves
- * the device. Errors never crash — they surface in [error].
+ * the device. Errors never crash, they surface in [error].
  */
 class CoachViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -42,7 +42,7 @@ class CoachViewModel(app: Application) : AndroidViewModel(app) {
     val messages: StateFlow<List<ChatMsg>> = _messages.asStateFlow()
 
     private val _sending = MutableStateFlow(false)
-    /** True while a request is in flight — the UI disables Send and shows a thinking state. */
+    /** True while a request is in flight, the UI disables Send and shows a thinking state. */
     val sending: StateFlow<Boolean> = _sending.asStateFlow()
 
     private val _error = MutableStateFlow<String?>(null)
@@ -99,6 +99,38 @@ class CoachViewModel(app: Application) : AndroidViewModel(app) {
         AiKeyStore.saveConsent(ctx, value)
     }
 
+    // MARK: - Editable system prompt
+
+    private val _systemPrompt = MutableStateFlow(
+        AiCoach.resolveSystemPrompt(app.applicationContext)
+    )
+    /**
+     * The Coach's system prompt as currently shown in the editor: the user's stored override, or the
+     * built-in default when nothing custom is set. Read fresh by the engine per send (see
+     * [AiCoach.resolveSystemPrompt]); this flow just backs the editor UI.
+     */
+    val systemPrompt: StateFlow<String> = _systemPrompt.asStateFlow()
+
+    private val _hasCustomPrompt = MutableStateFlow(
+        NoopPrefs.coachSystemPrompt(app.applicationContext).isNotBlank()
+    )
+    /** True when an edited prompt differs from the default, gates the "Reset to default" control. */
+    val hasCustomPrompt: StateFlow<Boolean> = _hasCustomPrompt.asStateFlow()
+
+    /** Persist the edited [prompt] (blank clears it back to default) and reflect it in the editor. */
+    fun setSystemPrompt(ctx: Context, prompt: String) {
+        NoopPrefs.setCoachSystemPrompt(ctx, prompt)
+        _systemPrompt.value = prompt
+        _hasCustomPrompt.value = prompt.isNotBlank() && prompt.trim() != AiCoach.DEFAULT_SYSTEM_PROMPT
+    }
+
+    /** Restore the built-in default prompt by clearing any override. */
+    fun resetSystemPrompt(ctx: Context) {
+        NoopPrefs.setCoachSystemPrompt(ctx, "")
+        _systemPrompt.value = AiCoach.DEFAULT_SYSTEM_PROMPT
+        _hasCustomPrompt.value = false
+    }
+
     // Bumped whenever the stored key changes so the UI recomposes its setup/chat gate.
     private val _keyVersion = MutableStateFlow(0)
     /** Increments when the key is saved or cleared; observe to re-read [hasKey]. */
@@ -110,8 +142,8 @@ class CoachViewModel(app: Application) : AndroidViewModel(app) {
     fun hasKey(ctx: Context): Boolean = AiKeyStore.hasKey(ctx)
 
     /**
-     * True once the coach can actually send: a stored key for the cloud providers, or — for the
-     * Custom (local) provider — a committed base URL (a key is optional there). Gates setup vs. chat.
+     * True once the coach can actually send: a stored key for the cloud providers, or, for the
+     * Custom (local) provider, a committed base URL (a key is optional there). Gates setup vs. chat.
      */
     fun isConfigured(ctx: Context): Boolean =
         if (_provider.value == AiProvider.CUSTOM) _customConnected.value else hasKey(ctx)
@@ -165,13 +197,13 @@ class CoachViewModel(app: Application) : AndroidViewModel(app) {
                 if (p == _provider.value) {
                     val merged = (_availableModels.value + live).distinct()
                     _availableModels.value = merged
-                    // For Custom there's no curated/default model — adopt the first the server lists.
+                    // For Custom there's no curated/default model, adopt the first the server lists.
                     if (p == AiProvider.CUSTOM && _model.value.isBlank() && merged.isNotEmpty()) {
                         selectModel(appCtx, merged.first())
                     }
                 }
             } catch (_: Exception) {
-                // Best-effort — keep whatever list we already have.
+                // Best-effort, keep whatever list we already have.
             } finally {
                 _refreshingModels.value = false
             }
@@ -248,7 +280,7 @@ class CoachViewModel(app: Application) : AndroidViewModel(app) {
                     consent = _consent.value,
                     customBaseUrl = _customBaseUrl.value,
                     // v5: only include the on-device-signals summary when BOTH the data consent is on AND
-                    // the second opt-in is set (summary-only, no raw egress — see AiCoach.buildSignalsContext).
+                    // the second opt-in is set (summary-only, no raw egress, see AiCoach.buildSignalsContext).
                     includeSignals = _consent.value && NoopPrefs.coachSignals(appCtx),
                 )
                 _messages.value = _messages.value + ChatMsg(role = "assistant", text = reply)
@@ -271,7 +303,7 @@ class CoachViewModel(app: Application) : AndroidViewModel(app) {
          * custom id not already in that list (so a previously-saved custom model still shows).
          */
         private fun seedModels(provider: AiProvider, selected: String): List<String> = when {
-            selected.isBlank() -> provider.models          // Custom has no default — start empty
+            selected.isBlank() -> provider.models          // Custom has no default, start empty
             provider.models.contains(selected) -> provider.models
             else -> provider.models + selected
         }

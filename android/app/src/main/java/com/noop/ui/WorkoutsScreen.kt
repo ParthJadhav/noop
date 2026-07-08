@@ -3,6 +3,7 @@ package com.noop.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,6 +21,14 @@ import android.app.DatePickerDialog
 import android.app.TimePickerDialog
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CalendarMonth
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.MergeType
+import androidx.compose.material.icons.filled.RadioButtonUnchecked
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.DirectionsBike
 import androidx.compose.material.icons.filled.DirectionsRun
 import androidx.compose.material.icons.filled.DirectionsWalk
@@ -28,9 +37,15 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Pool
 import androidx.compose.material.icons.filled.Rowing
 import androidx.compose.material.icons.filled.SelfImprovement
+import androidx.compose.material.icons.filled.DownhillSkiing
+import androidx.compose.material.icons.filled.Snowboarding
+import androidx.compose.material.icons.filled.SportsBaseball
 import androidx.compose.material.icons.filled.SportsBasketball
+import androidx.compose.material.icons.filled.SportsGolf
 import androidx.compose.material.icons.filled.SportsGymnastics
 import androidx.compose.material.icons.filled.SportsMartialArts
+import androidx.compose.material.icons.filled.SportsVolleyball
+import androidx.compose.material.icons.filled.Terrain
 import androidx.compose.material.icons.filled.ShowChart
 import androidx.compose.material.icons.filled.SportsSoccer
 import androidx.compose.material.icons.filled.SportsTennis
@@ -61,13 +76,18 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.noop.analytics.WorkoutSport
 import com.noop.data.WorkoutRow
@@ -115,6 +135,28 @@ fun WorkoutsScreen(vm: AppViewModel) {
     // The manual add/edit dialog target: Some(null) = add, Some(row) = edit, null = closed.
     var dialog by remember { mutableStateOf<DialogTarget?>(null) }
 
+    // #64: filters beyond the time range — sport (null = all), source class (null = all), free-text
+    // search over the displayed sport. The pure WorkoutFilter applies them AFTER the window cut.
+    var sportFilter by remember { mutableStateOf<String?>(null) }
+    var sourceFilter by remember { mutableStateOf<WorkoutSource?>(null) }
+    var searchText by remember { mutableStateOf("") }
+    val filter = WorkoutFilter(sportFilter, sourceFilter, searchText)
+
+    // #64: multi-select + merge. `selectionMode` toggles the leading checkmarks + the toolbar strip;
+    // `selectedKeys` holds the natural keys ("startTs|sport") of the chosen rows. Only MANUAL / DETECTED
+    // rows are selectable (imported history is read-only). `mergeSportPrompt` names an all-detected merge.
+    var selectionMode by remember { mutableStateOf(false) }
+    var selectedKeys by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var mergeSportPrompt by remember { mutableStateOf<List<WorkoutRow>?>(null) }
+
+    // #64: displayed-sport names across ALL loaded rows, most-frequent first, for the sport-filter menu.
+    // Computed here (a @Composable scope) since the LazyScreenScaffold content lambda is a LazyListScope.
+    val availableSports = remember(allRows) {
+        allRows.groupingBy { WorkoutEditing.displaySport(it.sport) }.eachCount()
+            .entries.sortedWith(compareByDescending<Map.Entry<String, Int>> { it.value }.thenBy { it.key })
+            .map { it.key }
+    }
+
     // A transient one-line note shown after a manual save / relabel for a sport that already has a
     // solid/building ActivityCost entry — "Sessions like this usually …" (#439). Auto-clears.
     var postLogNote by remember { mutableStateOf<String?>(null) }
@@ -146,35 +188,94 @@ fun WorkoutsScreen(vm: AppViewModel) {
         }
     }
 
-    ScreenScaffold(title = "Workouts", subtitle = "Every session, threaded together.") {
+    // PERF (#707): migrate the eager ScreenScaffold to its lazy twin so each top-level section is its own
+    // `item { }` and only the on-screen cards compose + get semantics-walked (the Compose accessibility
+    // copy on scroll was a contributor to the OOM). Order / padding / 20dp spacing are unchanged: the
+    // hero/summary/breakdown/zones/sessions cards stay one-per-item in the SAME sequence. The per-section
+    // `val` resolves run ONCE in the content lambda (captured by each item), so this also de-dupes the
+    // range/window/group computation that the eager column re-derived inline. The dialog overlay below the
+    // scaffold is untouched. The All-Sessions list still lives inside its single enclosing card (appearance
+    // is byte-identical) — see the report note on why it isn't flattened to top-level items here.
+    LazyScreenScaffold(
+        title = "Workouts",
+        subtitle = "Every session, threaded together.",
+        // LIQUID SKY BACKDROP (the pilot pattern — LiquidScreenSky.kt): the time-of-day liquid sky settles
+        // into the theme canvas behind the header + top rows (bled full-width up behind the status bar via
+        // the scaffold's topBackground plumbing), and the cards float OVER it on the flat surface below. The
+        // Android equivalent of the iOS `ScreenScaffold(topBackground: liquidScaffoldSky())`. This screen has
+        // no day-cycle preference gate (unlike Today), so the sky is always on.
+        topBackground = { LiquidScreenSky() },
+    ) {
         // Start (or stop) a workout right here, not only on Live — mirrors the Live control (#115).
+        item {
         WorkoutStartSection(vm)
+        }
 
         if (allRows.isEmpty()) {
+            item {
             EmptyWorkouts(loaded, onAdd = { dialog = DialogTarget(null) })
+            }
         } else {
-            // Resolve the effective range + windowed rows + per-sport groups once.
-            val resolved = effectiveRange(allRows, range)
-            val windowRows = sessions(allRows, resolved)
+            // Resolve the effective range + windowed rows + per-sport groups once. #64: the pure
+            // WorkoutFilter narrows the window AFTER the range cut, so every section reads one filtered set.
+            val resolved = effectiveRange(allRows, range, filter)
+            val windowRows = filter.apply(sessions(allRows, resolved))
             val groups = sportGroups(windowRows)
             val fellBack = resolved != range
 
+            item {
             RangeBar(
                 range = range,
                 effectiveRange = resolved,
                 rowCount = windowRows.size,
                 fellBack = fellBack,
+                filterActive = filter.isActive,
                 onSelect = { range = it },
                 onAdd = { dialog = DialogTarget(null) },
             )
-            postLogNote?.let { PostLogNoteBanner(it) }
-            EffortHero(rows = windowRows, effectiveRange = resolved, groups = groups)
-            SummarySection(rows = windowRows, effectiveRange = resolved, groups = groups)
-            BreakdownSection(groups = groups, rows = windowRows)
-            ZonesSection(windowRows)
+            }
+            item {
+            FilterBar(
+                filter = filter,
+                availableSports = availableSports,
+                onSport = { sportFilter = it },
+                onSource = { sourceFilter = it },
+                onSearch = { searchText = it },
+                onClear = { sportFilter = null; sourceFilter = null; searchText = "" },
+            )
+            }
+            postLogNote?.let { item { PostLogNoteBanner(it) } }
+            item { EffortHero(rows = windowRows, effectiveRange = resolved, groups = groups) }
+            item { SummarySection(rows = windowRows, effectiveRange = resolved, groups = groups) }
+            item { BreakdownSection(groups = groups, rows = windowRows) }
+            item { ZonesSection(windowRows) }
+            item {
             SessionsSection(
                 vm = vm,
                 rows = windowRows,
+                selectionMode = selectionMode,
+                selectedKeys = selectedKeys,
+                onToggleSelectMode = {
+                    selectionMode = !selectionMode
+                    if (!selectionMode) selectedKeys = emptySet()
+                },
+                onToggleRow = { row ->
+                    val key = sessionSelectionKey(row)
+                    selectedKeys = if (key in selectedKeys) selectedKeys - key else selectedKeys + key
+                },
+                onMerge = { chosen ->
+                    if (WorkoutMerge.resolvedSport(chosen) == null) {
+                        mergeSportPrompt = chosen
+                    } else {
+                        vm.mergeWorkouts(chosen)
+                        selectionMode = false; selectedKeys = emptySet()
+                    }
+                },
+                onBulkDelete = { chosen ->
+                    vm.bulkDeleteWorkouts(chosen)
+                    selectionMode = false; selectedKeys = emptySet()
+                },
+                onCancelSelect = { selectionMode = false; selectedKeys = emptySet() },
                 onEdit = { dialog = DialogTarget(it) },
                 onRelabel = { row, sport ->
                     vm.relabelDetected(row, sport)
@@ -183,7 +284,20 @@ fun WorkoutsScreen(vm: AppViewModel) {
                 onDismiss = { vm.dismissDetected(it) },
                 onDelete = { vm.deleteWorkout(it) },
             )
+            }
         }
+    }
+
+    // #64: name an all-detected merge (no sport to inherit) before committing it.
+    mergeSportPrompt?.let { chosen ->
+        MergeSportDialog(
+            onDismiss = { mergeSportPrompt = null },
+            onPick = { sport ->
+                vm.mergeWorkouts(chosen, sport)
+                mergeSportPrompt = null
+                selectionMode = false; selectedKeys = emptySet()
+            },
+        )
     }
 
     dialog?.let { target ->
@@ -210,7 +324,7 @@ private fun EmptyWorkouts(loaded: Boolean, onAdd: () -> Unit) {
         DataPendingNote(
             title = "No workouts yet",
             body = "No workouts yet. They come from your WHOOP and Apple Health history. " +
-                "Import in Data Sources to bring them in — or add one you tracked elsewhere.",
+                "Import in Data Sources to bring them in, or add one you tracked elsewhere.",
         )
         if (loaded) AddWorkoutButton(onAdd)
     }
@@ -271,6 +385,7 @@ private fun RangeBar(
     effectiveRange: WorkoutRange,
     rowCount: Int,
     fellBack: Boolean,
+    filterActive: Boolean,
     onSelect: (WorkoutRange) -> Unit,
     onAdd: () -> Unit,
 ) {
@@ -285,10 +400,12 @@ private fun RangeBar(
             onSelect = onSelect,
         )
         val unit = if (rowCount == 1) "session" else "sessions"
+        // #64: append "· filtered" when a sport/source/search filter narrows the list.
+        val suffix = if (filterActive) " · filtered" else ""
         val caption = if (fellBack) {
-            "$rowCount $unit · sparse — widened to ${effectiveRange.caption}"
+            "$rowCount $unit · sparse, widened to ${effectiveRange.caption}$suffix"
         } else {
-            "$rowCount $unit · ${effectiveRange.caption}"
+            "$rowCount $unit · ${effectiveRange.caption}$suffix"
         }
         Text(
             caption,
@@ -299,12 +416,198 @@ private fun RangeBar(
     }
 }
 
-// MARK: - Effort hero (weekly effort over a scenic Effort backdrop)
+// MARK: - Filters (#64)
+
+/** The origin classes offered in the Source filter, in a stable menu order (matches the row badges). */
+private val SOURCE_FILTER_OPTIONS = listOf(
+    WorkoutSource.WHOOP, WorkoutSource.APPLE, WorkoutSource.DETECTED,
+    WorkoutSource.MANUAL, WorkoutSource.LIFTING, WorkoutSource.ACTIVITY_FILE,
+)
+
+/** The Source-filter menu label for an origin class. */
+private fun sourceFilterLabel(c: WorkoutSource): String = when (c) {
+    WorkoutSource.WHOOP -> "Whoop"
+    WorkoutSource.APPLE -> "Apple"
+    WorkoutSource.DETECTED -> "Detected"
+    WorkoutSource.MANUAL -> "Manual"
+    WorkoutSource.LIFTING -> "Lifting"
+    WorkoutSource.ACTIVITY_FILE -> "File"
+}
+
+/**
+ * #64: filter controls beside the range pill — a Sport menu, a Source menu, and a search field, with a
+ * "×" clear chip that appears only when a filter is active. Mirrors the iOS WorkoutsView.filterBar; the
+ * predicate is the pure [WorkoutFilter], these controls only drive its state.
+ */
+@Composable
+private fun FilterBar(
+    filter: WorkoutFilter,
+    availableSports: List<String>,
+    onSport: (String?) -> Unit,
+    onSource: (WorkoutSource?) -> Unit,
+    onSearch: (String) -> Unit,
+    onClear: () -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            FilterPillMenu(
+                title = filter.sport ?: "All sports",
+                active = filter.sport != null,
+                contentDescription = "Filter by sport",
+            ) { dismiss ->
+                DropdownMenuItem(
+                    text = { Text("All sports", style = NoopType.body, color = Palette.textPrimary) },
+                    onClick = { onSport(null); dismiss() },
+                )
+                availableSports.forEach { s ->
+                    DropdownMenuItem(
+                        text = { Text(s, style = NoopType.body, color = Palette.textPrimary) },
+                        onClick = { onSport(s); dismiss() },
+                    )
+                }
+            }
+            FilterPillMenu(
+                title = filter.sourceClass?.let { sourceFilterLabel(it) } ?: "All sources",
+                active = filter.sourceClass != null,
+                contentDescription = "Filter by source",
+            ) { dismiss ->
+                DropdownMenuItem(
+                    text = { Text("All sources", style = NoopType.body, color = Palette.textPrimary) },
+                    onClick = { onSource(null); dismiss() },
+                )
+                SOURCE_FILTER_OPTIONS.forEach { opt ->
+                    DropdownMenuItem(
+                        text = { Text(sourceFilterLabel(opt), style = NoopType.body, color = Palette.textPrimary) },
+                        onClick = { onSource(opt); dismiss() },
+                    )
+                }
+            }
+            if (filter.isActive) {
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .clickable(onClick = onClear)
+                        .padding(horizontal = 8.dp, vertical = 6.dp)
+                        .semantics { contentDescription = "Clear filters" },
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.Filled.Close, contentDescription = null, tint = Palette.textSecondary, modifier = Modifier.size(14.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Clear", style = NoopType.footnote, color = Palette.textSecondary)
+                }
+            }
+        }
+        OutlinedTextField(
+            value = filter.search,
+            onValueChange = onSearch,
+            leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null, tint = Palette.textTertiary, modifier = Modifier.size(18.dp)) },
+            trailingIcon = {
+                if (filter.search.isNotEmpty()) {
+                    IconButton(onClick = { onSearch("") }) {
+                        Icon(Icons.Filled.Close, contentDescription = "Clear search", tint = Palette.textTertiary, modifier = Modifier.size(16.dp))
+                    }
+                }
+            },
+            placeholder = { Text("Search sport", style = NoopType.body, color = Palette.textTertiary) },
+            singleLine = true,
+            colors = workoutFieldColors(),
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
+}
+
+/** A pill-styled dropdown filter menu: the current selection as its label, Effort-tinted when active. */
+@Composable
+private fun FilterPillMenu(
+    title: String,
+    active: Boolean,
+    contentDescription: String,
+    items: @Composable (dismiss: () -> Unit) -> Unit,
+) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        Row(
+            modifier = Modifier
+                .clip(RoundedCornerShape(50))
+                .background(if (active) Palette.effortColor.copy(alpha = 0.14f) else Palette.surfaceInset.copy(alpha = 0.6f))
+                .clickable { open = true }
+                .padding(horizontal = 10.dp, vertical = 6.dp)
+                .semantics { this.contentDescription = "$contentDescription: $title" },
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                title,
+                style = NoopType.footnote,
+                color = if (active) Palette.effortColor else Palette.textSecondary,
+                maxLines = 1,
+            )
+            Spacer(Modifier.width(4.dp))
+            Icon(
+                Icons.Filled.KeyboardArrowDown,
+                contentDescription = null,
+                tint = if (active) Palette.effortColor else Palette.textSecondary,
+                modifier = Modifier.size(14.dp),
+            )
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            items { open = false }
+        }
+    }
+}
+
+/** #64: name an all-detected merge (no sport to inherit) via the shared sport picker before committing. */
+@Composable
+private fun MergeSportDialog(onDismiss: () -> Unit, onPick: (String) -> Unit) {
+    var sport by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Palette.surfaceOverlay,
+        title = { Text("Name the merged session", style = NoopType.title2, color = Palette.textPrimary) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(
+                    "These sessions have no sport label yet. Pick one for the merged session.",
+                    style = NoopType.footnote,
+                    color = Palette.textSecondary,
+                )
+                SportPickerField(sport, onChange = { sport = it })
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { if (sport.isNotBlank()) onPick(sport.trim()) }, enabled = sport.isNotBlank()) {
+                Text("Merge", style = NoopType.body, color = if (sport.isNotBlank()) Palette.accent else Palette.textTertiary)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel", style = NoopType.body, color = Palette.textSecondary) }
+        },
+    )
+}
+
+/** #64: the selection key for a row (its natural key), stable across a reload so checkmarks persist. */
+private fun sessionSelectionKey(row: WorkoutRow): String = "${row.startTs}|${row.sport}"
+
+// MARK: - Liquid hero tokens (the liquid Workouts restyle)
 //
-// A Bevel hero for the windowed range: the typical session Effort on the shared layered StrainGauge,
-// floated over an Effort-tinted ScenicHeroBackground, with the session count + total time alongside.
-// The gauge reads the AVERAGE per-session strain (the stored 0–100 Effort axis mapped to the gauge's
-// 0–21 span, exactly like the Today effort hero); the headline number is shown on the user's scale.
+// The frosted card the Effort vessel floats on, mirroring the iOS/Today LiquidTodayView heroCard. `fill`
+// is a translucent near-black (mock rgba(13,14,20,.80)) so it floats over the day-of-sky; the vessel + the
+// white count-up read crisp on it. Radius 26 + a white@0.11 hairline give the frosted-glass edge. (These
+// are file-scoped to Workouts — the Today equivalents are private to that file.)
+private val LIQUID_HERO_FILL: Color = Color(red = 13f / 255f, green = 14f / 255f, blue = 20f / 255f, alpha = 0.80f)
+private val LIQUID_HERO_RADIUS: Dp = 26.dp
+
+// MARK: - Effort hero (typical-effort liquid vessel over the day-of-sky)
+//
+// The liquid restyle of the Effort hero: the typical session Effort as a filling LiquidVessel with the
+// headline number counting up over it (the Today HeroScoreVessel idiom), inside a translucent near-black
+// frosted card that floats over the screen-level liquid sky. The vessel FILL fraction reads the AVERAGE
+// per-session strain on the stored 0–100 Effort axis (scale-independent, so the fill is identical whether
+// the user's display scale is Effort 0–100 or WHOOP 0–21); the count-up NUMBER is shown on the user's
+// scale via UnitFormatter, exactly as the old StrainGauge label was. The scenic backdrop + BevelGauge are
+// gone — the frosted card does the contrast work over the sky, matching the iOS liquid hero.
 
 @Composable
 private fun EffortHero(
@@ -314,53 +617,76 @@ private fun EffortHero(
 ) {
     val effortScale = UnitPrefs.effortScale(LocalContext.current)
     val strains = rows.mapNotNull { it.strain }
+    val hasEffort = strains.isNotEmpty()
     val avgStrain = if (strains.isEmpty()) 0.0 else strains.sum() / strains.size
+    // Fill fraction on the stored 0–100 Effort axis — scale-independent, so the vessel fills the same on
+    // either display scale. The count-up number below tracks the user's chosen scale.
+    val fraction = (avgStrain / 100.0).coerceIn(0.0, 1.0)
+    val shownEffort = UnitFormatter.effortValue(avgStrain, effortScale)
     val totalTimeH = rows.mapNotNull { it.durationS }.sum() / 3600.0
     val modal = groups.firstOrNull()
 
+    // The liquid hero CARD: a translucent near-black that floats over the day-of-sky so the vessel + white
+    // count-up read crisp. Radius 26 + a faint white hairline give the frosted-glass edge of the iOS liquid
+    // heroCard (heroFill = rgba(13,14,20,.80), stroke white@0.11). Matches the Today pilot.
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(Metrics.cardRadius)),
+            .clip(RoundedCornerShape(LIQUID_HERO_RADIUS))
+            .background(LIQUID_HERO_FILL)
+            .border(1.dp, Color.White.copy(alpha = 0.11f), RoundedCornerShape(LIQUID_HERO_RADIUS))
+            .padding(20.dp),
     ) {
-        ScenicHeroBackground(modifier = Modifier.matchParentSize(), domain = DomainTheme.Effort)
-        NoopCard(padding = 20.dp, tint = Palette.effortColor) {
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    Overline("Typical effort", color = Palette.effortColor)
-                    StrainGauge(
-                        strain = UnitFormatter.effortValue(avgStrain, effortScale),
-                        outOf = if (effortScale == EffortScale.WHOOP) 21.0 else 100.0,
-                        valueText = UnitFormatter.effortDisplay(avgStrain, effortScale),
-                        diameter = 140.dp,
-                        lineWidth = 14.dp,
-                        showsLabel = strains.isNotEmpty(),
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(18.dp),
+            ) {
+                Overline("Typical effort", color = Palette.effortColor)
+                Box(modifier = Modifier.size(140.dp), contentAlignment = Alignment.Center) {
+                    LiquidVessel(
+                        value = fraction,
+                        tint = Palette.effortColor,
+                        // Only slosh once a real Effort value is loaded; an empty window poses static + empty.
+                        animated = hasEffort,
+                        modifier = Modifier.size(140.dp),
                     )
-                }
-                Spacer(Modifier.width(20.dp))
-                Column(
-                    modifier = Modifier.weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    Text(
-                        "Effort this ${effectiveRange.heroWord}",
-                        style = NoopType.headline,
-                        color = Palette.textPrimary,
-                    )
-                    Row(horizontalArrangement = Arrangement.spacedBy(Metrics.gap), modifier = Modifier.fillMaxWidth()) {
-                        HeroStat("Sessions", "${rows.size}", Palette.effortColor, Modifier.weight(1f))
-                        HeroStat("Active", oneDecimal(totalTimeH) + "h", Palette.textPrimary, Modifier.weight(1f))
+                    if (hasEffort) {
+                        // Count-up number over the vessel — white, tabular, a soft shadow for legibility,
+                        // hit-transparent so the tap reaches the vessel (splash). Honours the Effort scale.
+                        CountUpText(
+                            // `shownEffort` is already the display-scaled value, so the interpolated `it` is
+                            // in the user's scale — roll it up with the same one-decimal format as before.
+                            value = shownEffort,
+                            format = { oneDecimal(it) },
+                            style = NoopType.number(30f, weight = FontWeight.Bold)
+                                .copy(shadow = Shadow(color = Color.Black.copy(alpha = 0.5f), offset = Offset(0f, 1f), blurRadius = 6f)),
+                            color = Color.White,
+                            modifier = Modifier.clearAndSetSemantics {},
+                        )
                     }
-                    Text(
-                        if (modal != null) "Mostly ${WorkoutEditing.displaySport(modal.sport)} — ${effectiveRange.caption}."
-                        else "Logged sessions across ${effectiveRange.caption}.",
-                        style = NoopType.footnote,
-                        color = Palette.textTertiary,
-                    )
                 }
+            }
+            Spacer(Modifier.width(20.dp))
+            Column(
+                modifier = Modifier.weight(1f),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text(
+                    "Effort this ${effectiveRange.heroWord}",
+                    style = NoopType.headline,
+                    color = Palette.textPrimary,
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(Metrics.gap), modifier = Modifier.fillMaxWidth()) {
+                    HeroStat("Sessions", "${rows.size}", Palette.effortColor, Modifier.weight(1f))
+                    HeroStat("Active", oneDecimal(totalTimeH) + "h", Palette.textPrimary, Modifier.weight(1f))
+                }
+                Text(
+                    if (modal != null) "Mostly ${WorkoutEditing.displaySport(modal.sport)} (${effectiveRange.caption})."
+                    else "Logged sessions across ${effectiveRange.caption}.",
+                    style = NoopType.footnote,
+                    color = Palette.textTertiary,
+                )
             }
         }
     }
@@ -554,7 +880,7 @@ private fun ZonesSection(rows: List<WorkoutRow>) {
                     }
                 }
                 Text(
-                    "Share of imported zone time, duration-weighted across sessions — approximate.",
+                    "Share of imported zone time, duration-weighted across sessions (approximate).",
                     style = NoopType.footnote,
                     color = Palette.textTertiary,
                 )
@@ -592,6 +918,13 @@ private fun ZoneStat(zone: Int, minutes: Double, total: Double, modifier: Modifi
 private fun SessionsSection(
     vm: AppViewModel,
     rows: List<WorkoutRow>,
+    selectionMode: Boolean,
+    selectedKeys: Set<String>,
+    onToggleSelectMode: () -> Unit,
+    onToggleRow: (WorkoutRow) -> Unit,
+    onMerge: (List<WorkoutRow>) -> Unit,
+    onBulkDelete: (List<WorkoutRow>) -> Unit,
+    onCancelSelect: () -> Unit,
     onEdit: (WorkoutRow) -> Unit,
     onRelabel: (WorkoutRow, String) -> Unit,
     onDismiss: (WorkoutRow) -> Unit,
@@ -599,23 +932,64 @@ private fun SessionsSection(
 ) {
     var selectedRow by remember { mutableStateOf<WorkoutRow?>(null) }
 
+    // #797: paginate the All-Sessions list. This card lives inside ONE LazyColumn item, so every session
+    // row composes eagerly: a years-deep WHOOP/Apple import (hundreds to thousands of bouts) built the
+    // whole table in one pass, a real jank/OOM contributor. Render a bounded page and grow it on demand,
+    // so a heavy history opens fast and the user pages in the rest. Reset when the windowed range changes
+    // (the row set changes identity), so switching range never leaves a stale "shown" count.
+    var shownCount by remember(rows) { mutableStateOf(SESSIONS_PAGE_SIZE) }
+    val visible = if (rows.size <= shownCount) rows else rows.take(shownCount)
+    val remaining = rows.size - visible.size
+
+    // #64: only MANUAL / DETECTED rows are selectable — a pure-imported list has nothing to merge/delete.
+    val anySelectable = rows.any { WorkoutMerge.isMergeable(it) }
+    val chosen = rows.filter { sessionSelectionKey(it) in selectedKeys }
+
     Column(verticalArrangement = Arrangement.spacedBy(Metrics.gap)) {
-        SectionHeader(title = "All Sessions", overline = "Log", trailing = "${rows.size} total")
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(modifier = Modifier.weight(1f)) {
+                SectionHeader(title = "All Sessions", overline = "Log", trailing = "${rows.size} total")
+            }
+            if (anySelectable) SelectPill(selectionMode, onToggleSelectMode)
+        }
+        if (selectionMode) SelectionToolbar(chosen, onMerge, onBulkDelete, onCancelSelect)
         NoopCard(padding = 0.dp) {
             Column {
-                SessionHeaderRow()
+                SessionHeaderRow(selectionMode)
                 FullDivider()
-                rows.forEachIndexed { idx, row ->
+                visible.forEachIndexed { idx, row ->
                     SessionRow(
                         row = row,
                         background = if (idx % 2 == 1) Palette.surfaceInset.copy(alpha = 0.4f) else Color.Transparent,
+                        selectionMode = selectionMode,
+                        selected = sessionSelectionKey(row) in selectedKeys,
+                        onToggleRow = onToggleRow,
                         onEdit = onEdit,
                         onRelabel = onRelabel,
                         onDismiss = onDismiss,
                         onDelete = onDelete,
                         onClick = { selectedRow = it },
                     )
-                    if (idx != rows.lastIndex) FullDivider(alpha = 0.5f)
+                    if (idx != visible.lastIndex) FullDivider(alpha = 0.5f)
+                }
+                // "Show more" pages in the next [SESSIONS_PAGE_SIZE] bouts. Hidden once everything is shown.
+                if (remaining > 0) {
+                    FullDivider(alpha = 0.5f)
+                    val more = minOf(remaining, SESSIONS_PAGE_SIZE)
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { shownCount += SESSIONS_PAGE_SIZE }
+                            .semantics { contentDescription = "Show $more more sessions" }
+                            .padding(vertical = 14.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            "Show $more more ($remaining remaining)",
+                            style = NoopType.subhead,
+                            color = Palette.accent,
+                        )
+                    }
                 }
             }
         }
@@ -626,8 +1000,89 @@ private fun SessionsSection(
     }
 }
 
+/** #64: the "Select" pill in the All-Sessions header — toggles multi-select mode. */
 @Composable
-private fun SessionHeaderRow() {
+private fun SelectPill(selectionMode: Boolean, onToggle: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(50))
+            .background(if (selectionMode) Palette.effortColor.copy(alpha = 0.14f) else Palette.surfaceInset.copy(alpha = 0.6f))
+            .clickable(onClick = onToggle)
+            .padding(horizontal = 12.dp, vertical = 6.dp)
+            .semantics {
+                contentDescription = if (selectionMode) "Finish selecting" else "Select sessions to merge or delete"
+            },
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            if (selectionMode) "Done" else "Select",
+            style = NoopType.footnote,
+            color = if (selectionMode) Palette.effortColor else Palette.accent,
+        )
+    }
+}
+
+/** #64: the Merge / Delete / Cancel strip shown above the card in selection mode. Merge needs 2+ eligible
+ *  rows; Delete needs 1+. Imported rows are never selectable, so the chosen set is always mergeable. */
+@Composable
+private fun SelectionToolbar(
+    chosen: List<WorkoutRow>,
+    onMerge: (List<WorkoutRow>) -> Unit,
+    onBulkDelete: (List<WorkoutRow>) -> Unit,
+    onCancel: () -> Unit,
+) {
+    val canMerge = WorkoutMerge.canMerge(chosen)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(Metrics.cardRadius))
+            .background(Palette.effortColor.copy(alpha = 0.08f))
+            .padding(horizontal = 12.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        ToolbarAction(
+            "Merge (${chosen.size})", Icons.Filled.MergeType,
+            tint = if (canMerge) Palette.effortColor else Palette.textTertiary,
+            enabled = canMerge, onClick = { onMerge(chosen) },
+        )
+        ToolbarAction(
+            "Delete (${chosen.size})", Icons.Filled.Delete,
+            tint = if (chosen.isEmpty()) Palette.textTertiary else Palette.metricRose,
+            enabled = chosen.isNotEmpty(), onClick = { onBulkDelete(chosen) },
+        )
+        Spacer(Modifier.weight(1f))
+        Text(
+            "Cancel",
+            style = NoopType.subhead,
+            color = Palette.textSecondary,
+            modifier = Modifier.clickable(onClick = onCancel).padding(4.dp),
+        )
+    }
+}
+
+@Composable
+private fun ToolbarAction(label: String, icon: ImageVector, tint: Color, enabled: Boolean, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(50))
+            .then(if (enabled) Modifier.clickable(onClick = onClick) else Modifier)
+            .padding(horizontal = 4.dp, vertical = 4.dp)
+            .semantics { contentDescription = label },
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(18.dp))
+        Spacer(Modifier.width(6.dp))
+        Text(label, style = NoopType.subhead, color = tint)
+    }
+}
+
+/** #797: the All-Sessions list renders in pages of this size and grows on "Show more", so a years-deep
+ *  workout history doesn't compose every row in one pass inside the single enclosing card. */
+private const val SESSIONS_PAGE_SIZE = 50
+
+@Composable
+private fun SessionHeaderRow(selectionMode: Boolean = false) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -635,6 +1090,8 @@ private fun SessionHeaderRow() {
             .padding(horizontal = Metrics.cardPadding),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        // #64: a leading spacer over the per-row selection glyph, so the columns stay aligned in select mode.
+        if (selectionMode) Spacer(Modifier.width(30.dp))
         // Weights mirror SessionRow (#157: Date widened for the time range, taken from Sport).
         ColHeader("Date", Modifier.weight(1.7f), TextAlign.Start)
         ColHeader("Sport", Modifier.weight(1.3f), TextAlign.Start)
@@ -665,21 +1122,64 @@ private fun ColHeader(text: String, modifier: Modifier, align: TextAlign) {
 private fun SessionRow(
     row: WorkoutRow,
     background: Color,
+    selectionMode: Boolean,
+    selected: Boolean,
+    onToggleRow: (WorkoutRow) -> Unit,
     onEdit: (WorkoutRow) -> Unit,
     onRelabel: (WorkoutRow, String) -> Unit,
     onDismiss: (WorkoutRow) -> Unit,
     onDelete: (WorkoutRow) -> Unit,
     onClick: (WorkoutRow) -> Unit,
 ) {
+    // #64: only MANUAL / DETECTED rows are selectable — imported history is read-only.
+    val selectable = WorkoutMerge.isMergeable(row)
+    val rowLabel = "${WorkoutEditing.displaySport(row.sport)}, ${dateLabel(row.startTs)}" +
+        if (selectionMode) {
+            when {
+                !selectable -> ". Imported, can't be merged."
+                selected -> ". Selected."
+                else -> ". Not selected."
+            }
+        } else ""
+    // liquidPress on the whole tappable row — it settles inward on press (the iOS LiquidPressStyle feel).
+    // The SAME interactionSource drives the clickable + the press. The edit/delete overflow menu and the
+    // selection glyph stay their own hit targets on top.
+    val interaction = remember { MutableInteractionSource() }
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            .liquidPress(interaction)
             .background(background)
-            .clickable { onClick(row) }
+            .clickable(
+                interactionSource = interaction,
+                indication = null,
+            ) {
+                if (selectionMode) { if (selectable) onToggleRow(row) } else onClick(row)
+            }
             .height(56.dp)
-            .padding(start = Metrics.cardPadding),
+            .padding(start = Metrics.cardPadding)
+            .semantics { contentDescription = rowLabel },
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        // #64: leading selection glyph — filled/hollow check for a mergeable row, or a lock for imported.
+        if (selectionMode) {
+            if (selectable) {
+                Icon(
+                    if (selected) Icons.Filled.CheckCircle else Icons.Filled.RadioButtonUnchecked,
+                    contentDescription = null,
+                    tint = if (selected) Palette.effortColor else Palette.textTertiary,
+                    modifier = Modifier.size(22.dp),
+                )
+            } else {
+                Icon(
+                    Icons.Filled.Lock,
+                    contentDescription = null,
+                    tint = Palette.textTertiary.copy(alpha = 0.6f),
+                    modifier = Modifier.size(16.dp),
+                )
+            }
+            Spacer(Modifier.width(8.dp))
+        }
         // Date + time range (#157). The 0.3f comes out of Sport: "HH:mm–HH:mm" clips at footnote
         // size in the old 1.4f, while sport names already ellipsize gracefully.
         Column(modifier = Modifier.weight(1.7f)) {
@@ -718,7 +1218,9 @@ private fun SessionRow(
             val (srcLabel, srcTint) = row.sourceBadge
             SourceBadge(srcLabel, tint = srcTint)
         }
-        RowActionsMenu(row, onEdit, onRelabel, onDismiss, onDelete)
+        // #64: hide the per-row ••• menu in selection mode (the toolbar owns the actions there); keep a
+        // 32dp spacer so the Src column stays aligned with the header.
+        if (selectionMode) Spacer(Modifier.width(32.dp)) else RowActionsMenu(row, onEdit, onRelabel, onDismiss, onDelete)
     }
 }
 
@@ -788,8 +1290,19 @@ private fun WorkoutDetailSheet(vm: AppViewModel, row: WorkoutRow, onDismiss: () 
                 val unitSystem = UnitPrefs.system(LocalContext.current)
                 DetailRow("Distance", UnitFormatter.distanceFromKilometers(row.distanceM / 1000.0, unitSystem))
             }
-            if (row.strain != null) DetailRow("Strain", oneDecimal(row.strain))
             if (!row.notes.isNullOrBlank()) DetailRow("Notes", row.notes)
+
+            // #796 - per-session Effort contribution. The session's captured strain re-homed from a plain
+            // value row into a prominent Effort-amber card (the big count-up value + the "This session"
+            // overline + an explainer), mirroring the iOS WorkoutDetailView.effortCard. Gated on a captured
+            // strain - an imported session with none simply omits the card. The display honours the Effort
+            // scale toggle (#268), so a WHOOP-axis user sees the rescaled 0–21 value; the stored value is
+            // unchanged. Presentation only - no new data is computed here.
+            row.strain?.let { strain ->
+                val effortScale = UnitPrefs.effortScale(LocalContext.current)
+                CardDivider()
+                SessionEffortCard(strain = strain, effortScale = effortScale)
+            }
 
             // HR curve over the session window (#410). A faint baseline shows under 2 points.
             if (hrCurve.size > 1) {
@@ -807,6 +1320,20 @@ private fun WorkoutDetailSheet(vm: AppViewModel, row: WorkoutRow, onDismiss: () 
                     MiniStat("Avg", row.avgHr?.let { "$it bpm" } ?: "–", Modifier.weight(1f))
                     MiniStat("Peak", (row.maxHr ?: hi).let { "$it bpm" }, Modifier.weight(1f))
                     MiniStat("Low", "$lo bpm", Modifier.weight(1f))
+                }
+                // #18: the Avg HR shown above can be EDITED on the manual sheet while the graph, zones and
+                // Effort stay from the recorded session (preservingCaptured keeps the captured strain/zones).
+                // When the typed average disagrees materially with this trace's own mean AND the row carries
+                // that captured strain/zones, say so plainly. We do NOT re-score from the typed number.
+                // Parity with macOS WorkoutDetailView.avgHrEditedDisclosure.
+                val traceMean = hrCurve.sum() / hrCurve.size
+                val captured = row.strain != null || !row.zonesJSON.isNullOrEmpty()
+                if (captured && row.avgHr != null && kotlin.math.abs(row.avgHr - traceMean) > 3.0) {
+                    Text(
+                        "The average above was edited. The graph, zones and Effort stay from the recorded session.",
+                        style = NoopType.footnote,
+                        color = Palette.textTertiary,
+                    )
                 }
             }
 
@@ -833,11 +1360,60 @@ private fun WorkoutDetailSheet(vm: AppViewModel, row: WorkoutRow, onDismiss: () 
                     }
                     Text(
                         if (zonesFromImport) "WHOOP's imported per-zone split for this session."
-                        else "Time in each %HRmax zone, derived from the strap's heart rate over this window — approximate.",
+                        else "Time in each %HRmax zone, derived from the strap's heart rate over this window (approximate).",
                         style = NoopType.footnote,
                         color = Palette.textTertiary,
                     )
                 }
+            }
+        }
+    }
+}
+
+/**
+ * #796 - the workout detail's per-session Effort contribution card. The Effort-amber tinted [NoopCard]
+ * carries a "This session" overline, the captured strain as a big count-up value (the NOOP signature),
+ * its scale caption (Effort 0–100 or strain 0–21), and a one-line explainer. Mirrors the iOS
+ * WorkoutDetailView.effortCard: same colour world, same count-up, same copy. [strain] is the stored
+ * 0–100 Effort value; [effortScale] only changes how it is DISPLAYED, never the stored number.
+ */
+@Composable
+private fun SessionEffortCard(strain: Double, effortScale: EffortScale) {
+    val shown = UnitFormatter.effortValue(strain, effortScale)
+    Column(verticalArrangement = Arrangement.spacedBy(Metrics.space8)) {
+        SectionHeader("Effort", overline = "This session")
+        NoopCard(tint = Palette.effortColor) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(18.dp),
+            ) {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(Metrics.space2),
+                    modifier = Modifier.semantics {
+                        contentDescription =
+                            "This session's Effort, ${oneDecimal(shown)} on the " +
+                                (if (effortScale == EffortScale.WHOOP) "0 to 21 strain" else "0 to 100 Effort") +
+                                " scale."
+                    },
+                ) {
+                    CountUpText(
+                        value = shown,
+                        format = { oneDecimal(it) },
+                        style = NoopType.number(34f),
+                        color = Palette.effortBright,
+                    )
+                    Text(
+                        if (effortScale == EffortScale.WHOOP) "strain (0-21)" else "Effort (0-100)",
+                        style = NoopType.footnote,
+                        color = Palette.textTertiary,
+                    )
+                }
+                Text(
+                    "This session's contribution to the day's Effort, as captured during the workout.",
+                    style = NoopType.subhead,
+                    color = Palette.textSecondary,
+                    modifier = Modifier.weight(1f),
+                )
             }
         }
     }
@@ -1032,7 +1608,17 @@ private fun ManualWorkoutDialog(
                 DialogField("Calories (kcal, optional)", kcal, onChange = { kcal = it }, numeric = true)
                 if (built == null) {
                     Text(
-                        "Enter a sport, a positive duration (≤ 24h), and valid HR (25–250) / calories (0–20,000).",
+                        "Enter a sport, a positive duration (≤ 24h), and valid HR (25-250) / calories (0-20,000).",
+                        style = NoopType.footnote, color = Palette.statusWarning,
+                    )
+                }
+                // #18: editing the Avg HR on a row that carries CAPTURED strain/zones saves the typed
+                // average while the HR graph, zones and Effort stay from the recorded session
+                // (preservingCaptured keeps them verbatim). That mismatch is silent, so say so plainly.
+                // We do NOT re-score from one number. Parity with macOS ManualWorkoutSheet.avgHrEditedNote.
+                if (built != null && WorkoutEditing.avgHrEdited(built, editing)) {
+                    Text(
+                        "Avg HR is shown as typed. The HR graph, zones and Effort stay from the recorded session.",
                         style = NoopType.footnote, color = Palette.statusWarning,
                     )
                 }
@@ -1225,12 +1811,12 @@ private fun sessions(all: List<WorkoutRow>, r: WorkoutRange): List<WorkoutRow> {
     return all.filter { it.startTs >= cutoff }
 }
 
-/** The range actually shown: the selected range if it holds ≥1 session, else the
- *  smallest larger range that does — so only an empty window widens. */
-private fun effectiveRange(all: List<WorkoutRow>, selected: WorkoutRange): WorkoutRange {
+/** The range actually shown: the selected range if it holds ≥1 session (after the active #64 filter),
+ *  else the smallest larger range that does — so only an empty window widens. */
+private fun effectiveRange(all: List<WorkoutRow>, selected: WorkoutRange, filter: WorkoutFilter = WorkoutFilter()): WorkoutRange {
     if (all.isEmpty()) return selected
     for (r in selected.widening()) {
-        if (sessions(all, r).isNotEmpty()) return r
+        if (filter.apply(sessions(all, r)).isNotEmpty()) return r
     }
     return WorkoutRange.All
 }
@@ -1372,7 +1958,7 @@ private fun timeLabel(ts: Long): String = timeFmt.format(Instant.ofEpochSecond(t
 
 /** Session span "HH:mm–HH:mm"; start-only when the end isn't after the start (#157). */
 private fun timeRangeLabel(startTs: Long, endTs: Long): String =
-    if (endTs > startTs) "${timeLabel(startTs)}–${timeLabel(endTs)}" else timeLabel(startTs)
+    if (endTs > startTs) "${timeLabel(startTs)} - ${timeLabel(endTs)}" else timeLabel(startTs)
 
 private fun durationLabel(s: Double?): String {
     if (s == null || s <= 0.0) return "–"
@@ -1397,11 +1983,20 @@ internal fun sportIcon(sport: String): ImageVector {
         s.contains("cycl") || s.contains("bike") || s.contains("ride") -> Icons.Filled.DirectionsBike
         s.contains("swim") -> Icons.Filled.Pool
         s.contains("row") -> Icons.Filled.Rowing
-        s.contains("yoga") || s.contains("pilates") || s.contains("meditat") -> Icons.Filled.SelfImprovement
+        s.contains("yoga") || s.contains("pilates") || s.contains("meditat") || s.contains("stretch") -> Icons.Filled.SelfImprovement
         s.contains("strength") || s.contains("weight") || s.contains("lift") -> Icons.Filled.FitnessCenter
-        s.contains("box") || s.contains("martial") -> Icons.Filled.SportsMartialArts
+        s.contains("box") || s.contains("martial") || s.contains("jiu") || s.contains("judo") || s.contains("karate") -> Icons.Filled.SportsMartialArts
         s.contains("hiit") || s.contains("functional") || s.contains("gymnast") -> Icons.Filled.SportsGymnastics
-        s.contains("tennis") -> Icons.Filled.SportsTennis
+        s.contains("snowboard") -> Icons.Filled.Snowboarding
+        s.contains("ski") -> Icons.Filled.DownhillSkiing
+        // All racquet sports share the tennis glyph (no dedicated icon for padel/pickleball/squash etc.).
+        s.contains("tennis") || s.contains("padel") || s.contains("pickle") || s.contains("squash") || s.contains("racquet") || s.contains("badminton") -> Icons.Filled.SportsTennis
+        s.contains("volleyball") -> Icons.Filled.SportsVolleyball
+        s.contains("golf") -> Icons.Filled.SportsGolf
+        // No dedicated bowling icon in the Material set; the plain ball glyph is the closest match
+        // (iOS has figure.bowling). (D#850)
+        s.contains("bowl") -> Icons.Filled.SportsBaseball
+        s.contains("climb") -> Icons.Filled.Terrain
         s.contains("soccer") || s.contains("football") -> Icons.Filled.SportsSoccer
         s.contains("basketball") -> Icons.Filled.SportsBasketball
         else -> Icons.Filled.FitnessCenter

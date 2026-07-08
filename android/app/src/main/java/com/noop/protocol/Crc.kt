@@ -44,36 +44,52 @@ object Crc {
         }
     }
 
-    /** CRC-8 (poly 0x07) over [data]. Returns a value in 0..255. */
-    fun crc8(data: ByteArray): Int {
+    /**
+     * CRC-8 (poly 0x07) over `data[from until to]`. Returns a value in 0..255. The [from]/[to] range
+     * defaults to the whole array (existing callers unchanged); passing a range lets the frame
+     * validator checksum a slice in place instead of slicing out a fresh array for every frame.
+     */
+    fun crc8(data: ByteArray, from: Int = 0, to: Int = data.size): Int {
         var crc = 0
-        for (b in data) {
-            crc = crc8Table[crc xor (b.toInt() and 0xFF)]
+        var i = from
+        while (i < to) {
+            crc = crc8Table[crc xor (data[i].toInt() and 0xFF)]
+            i++
         }
         return crc and 0xFF
     }
 
-    /** Standard zlib CRC-32 over [data]. Returns a value in 0..0xFFFFFFFF as a Long. */
-    fun crc32(data: ByteArray): Long {
+    /**
+     * Standard zlib CRC-32 over `data[from until to]`. Returns a value in 0..0xFFFFFFFF as a Long.
+     * The range defaults to the whole array; the validator passes a range to checksum the inner
+     * record or payload in place, skipping the per-frame copyOfRange on the offload path.
+     */
+    fun crc32(data: ByteArray, from: Int = 0, to: Int = data.size): Long {
         var crc = 0xFFFFFFFFL
-        for (b in data) {
-            val idx = ((crc xor (b.toLong() and 0xFFL)) and 0xFFL).toInt()
+        var i = from
+        while (i < to) {
+            val idx = ((crc xor (data[i].toLong() and 0xFFL)) and 0xFFL).toInt()
             crc = crc32Table[idx] xor (crc ushr 8)
+            i++
         }
         return (crc xor 0xFFFFFFFFL) and 0xFFFFFFFFL
     }
 
     /**
-     * CRC16-Modbus (poly 0xA001, init 0xFFFF, reflected). Used for the Whoop 5.0 frame header
-     * check. Ported verbatim from the Goose reverse-engineering (`crc16Modbus`). Returns 0..0xFFFF.
+     * CRC16-Modbus (poly 0xA001, init 0xFFFF, reflected) over `data[from until to]`. Used for the
+     * Whoop 5.0 frame header check. Ported verbatim from the Goose reverse-engineering
+     * (`crc16Modbus`). Returns 0..0xFFFF. The range defaults to the whole array; the validator passes
+     * a range so the 6-byte header check needs no copyOfRange.
      */
-    fun crc16Modbus(data: ByteArray): Int {
+    fun crc16Modbus(data: ByteArray, from: Int = 0, to: Int = data.size): Int {
         var crc = 0xFFFF
-        for (b in data) {
-            crc = crc xor (b.toInt() and 0xFF)
+        var i = from
+        while (i < to) {
+            crc = crc xor (data[i].toInt() and 0xFF)
             repeat(8) {
                 crc = if ((crc and 1) == 1) (crc ushr 1) xor 0xA001 else (crc ushr 1)
             }
+            i++
         }
         return crc and 0xFFFF
     }

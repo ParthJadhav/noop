@@ -36,6 +36,76 @@ public enum SleepStagerV2 {
     /// WHOOP 4 and 5. The recipe stages "wake" naturally (no separate pre-onset / post-wake forcing).
     public static func stageSession(start: Int, end: Int, grav: [GravitySample],
                                     hr: [HRSample], rr: [RRInterval], resp: [RespSample]) -> [StageSegment] {
+        // v7.0.2 perf (#707): stage each night AT MOST ONCE per (window, input-fingerprint). The post-sync
+        // scoring loop and the self-heal restage call this with byte-identical streams across passes; without
+        // the cache each call re-allocates the large per-second HR/gravity dictionaries below before
+        // collapsing to a handful of `StageSegment`s. The key folds in start/end (the locked window — an edit
+        // re-keys) and a fingerprint of every input stream that changes the staging (grav/hr/rr; resp is
+        // accepted for signature-parity but NOT consumed by the recipe, so it is deliberately out of the key —
+        // including it would only force needless misses). Only the small `[StageSegment]` is cached; the
+        // multi-hour raw arrays are never retained. Bounded so the cache can't itself OOM.
+        //
+        // CLIP (#707, the cold-pass over-allocation): the callers pass the WHOLE multi-day decoded stream to
+        // every per-night call, but `features()` never reads a sample outside [start-padLo, end+padHi] — the
+        // farthest reach of any per-epoch window (the 11-min HR-flatness window: 330 s back, 390 s forward —
+        // see `padLo`/`padHi` below). On the first post-sync pass (~21 nights cold) and the full-history Effort
+        // rescore (up to 4000 nights cold) those out-of-window rows are what blow the per-second dictionaries
+        // and the sort allocations up to OOM. The streams arrive sorted by ts, so we lower/upper-bound slice
+        // each to the read window BEFORE fingerprinting and BEFORE the uncached recipe. This is output-identical
+        // (we drop only rows `features()` could never touch) and it also tightens the fingerprint to the rows
+        // that matter. PAD_LO/PAD_HI are the SAME values the Android twin (R1) clips with.
+        let gravW = clipToWindow(grav, lo: start - Self.padLo, hi: end + Self.padHi, ts: { $0.ts })
+        let hrW = clipToWindow(hr, lo: start - Self.padLo, hi: end + Self.padHi, ts: { $0.ts })
+        let rrW = clipToWindow(rr, lo: start - Self.padLo, hi: end + Self.padHi, ts: { $0.ts })
+        let key = V2Key(
+            start: start, end: end,
+            grav: StreamFingerprint.of(gravW, ts: { $0.ts }, quant: { Int(($0.x + $0.y + $0.z) * 1024) }),
+            hr: StreamFingerprint.of(hrW, ts: { $0.ts }, quant: { Int($0.bpm) }),
+            rr: StreamFingerprint.of(rrW, ts: { $0.ts }, quant: { Int($0.rrMs) }))
+        return stageCache.value(key) {
+            stageSessionUncached(start: start, end: end, grav: gravW, hr: hrW, rr: rrW, resp: resp)
+        }
+    }
+
+    /// Farthest seconds, relative to an epoch, that `features()` reads any input — i.e. the largest backward /
+    /// forward reach of any per-epoch window. The 11-min HR-flatness window dominates both directions
+    /// (`stdOfSeconds(e - 330, e + 30 + 360)` reads `[e-330, e+390)`); the 5-min window (`[e-150, e+180)`) and
+    /// the RSA beat window (`[e-90, e+120)`) are strictly inside it. Epochs tile `[start, end)`, so no feature
+    /// can read before `start - padLo` or at/after `end + padHi`. MUST match the Android twin (R1).
+    static let padLo = 330   // backward reach: 11-min window's `e - 330`
+    static let padHi = 390   // forward reach: 11-min window's `e + 30 + 360`
+
+    /// Slice a ts-sorted stream to `[lo, hi)` with a lower/upper-bound pair (O(log n) bounds + one copy of the
+    /// kept rows). Returns a contiguous sub-slice as an `Array`. Loss-free for the recipe: every row outside
+    /// the window is one `features()` provably never touches.
+    private static func clipToWindow<T>(_ samples: [T], lo: Int, hi: Int, ts: (T) -> Int) -> [T] {
+        if samples.isEmpty { return samples }
+        // Already inside the window in full → avoid the copy (the common single-night case).
+        if ts(samples[0]) >= lo && ts(samples[samples.count - 1]) < hi { return samples }
+        // lowerBound: first index with ts >= lo.
+        var l = 0, h = samples.count
+        while l < h { let m = (l + h) / 2; if ts(samples[m]) < lo { l = m + 1 } else { h = m } }
+        let start = l
+        // upperBound: first index with ts >= hi (exclusive upper, matching the half-open read windows).
+        l = start; h = samples.count
+        while l < h { let m = (l + h) / 2; if ts(samples[m]) < hi { l = m + 1 } else { h = m } }
+        if start == 0 && l == samples.count { return samples }
+        return Array(samples[start..<l])
+    }
+
+    /// Cache key = locked window + per-stream fingerprints of the inputs the recipe actually reads.
+    private struct V2Key: Hashable {
+        let start: Int; let end: Int
+        let grav: StreamFingerprint; let hr: StreamFingerprint; let rr: StreamFingerprint
+    }
+
+    /// ≈ a couple of weeks of distinct nights (incl. re-staged edits); FIFO-evicted, result-only.
+    private static let stageCache = AnalyticsMemoCache<V2Key, [StageSegment]>(capacity: 24)
+
+    /// The unchanged staging recipe. Split out verbatim from `stageSession` so the public entry can memoize
+    /// in front of it; behaviour is byte-identical (a cache miss runs exactly this).
+    private static func stageSessionUncached(start: Int, end: Int, grav: [GravitySample],
+                                             hr: [HRSample], rr: [RRInterval], resp: [RespSample]) -> [StageSegment] {
         // Sort defensively so the windowed features behave regardless of caller ordering (V1's stageSession
         // assumes its callers pass roughly-sorted streams; we make no such assumption here).
         let gravS = grav.sorted { $0.ts < $1.ts }
@@ -111,8 +181,9 @@ public enum SleepStagerV2 {
     // MARK: - Feature extraction
 
     /// Build the per-epoch recipe features over a 30 s wall-clock-aligned grid covering [start, end].
-    /// Streams are the FULL (un-clipped) sorted streams, so the 5-/11-min HR windows and the RSA beat
-    /// window can reach across the session edges.
+    /// Streams are the sorted streams already clipped (by `stageSession`) to `[start-padLo, end+padHi]` — a
+    /// superset of every read window — so the 5-/11-min HR windows and the RSA beat window still reach to the
+    /// session edges exactly as before; only rows no window could touch were dropped.
     static func features(start: Int, end: Int, grav: [GravitySample],
                          hr: [HRSample], rr: [RRInterval]) -> [Epoch] {
         if end <= start { return [] }
@@ -136,13 +207,46 @@ public enum SleepStagerV2 {
         var rrBy = [Int: [Double]]()
         for r in rr { rrBy[r.ts, default: []].append(Double(r.rrMs)) }
 
+        // PREFIX SUMS over the per-second HR grid (#707). Every epoch evaluates a 5-min AND an 11-min centred
+        // std window; the old `stdOfSeconds` re-scanned and re-allocated a `vals` array of up to ~660 entries
+        // PER window PER epoch — O(window) each, the dominant transient alloc in the cold-stage path. We build
+        // dense prefix arrays of (count, Σv, Σv²) over the present seconds ONCE, then each window is an O(1)
+        // range query. The std stays population (÷n) with the SAME `<2 present → nil` semantics, and on every
+        // real fixture the staged hypnogram is byte-identical (the second-moment is the algebraic expansion
+        // `Σ(v-m)²` = `Σv² − 2m·Σv + n·m²`, which can differ from the prior direct sum only in the last ULPs —
+        // far below the margin that could flip a Viterbi label; verified label-identical on the golden nights).
+        // The grid spans the present HR seconds; a window reaching past the grid simply sees fewer present
+        // seconds, exactly as the old scan found no `secHR` entry there.
+        let gridLo = secHR.keys.min()
+        let gridHi = secHR.keys.max()
+        var pCnt = [Int](), pSum = [Double](), pSq = [Double]()
+        if let g0 = gridLo, let g1 = gridHi {
+            let n = g1 - g0 + 1
+            pCnt = [Int](repeating: 0, count: n + 1)
+            pSum = [Double](repeating: 0, count: n + 1)
+            pSq = [Double](repeating: 0, count: n + 1)
+            for i in 0..<n {
+                let v = secHR[g0 + i]
+                pCnt[i + 1] = pCnt[i] + (v == nil ? 0 : 1)
+                pSum[i + 1] = pSum[i] + (v ?? 0)
+                pSq[i + 1] = pSq[i] + (v.map { $0 * $0 } ?? 0)
+            }
+        }
+        // Population std over the PRESENT per-second HR in `[lo, hi)`; nil when < 2 present samples (matching
+        // the prior windowed scan). O(1): two prefix lookups after clamping the window to the grid.
         func stdOfSeconds(_ lo: Int, _ hi: Int) -> Double? {
-            var vals: [Double] = []
-            for s in lo..<hi { if let v = secHR[s] { vals.append(v) } }
-            if vals.count < 2 { return nil }
-            let m = vals.reduce(0, +) / Double(vals.count)
-            let v = vals.reduce(0.0) { $0 + ($1 - m) * ($1 - m) } / Double(vals.count)
-            return v.squareRoot()
+            guard let g0 = gridLo, let g1 = gridHi else { return nil }
+            let a = max(lo, g0) - g0
+            let b = min(hi, g1 + 1) - g0
+            if b <= a { return nil }
+            let cnt = pCnt[b] - pCnt[a]
+            if cnt < 2 { return nil }
+            let n = Double(cnt)
+            let sv = pSum[b] - pSum[a]
+            let sq = pSq[b] - pSq[a]
+            let m = sv / n
+            let v = (sq - 2 * m * sv + n * m * m) / n
+            return (v < 0 ? 0 : v).squareRoot()
         }
 
         // PASS 1 — every per-epoch quantity EXCEPT the move fraction, and pool every per-second jerk so the

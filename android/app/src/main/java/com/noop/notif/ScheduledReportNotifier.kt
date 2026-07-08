@@ -58,7 +58,7 @@ object ScheduledReportPolicy {
         chargePct?.let { parts.add("Charge $it") }
         restPct?.let { parts.add("Rest $it") }
         if (parts.isEmpty()) return null
-        val title = "Good morning — last night's recap"
+        val title = "Good morning: last night's recap"
         val body = parts.joinToString(" · ") +
             ". Recovery from your strap, scored after it synced this morning."
         return title to body
@@ -74,7 +74,7 @@ object ScheduledReportPolicy {
         durationLabel: String,
         avgHr: Int?,
     ): Pair<String, String> {
-        val title = "Workout logged — $sportLabel"
+        val title = "Workout logged: $sportLabel"
         val pieces = ArrayList<String>(3)
         pieces.add("Effort $effortDisplay/$effortMaxLabel")
         pieces.add(durationLabel)

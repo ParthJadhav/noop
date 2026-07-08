@@ -25,8 +25,17 @@ object StreamPersistence {
         rr = streams.rr.map { RrRow(it.ts.toLong(), it.rrMs) },
         events = streams.events.map { EventEntry(it.ts.toLong(), it.kind, encodePayload(it.payload)) },
         battery = streams.battery.map { BatteryRow(it.ts.toLong(), it.soc, it.mv, it.charging) },
-        // The live REALTIME_DATA stream carries no SpO2/skinTemp/resp/gravity — those are
-        // type-47-only and arrive via the historical-offload path (extractHistoricalStreams).
+        // The WHOOP REALTIME_DATA stream carries no SpO2/skinTemp (those are type-47-only and arrive
+        // via the historical-offload path), so for a WHOOP batch these stay empty. A live source that
+        // DOES decode them (the Oura ring) populates the protocol Streams' spo2/skinTemp, which widen
+        // 1:1 onto the existing Room insert shape here.
+        // `unit` is carried on the protocol Spo2Sample/SkinTempSample for fidelity but is not yet
+        // persisted: Spo2Row/SkinTempRow (and the Room entities) have no unit column. The raw integers
+        // follow fixed conventions (skinTemp = centi-°C, °C = raw/100; spo2 = raw_adc), documented on the
+        // protocol carriers, so a missing column never causes a misread until a migration adds one.
+        spo2 = streams.spo2.map { Spo2Row(it.ts.toLong(), it.red, it.ir) },
+        skinTemp = streams.skinTemp.map { SkinTempRow(it.ts.toLong(), it.raw) },
+        // resp/gravity/steps/ppgHr remain type-47-only (historical offload), unchanged.
     )
 
     /**

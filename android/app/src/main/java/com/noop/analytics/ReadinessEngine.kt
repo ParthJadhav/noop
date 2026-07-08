@@ -114,10 +114,10 @@ object ReadinessEngine {
             key = "hrv", label = "HRV",
             unit = "ms", decimals = 0,
             higherIsBetter = true,
-            goodText = "above your baseline — well recovered",
+            goodText = "above your baseline - well recovered",
             neutralText = "in your normal range",
             watchText = "a touch below baseline",
-            badText = "suppressed — a sign of autonomic fatigue",
+            badText = "suppressed - a sign of autonomic fatigue",
         )
         if (hrvSignal != null) signals.add(hrvSignal)
 
@@ -131,7 +131,7 @@ object ReadinessEngine {
             goodText = "at or below baseline",
             neutralText = "in your normal range",
             watchText = "running a little high",
-            badText = "elevated — overtraining or illness can do this",
+            badText = "elevated - overtraining or illness can do this",
         )
         if (rhrSignal != null) signals.add(rhrSignal)
 
@@ -153,7 +153,7 @@ object ReadinessEngine {
                     signals.add(
                         Signal(
                             key = "respRate", label = "Respiratory rate",
-                            detail = "up vs baseline — sometimes an early sign of getting sick", flag = Flag.BAD,
+                            detail = "up vs baseline - sometimes an early sign of getting sick", flag = Flag.BAD,
                             evidence = respEvidence,
                         )
                     )
@@ -192,7 +192,7 @@ object ReadinessEngine {
                     signals.add(
                         Signal(
                             key = "monotony", label = "Training variety",
-                            detail = "low — similar strain every day raises strain/illness risk", flag = Flag.WATCH,
+                            detail = "low - similar strain every day raises strain/illness risk", flag = Flag.WATCH,
                             evidence = "monotony ${fmt(mono, 1)}",
                         )
                     )
@@ -256,7 +256,7 @@ object ReadinessEngine {
         return when {
             ratio < 0.8 -> Signal(
                 key = "acwr", label = "Training load",
-                detail = "ramping down (acute:chronic $pct) — room to build", flag = Flag.WATCH,
+                detail = "ramping down (acute:chronic $pct) - room to build", flag = Flag.WATCH,
                 evidence = evidence,
             )
             ratio < 1.3 -> Signal(
@@ -266,12 +266,12 @@ object ReadinessEngine {
             )
             ratio < 1.5 -> Signal(
                 key = "acwr", label = "Training load",
-                detail = "building fast (acute:chronic $pct) — watch fatigue", flag = Flag.WATCH,
+                detail = "building fast (acute:chronic $pct) - watch fatigue", flag = Flag.WATCH,
                 evidence = evidence,
             )
             else -> Signal(
                 key = "acwr", label = "Training load",
-                detail = "spiking (acute:chronic $pct) — higher injury risk", flag = Flag.BAD,
+                detail = "spiking (acute:chronic $pct) - higher injury risk", flag = Flag.BAD,
                 evidence = evidence,
             )
         }
@@ -295,7 +295,7 @@ object ReadinessEngine {
         if (bad.size >= 2 || (recoveryDown && loadHigh)) {
             return Triple(
                 Level.RUNDOWN, "Run down",
-                "Several signals are down at once. Treat today as recovery — easy movement, real sleep tonight.",
+                "Several signals are down at once. Treat today as recovery - easy movement, real sleep tonight.",
             )
         }
         if (recoveryDown || loadHigh || bad.size >= 1) {
@@ -312,7 +312,7 @@ object ReadinessEngine {
         }
         return Triple(
             Level.BALANCED, "Balanced",
-            "Nothing's flagging. Train to feel — your body's holding steady.",
+            "Nothing's flagging. Train to feel - your body's holding steady.",
         )
     }
 

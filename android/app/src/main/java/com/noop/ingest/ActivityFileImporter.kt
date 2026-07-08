@@ -157,7 +157,7 @@ object ActivityFileImporter {
         if (activity == null || durationS == null || durationS <= 0) {
             return ImportSummary.failure(
                 SOURCE_LABEL,
-                "No usable activity found — point at a .gpx, .tcx or .fit workout file.",
+                "No usable activity found - point at a .gpx, .tcx or .fit workout file.",
             )
         }
 

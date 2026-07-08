@@ -5,20 +5,20 @@ import WhoopStore
 import StrandAnalytics
 import StrandImport
 
-// MARK: - AI Coach (the one networked feature — strictly opt-in, bring-your-own-key)
+// MARK: - AI Coach (the one networked feature, strictly opt-in, bring-your-own-key)
 //
 // NOOP is offline by design. This file is the single exception: when the user pastes their OWN
 // API key for a provider they choose, NOOP can send a compact text summary of their metrics plus
 // their question to that provider and surface coaching advice. Nothing leaves the device until a
 // key is set AND a question is asked. We never embed our own key, never auto-send, and only ever
-// transmit the small text context built in `buildContext()` + the running chat — no raw streams.
+// transmit the small text context built in `buildContext()` + the running chat, no raw streams.
 //
 // Pure macOS: Foundation + URLSession + Security (Keychain). Compiles on macOS 13, Swift 5.
 // Provider wire formats live in Providers/: OpenAI.swift, Anthropic.swift, Gemini.swift.
 
 /// One-line privacy note the UI should display verbatim near the composer / settings.
 public let aiCoachPrivacyNote =
-    "Private by default: nothing is sent until you add your own key and ask a question — only a short text summary of your metrics goes to the provider you pick."
+    "Private by default: nothing is sent until you add your own key and ask a question - only a short text summary of your metrics goes to the provider you pick."
 
 // MARK: - Chat model
 
@@ -60,10 +60,15 @@ enum AIKeyStore {
     static var ownerProvider: String? { UserDefaults.standard.string(forKey: ownerKey) }
 
     /// Store (or replace) the API key for `owner`. Empty/whitespace input is treated as a clear.
-    static func save(_ key: String, owner: String) {
+    /// Returns true once the key is in the Keychain (or was cleared); false if the Keychain write
+    /// failed, in which case the owner marker is left untouched so it never points at a key that
+    /// isn't actually stored (#872). The live `read()`/`hasKey` gating already reads the real
+    /// Keychain, so this is defensive tidying of the discarded write result, not a behaviour change.
+    @discardableResult
+    static func save(_ key: String, owner: String) -> Bool {
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { clear(); return }
-        guard let data = trimmed.data(using: .utf8) else { return }
+        guard !trimmed.isEmpty else { clear(); return true }
+        guard let data = trimmed.data(using: .utf8) else { return false }
 
         // Delete any existing item first so we always insert a single, fresh value.
         SecItemDelete(baseQuery as CFDictionary)
@@ -71,8 +76,10 @@ enum AIKeyStore {
         var attrs = baseQuery
         attrs[kSecValueData as String] = data
         attrs[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
-        SecItemAdd(attrs as CFDictionary, nil)
+        let status = SecItemAdd(attrs as CFDictionary, nil)
+        guard status == errSecSuccess else { return false }
         UserDefaults.standard.set(owner, forKey: ownerKey)
+        return true
     }
 
     /// Read the stored API key, or nil if none is set.
@@ -108,11 +115,14 @@ enum AICoachError: LocalizedError {
     case server(Int, String)
     case network(String)
     case decode
+    case keySaveFailed
 
     var errorDescription: String? {
         switch self {
         case .noKey:
             return "Add your own API key first to use the coach."
+        case .keySaveFailed:
+            return "Couldn't save the key to the Keychain. The key was not stored, so try again."
         case .emptyQuestion:
             return "Type a question for the coach."
         case .badKey:
@@ -120,7 +130,7 @@ enum AICoachError: LocalizedError {
         case .rateLimited:
             return "The provider is rate-limiting requests right now. Wait a moment and try again."
         case .server(let code, let detail):
-            let extra = detail.isEmpty ? "" : " — \(detail)"
+            let extra = detail.isEmpty ? "" : " - \(detail)"
             return "The provider returned an error (\(code))\(extra)."
         case .network(let detail):
             return "Network problem: \(detail). The coach is the only feature that needs the internet."
@@ -161,7 +171,7 @@ final class AICoachEngine: ObservableObject {
     /// provider changes, and optionally extended by `refreshModels()` with the provider's live list.
     @Published var availableModels: [String] = []
     /// Explicit permission for the coach to read & transmit the user's biometric data. OFF by
-    /// default — until this is true, NO metrics are included in any request (only the question).
+    /// default, until this is true, NO metrics are included in any request (only the question).
     @Published var dataConsent: Bool {
         didSet { UserDefaults.standard.set(dataConsent, forKey: Self.consentKey) }
     }
@@ -175,10 +185,10 @@ final class AICoachEngine: ObservableObject {
     @Published var customConnected: Bool {
         didSet { UserDefaults.standard.set(customConnected, forKey: Self.customConnectedKey) }
     }
-    /// SECOND opt-in (v5): also fold a SUMMARY of the new on-device signals — your strongest n-of-1
-    /// correlations and your Lab Book markers — into the coach context. OFF by default and gated behind
+    /// SECOND opt-in (v5): also fold a SUMMARY of the new on-device signals, your strongest n-of-1
+    /// correlations and your Lab Book markers, into the coach context. OFF by default and gated behind
     /// `dataConsent` too, so it never adds anything without both consents. Summary-only: a few one-line
-    /// sentences, NEVER raw readings — the anonymity / no-raw-egress posture is preserved.
+    /// sentences, NEVER raw readings, the anonymity / no-raw-egress posture is preserved.
     @Published var includeOnDeviceSignals: Bool {
         didSet { UserDefaults.standard.set(includeOnDeviceSignals, forKey: Self.onDeviceSignalsKey) }
     }
@@ -191,27 +201,72 @@ final class AICoachEngine: ObservableObject {
     private static let consentKey = "ai.dataConsent"
     private static let customConnectedKey = "ai.customConnected"
     private static let onDeviceSignalsKey = "ai.includeOnDeviceSignals"
+    /// UserDefaults key holding the user's EDITED system prompt. Absent (or blank) means "use the
+    /// built-in default". Small text key, never a secret, so plain UserDefaults is fine. Read FRESH
+    /// per request (see `systemPrompt`) so an edit takes effect on the very next message.
+    static let systemPromptKey = "ai.systemPrompt"
 
-    /// The system prompt that frames every request. Anonymous — frames the assistant only as a coach.
-    private let systemPrompt = """
+    /// The built-in system prompt that frames every request. Anonymous, frames the assistant only as a
+    /// coach. Exposed (read-only) so the UI's "Reset to default" can restore it and show it when nothing
+    /// custom is stored. Editing the live prompt overrides this via `systemPromptKey`.
+    static let defaultSystemPrompt = """
     You are an elite, supportive recovery and performance coach with a real training methodology. \
-    You may be given a summary of the user's own wearable data (charge 0–100, effort 0–100, rest 0–100, \
+    You may be given a summary of the user's own wearable data (charge 0-100, effort 0-100, rest 0-100, \
     HRV, resting heart rate) and recent workouts. Charge is the daily recovery/readiness score, effort \
     is the daily cardiovascular load score, and rest is the nightly sleep-quality score. \
     Coach using autoregulation:
-    • Readiness → prescription: charge 67–100 = green light to build/push, higher effort is fine; \
-    34–66 = maintain, quality over volume, keep it controlled; 0–33 = active recovery only \
+    • Readiness → prescription: charge 67-100 = green light to build/push, higher effort is fine; \
+    34-66 = maintain, quality over volume, keep it controlled; 0-33 = active recovery only \
     (Zone 2, mobility, extra sleep) and protect against accumulating effort debt.
     • Workout optimisation: progressive overload, polarised ~80/20 intensity, space hard sessions, \
     program deloads/periodisation, and treat sleep as the single biggest recovery lever.
     • Always cite the user's ACTUAL numbers, give a concrete plan (today and the week ahead), and \
-    be specific, punchy and motivating — like a coach who knows them.
+    be specific, punchy and motivating - like a coach who knows them.
     If no data is provided, coach generally and invite them to turn on data access for personalised \
-    advice. You are NOT a doctor — never diagnose; suggest a professional for genuine health concerns.
+    advice. You are NOT a doctor - never diagnose; suggest a professional for genuine health concerns.
     Format replies in simple Markdown, chat-sized: short paragraphs, **bold** for key numbers, \
     bullet or numbered lists for plans, ### headings only when structure genuinely helps, and a \
     small table only for a week-ahead plan. No code blocks.
     """
+
+    /// The system prompt actually sent, read FRESH from UserDefaults on every request so an edit in
+    /// the settings takes effect on the next message, with no engine rebuild. A blank/absent stored
+    /// value falls back to `defaultSystemPrompt`, so a user who clears it never sends an empty prompt.
+    var systemPrompt: String {
+        let stored = UserDefaults.standard.string(forKey: Self.systemPromptKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let stored, !stored.isEmpty { return stored }
+        return Self.defaultSystemPrompt
+    }
+
+    /// The user's stored prompt override, or the default when nothing custom is set. The UI binds its
+    /// editor to this: writing persists the override; writing a blank string clears it (back to default).
+    var customSystemPrompt: String {
+        get { systemPrompt }
+        set {
+            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty || trimmed == Self.defaultSystemPrompt {
+                UserDefaults.standard.removeObject(forKey: Self.systemPromptKey)
+            } else {
+                UserDefaults.standard.set(newValue, forKey: Self.systemPromptKey)
+            }
+            objectWillChange.send()
+        }
+    }
+
+    /// True when the user has an edited prompt that differs from the built-in default, gates the
+    /// "Reset to default" affordance in the UI.
+    var hasCustomSystemPrompt: Bool {
+        let stored = UserDefaults.standard.string(forKey: Self.systemPromptKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return !(stored ?? "").isEmpty && stored != Self.defaultSystemPrompt
+    }
+
+    /// Restore the built-in system prompt by clearing the stored override.
+    func resetSystemPrompt() {
+        UserDefaults.standard.removeObject(forKey: Self.systemPromptKey)
+        objectWillChange.send()
+    }
 
     /// Used in place of the metrics context when the user has NOT granted data access.
     private let noConsentNote = """
@@ -254,16 +309,16 @@ final class AICoachEngine: ObservableObject {
     /// True when a key is present in the Keychain.
     var hasKey: Bool { AIKeyStore.read() != nil }
 
-    /// True once the coach can actually send: a stored key for the cloud providers, or — for the
-    /// Custom (local) provider — a committed base URL (a key is optional there, as local servers
+    /// True once the coach can actually send: a stored key for the cloud providers, or, for the
+    /// Custom (local) provider, a committed base URL (a key is optional there, as local servers
     /// usually need none). Gates the setup card vs. the live chat.
     var isConfigured: Bool { provider == .custom ? customConnected : hasKey }
 
     /// The key to send with a request: the stored key, or an empty string for the keyless Custom
-    /// provider. `nil` means "not configured" — the caller surfaces `.noKey`.
+    /// provider. `nil` means "not configured", the caller surfaces `.noKey`.
     private var resolvedKey: String? {
         if let k = AIKeyStore.read() {
-            // Only send the stored key to the provider it was SAVED for — never Bearer one provider's
+            // Only send the stored key to the provider it was SAVED for, never Bearer one provider's
             // key (e.g. a cloud OpenAI/Anthropic secret) to another provider's endpoint, above all the
             // arbitrary user-typed Custom URL. A legacy key with no recorded owner is assumed to belong
             // to a cloud provider, so it is never auto-sent to Custom.
@@ -299,9 +354,15 @@ final class AICoachEngine: ObservableObject {
         objectWillChange.send()
     }
 
-    /// Store the user's pasted key securely. Clears any prior error.
+    /// Store the user's pasted key securely. Clears any prior error. If the Keychain write fails the
+    /// key is NOT saved, so surface that to the UI instead of silently proceeding (#872), and skip the
+    /// model refresh (it would only hit `.noKey`).
     func setKey(_ key: String) {
-        AIKeyStore.save(key, owner: provider.rawValue)
+        guard AIKeyStore.save(key, owner: provider.rawValue) else {
+            errorText = AICoachError.keySaveFailed.errorDescription
+            objectWillChange.send()
+            return
+        }
         errorText = nil
         objectWillChange.send() // `hasKey` is computed; nudge SwiftUI to re-read it.
         // Pull the user's ACTUAL current models from the provider so the picker is never stale.
@@ -326,6 +387,13 @@ final class AICoachEngine: ObservableObject {
         model = trimmed
     }
 
+    /// Test seam (DEBUG only): lets a test stand in for the live `fetchModels` network call so it can
+    /// control timing and which provider's ids come back. Production never sets this, so the real path
+    /// below is byte-identical in release builds.
+    #if DEBUG
+    var fetchModelsOverride: ((_ provider: AIProvider, _ key: String) async throws -> [String])?
+    #endif
+
     /// Best-effort: GET the chosen provider's models endpoint with the saved key and merge the
     /// returned ids into `availableModels`. Never crashes; failures land in `errorText` and leave
     /// the existing list intact. Requires a saved key.
@@ -336,21 +404,43 @@ final class AICoachEngine: ObservableObject {
         }
         errorText = nil
 
+        // Snapshot the provider BEFORE the await. The Picker isn't disabled during a refresh, so the
+        // user can switch providers mid-flight (#873). We fetch this provider's ids, then re-check on
+        // resume that it's still the live one, and merge against THIS same snapshot, so the guard and
+        // the merge always use one consistent provider, never a stale/mixed list for the wrong one.
+        let capturedProvider = provider
+
         do {
-            let ids = try await provider.client.fetchModels(key: key, session: session)
+            let ids: [String]
+            #if DEBUG
+            if let override = fetchModelsOverride {
+                ids = try await override(capturedProvider, key)
+            } else {
+                ids = try await capturedProvider.client.fetchModels(key: key, session: session)
+            }
+            #else
+            ids = try await capturedProvider.client.fetchModels(key: key, session: session)
+            #endif
+
+            // The user switched providers while we were awaiting, so these ids belong to the old one.
+            // Drop them rather than write a list for a provider that's no longer selected.
+            guard provider == capturedProvider else { return }
+
             guard !ids.isEmpty else {
                 errorText = AICoachError.decode.errorDescription
                 return
             }
 
-            // Merge: keep the built-in options on top, append any newly-discovered ids (sorted), and
-            // preserve a current custom selection if it isn't otherwise present.
-            let builtin = provider.modelOptions
+            // Merge: keep the captured provider's built-in options on top, append any newly-discovered
+            // ids (sorted), and preserve a current custom selection if it isn't otherwise present.
+            let builtin = capturedProvider.modelOptions
             let discovered = Set(ids).subtracting(builtin).sorted()
             var merged = builtin + discovered
             if !merged.contains(model) { merged.insert(model, at: 0) }
             availableModels = merged
         } catch {
+            // A switch mid-flight makes any error moot for the old provider, so don't surface it.
+            guard provider == capturedProvider else { return }
             errorText = AICoachError.network(error.localizedDescription).errorDescription
             return
         }
@@ -389,8 +479,8 @@ final class AICoachEngine: ObservableObject {
         }
     }
 
-    /// Proactively generate "Today's brief" the first time the Coach opens — readiness + a training
-    /// prescription + one recovery tip — without the user typing. Requires a key + data consent.
+    /// Proactively generate "Today's brief" the first time the Coach opens, readiness + a training
+    /// prescription + one recovery tip, without the user typing. Requires a key + data consent.
     func startBriefIfNeeded() async {
         guard isConfigured, dataConsent, messages.isEmpty, !sending else { return }
         guard let key = resolvedKey else { return }
@@ -424,6 +514,11 @@ final class AICoachEngine: ObservableObject {
     func buildFullContext() async -> String {
         var ctx = buildContext()
         ctx += "\n\n" + (await recentWorkoutsBlock())
+        // Derived stress: a single Baevsky Stress Index summary line over today's R-R, computed the same
+        // way StressView does. Gated here under `dataConsent` (the caller only reaches buildFullContext()
+        // with consent on), so it rides the SAME consent + text-only channel as the HRV/RHR summary, a
+        // derived number, never raw R-R egress. Omitted when there aren't enough clean beats yet.
+        if let line = await stressIndexLine() { ctx += "\n\n" + line }
         if includeOnDeviceSignals {
             let block = await onDeviceSignalsBlock()
             if !block.isEmpty { ctx += "\n\n" + block }
@@ -431,7 +526,29 @@ final class AICoachEngine: ObservableObject {
         return ctx
     }
 
-    /// A SUMMARY-ONLY block of the new on-device signals — the user's strongest n-of-1 correlations
+    /// One derived stress line for the coach context: the Baevsky Stress Index over TODAY's R-R, read
+    /// via the store exactly as `StressView` does (`storeHandle()` → `rrIntervals(deviceId:from:to:)`),
+    /// then summarised to a single number with `StressIndex.stressIndex(rr:)`. Returns nil when the
+    /// store is unavailable or there are too few clean beats (the histogram needs >= 20), so the line is
+    /// simply absent, never a fabricated value. Summary-only: the raw R-R never leaves the device.
+    func stressIndexLine() async -> String? {
+        let cal = Calendar.current
+        let from = Int(cal.startOfDay(for: Date()).timeIntervalSince1970)
+        let to = Int(Date().timeIntervalSince1970)
+        guard let store = await repo.storeHandle() else { return nil }
+        let rr = (try? await store.rrIntervals(
+            deviceId: repo.deviceId, from: from, to: to, limit: 200_000)) ?? []
+        guard let si = StressIndex.stressIndex(rr: rr) else { return nil }
+        return Self.stressIndexSummary(si: si)
+    }
+
+    /// Pure formatter for the derived stress line, kept separate so it is unit-testable without a store.
+    /// One summary number, labelled, with a plain-English note that it's an autonomic-balance proxy.
+    static func stressIndexSummary(si: Double) -> String {
+        "Stress (SI): \(Int(si.rounded())) (Baevsky Stress Index over today's R-R; higher means more sympathetic / under load; an autonomic-balance proxy, not a clinical figure)."
+    }
+
+    /// A SUMMARY-ONLY block of the new on-device signals, the user's strongest n-of-1 correlations
     /// (lag-aware EffectRanker) and a one-line roll-up of their Lab Book markers. Plain sentences, never
     /// raw readings: this rides the same text channel as the metrics summary, so the no-raw-egress posture
     /// holds. Gated by the caller on the second opt-in; returns "" when there's nothing worth adding.
@@ -492,7 +609,7 @@ final class AICoachEngine: ObservableObject {
 
     /// Sliding window over the chat: the FIRST user turn (it carries the metrics context) plus the most
     /// recent `maxHistoryMessages`, dropping the middle. Sending the whole growing history crowds out the
-    /// reply on small-context local servers (Ollama defaults to a 2048-token window — the Custom
+    /// reply on small-context local servers (Ollama defaults to a 2048-token window, the Custom
     /// provider's main use case) and balloons token cost/latency on cloud providers. (parity with Android)
     private static let maxHistoryMessages = 10
     private func windowedMessages() -> [ChatMessage] {
@@ -553,7 +670,7 @@ final class AICoachEngine: ObservableObject {
                      + ", sleep: \(avgSleepHours(last30))h"
                      + ", HRV: \(avgInt(last30.compactMap { $0.avgHrv })) ms"
                      + ", RHR: \(avgInt(last30.compactMap { $0.restingHr.map(Double.init) })) bpm")
-        // Additional vitals when present (#124 — the coach used to see only recovery/strain/sleep/HRV/RHR).
+        // Additional vitals when present (#124, the coach used to see only recovery/strain/sleep/HRV/RHR).
         lines.append("  SpO2: \(avgInt(last30.compactMap { $0.spo2Pct }))%"
                      + ", respiration: \(avgOne(last30.compactMap { $0.respRateBpm }))/min"
                      + ", skin-temp deviation: \(avgOne(last30.compactMap { $0.skinTempDevC }))°C"
@@ -565,7 +682,7 @@ final class AICoachEngine: ObservableObject {
 
     /// Append recent workouts to an existing context string. Async (workouts are read from the store),
     /// so callers that want workouts in the context can await this and feed the result to `send`'s
-    /// flow via the chat — kept separate so `buildContext()` stays synchronous per the spec.
+    /// flow via the chat, kept separate so `buildContext()` stays synchronous per the spec.
     func recentWorkoutsBlock(limit: Int = 6) async -> String {
         let rows = await repo.workoutRows(days: 30) // newest first
         guard !rows.isEmpty else { return "Recent workouts: none recorded in the last 30 days." }

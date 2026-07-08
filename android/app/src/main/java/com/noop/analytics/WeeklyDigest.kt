@@ -127,6 +127,22 @@ data class WeeklyMetricSummary(
             val s = metric.typicalSpread
             return if (s > 0) wowDelta / s else 0.0
         }
+
+    /**
+     * True when the week-over-week comparison rests on a sparse side: both weeks carry at
+     * least one reading, but either has fewer than [WeeklyDigestEngine.MIN_DAYS_FOR_FOCUS]
+     * days. A rough comparison still shows its raw arrow + %, but the UI shouldn't dress it
+     * in a confident good/bad verdict — a 43% "drop" off 2 days isn't a trend (the #463
+     * chips-vs-summary contradiction). Mirrors Swift `isRoughComparison`.
+     */
+    val isRoughComparison: Boolean
+        get() {
+            val cur = weekOverWeek.current.n
+            val prev = weekOverWeek.previous.n
+            if (cur == 0 || prev == 0) return false
+            return cur < WeeklyDigestEngine.MIN_DAYS_FOR_FOCUS ||
+                prev < WeeklyDigestEngine.MIN_DAYS_FOR_FOCUS
+        }
 }
 
 /** How this week's Effort sat against this week's Charge. */
@@ -137,11 +153,11 @@ enum class BalanceRead {
     val sentence: String
         get() = when (this) {
             OVERREACHING ->
-                "Your Effort outpaced your Charge this week — you leaned into the red. Watch for a recovery dip."
+                "Your Effort outpaced your Charge this week: you leaned into the red. Watch for a recovery dip."
             BALANCED ->
-                "Effort and Charge tracked together this week — a sustainable load."
+                "Effort and Charge tracked together this week: a sustainable load."
             UNDERLOADED ->
-                "You carried more Charge than you spent this week — there's room to push if you want it."
+                "You carried more Charge than you spent this week: there's room to push if you want it."
             INSUFFICIENT ->
                 "Not enough Effort and Charge days this week to read your balance."
         }
@@ -186,8 +202,18 @@ object WeeklyDigestEngine {
     /**
      * Build the weekly digest anchored on the Monday of the week containing [anchorDay]
      * ("yyyy-MM-dd", typically today). A non-parseable string yields an all-empty digest.
+     *
+     * [effortDisplayFactor] is a multiplier applied to EFFORT averages (and the pts
+     * fallback magnitude) in the rendered focal-point sentences ONLY, so a user on the
+     * 0–21 Effort scale (#268) never reads a stored 0–100 mean in prose. Percent changes
+     * are scale-invariant and stay untouched. Defaults to 1.0 (stored scale) so existing
+     * callers are byte-identical. Display-only: no stat, delta or threshold changes.
      */
-    fun build(byMetric: Map<WeeklyMetric, Map<String, Double>>, anchorDay: String): WeeklyDigest {
+    fun build(
+        byMetric: Map<WeeklyMetric, Map<String, Double>>,
+        anchorDay: String,
+        effortDisplayFactor: Double = 1.0,
+    ): WeeklyDigest {
         val monday = mondayOfWeek(anchorDay) ?: return emptyDigest(anchorDay, anchorDay)
         val sunday = addDays(monday, 6)
         val lastMonday = addDays(monday, -7)
@@ -219,7 +245,7 @@ object WeeklyDigestEngine {
         val restConsistency = if ((restStat?.n ?: 0) >= 2) restStat?.stdev else null
 
         val balance = balanceRead(summaries)
-        val focal = focalPoints(summaries, balance, restConsistency)
+        val focal = focalPoints(summaries, balance, restConsistency, effortDisplayFactor)
 
         return WeeklyDigest(
             weekStart = monday, weekEnd = sunday, metrics = summaries,
@@ -313,6 +339,7 @@ object WeeklyDigestEngine {
         summaries: List<WeeklyMetricSummary>,
         balance: BalanceRead,
         consistencySD: Double?,
+        effortDisplayFactor: Double = 1.0,
     ): List<String> {
         val movers = summaries
             .filter {
@@ -324,52 +351,68 @@ object WeeklyDigestEngine {
 
         val lines = mutableListOf<String>()
 
-        movers.firstOrNull()?.let { lines.add(moverSentence(it)) }
+        movers.firstOrNull()?.let { lines.add(moverSentence(it, effortDisplayFactor)) }
 
         if (balance == BalanceRead.OVERREACHING || balance == BalanceRead.UNDERLOADED) {
             lines.add(balance.sentence)
         } else if (movers.size >= 2) {
-            lines.add(moverSentence(movers[1]))
+            lines.add(moverSentence(movers[1], effortDisplayFactor))
         }
 
-        // Nothing cleared the mover bar. Distinguish a SPARSE current week (too few days to
-        // call a week-over-week trend — saying "nothing moved" there contradicts the per-metric
-        // chips, the #463 report) from a genuinely steady full week.
+        // Nothing cleared the mover bar. Distinguish three very different reasons:
+        //   • a SPARSE CURRENT week (too few days to call a week-over-week trend — saying
+        //     "nothing moved" there contradicts the per-metric chips, the #463 report),
+        //   • a SPARSE PREVIOUS week (typical new user in week 2): movers are gated on
+        //     previous.n ≥ MIN_DAYS_FOR_FOCUS, so nothing can surface even when the chips
+        //     show big raw %s off last week's 1–2 days — the same contradiction, mirrored,
+        //   • a genuinely steady full week.
         if (lines.isEmpty()) {
             val currentDays = summaries.maxOfOrNull { it.weekOverWeek.current.n } ?: 0
+            val prevDays = summaries.maxOfOrNull { it.weekOverWeek.previous.n } ?: 0
             if (currentDays in 1 until MIN_DAYS_FOR_FOCUS) {
                 val dayWord = if (currentDays == 1) "day" else "days"
                 lines.add(
-                    "Only $currentDays $dayWord into this week so far — too early to " +
+                    "Only $currentDays $dayWord into this week so far, too early to " +
                         "call a week-over-week trend yet.",
                 )
+            } else if (currentDays >= MIN_DAYS_FOR_FOCUS && prevDays in 1 until MIN_DAYS_FOR_FOCUS) {
+                val dayWord = if (prevDays == 1) "day" else "days"
+                lines.add(
+                    "Last week only had $prevDays $dayWord of data, so week-over-week " +
+                        "changes are rough, not a trend.",
+                )
             } else if (consistencySD != null && consistencySD <= 6.0) {
-                lines.add("A steady week — Rest held even (±${round1(consistencySD)} pts) and nothing moved much.")
+                lines.add("A steady week: Rest held even (±${round1(consistencySD)} pts) and nothing moved much.")
             } else {
-                lines.add("A steady week — no metric moved meaningfully from last week.")
+                lines.add("A steady week: no metric moved meaningfully from last week.")
             }
         }
 
         return lines.take(2)
     }
 
-    /** Render one mover as a plain-English sentence with good/bad framing. Mirrors Swift. */
-    private fun moverSentence(s: WeeklyMetricSummary): String {
+    /**
+     * Render one mover as a plain-English sentence with good/bad framing. Mirrors Swift.
+     * [effortDisplayFactor] rescales the EFFORT averages (and its pts fallback) for
+     * display only — % is scale-invariant.
+     */
+    private fun moverSentence(s: WeeklyMetricSummary, effortDisplayFactor: Double = 1.0): String {
+        val f = if (s.metric == WeeklyMetric.EFFORT) effortDisplayFactor else 1.0
         val directionWord = if (s.wowDelta > 0) "up" else if (s.wowDelta < 0) "down" else "flat"
         val pct = s.weekOverWeek.pctChange
         val magnitude = if (pct != null && abs(pct) >= 1) {
             "${abs(pct).roundToInt()}%"
         } else {
             val suffix = if (s.metric.unit.isEmpty()) " pts" else " ${s.metric.unit}"
-            "${round1(abs(s.wowDelta))}$suffix"
+            "${round1(abs(s.wowDelta) * f)}$suffix"
         }
         val frame = when (s.wowGoodness) {
-            1 -> " — a good sign"
-            -1 -> " — worth a look"
+            1 -> ", a good sign"
+            -1 -> ", worth a look"
             else -> ""
         }
-        val thisAvg = s.thisWeek.mean.roundToInt()
-        val lastAvg = s.weekOverWeek.previous.mean.roundToInt()
+        val thisAvg = (s.thisWeek.mean * f).roundToInt()
+        val lastAvg = (s.weekOverWeek.previous.mean * f).roundToInt()
         return "${s.metric.label} is $directionWord $magnitude week over week (avg $thisAvg vs $lastAvg)$frame."
     }
 

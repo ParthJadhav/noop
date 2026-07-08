@@ -378,12 +378,17 @@ object Metrics {
     val cardPadding = 16.dp
     val gap = 12.dp           // gap between cards
     val sectionGap = 28.dp    // gap between sections
+    // #765: the ONE inter-card vertical spacing for a screen's top-level scroll rows. Both ScreenScaffold
+    // and LazyScreenScaffold use this for `spacedBy(...)`, so every Today/Explore card sits on the same
+    // rhythm instead of a bare `20.dp` literal repeated per scaffold (and Today no longer injects ad-hoc
+    // Spacer rows that broke that rhythm). One token = uniform, consistent gaps across the screens.
+    val screenRowSpacing = 20.dp
     val screenPadding = 24.dp
     val tileHeight = 108.dp   // every metric tile is this tall
     val chartHeight = 220.dp
     val divider = 1.dp
     val compactChartHeight = chartHeight - 90.dp
-    val selectorTopUp = sectionGap - 20.dp
+    val selectorTopUp = sectionGap - screenRowSpacing
     val iconButton = 36.dp
     val iconSmall = 18.dp
     val selectorPadding = 10.dp

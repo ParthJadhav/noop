@@ -15,6 +15,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bedtime
+import androidx.compose.material.icons.filled.Calculate
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Insights
 import androidx.compose.material.icons.filled.Sensors
@@ -72,9 +73,24 @@ private enum class PrimerSection(
     SCORES(
         title = "How your scores work",
         body = "Charge, Effort and Rest are scored on your own device from your strap data. " +
-            "They get personal after about two weeks of your nights (that's \"Calibrating\"). " +
-            "Before that NOOP shows what it can without faking a number.",
+            "Charge needs about four nights of sleep to learn your baseline (that's \"Calibrating\", " +
+            "counted as nights of 4 on the ring), and keeps sharpening over your first couple of weeks. " +
+            "On a WHOOP 5 or MG the strap banks little history, so that count can sit at 0 of 4 until you " +
+            "have worn it across a few nights. That's the strap's sync limit, not a fault. " +
+            "Before there's a number, NOOP shows what it can without faking one.",
         icon = Icons.Filled.Insights,
+    ),
+    SCORE_RECIPE(
+        title = "How your scores are computed",
+        body = "Charge weighs five signals against your own baseline: your overnight HRV matters most, " +
+            "then your resting heart rate, how well you slept, your breathing rate, and how far your skin " +
+            "temperature drifted from normal. Higher HRV and lower resting heart rate lift Charge; a big " +
+            "skin-temperature drift in either direction lowers it. Each signal is measured as how far " +
+            "tonight sits from your personal baseline, never an absolute target. If a signal is missing, " +
+            "it's dropped and the rest are reweighted, so the number always reflects only what was " +
+            "actually measured. The \"What shaped it\" breakdown under the Charge ring shows each signal's " +
+            "point contribution.",
+        icon = Icons.Filled.Calculate,
     ),
     RECORDING(
         title = "What \"recording\" means",
@@ -92,10 +108,11 @@ private enum class PrimerSection(
     /** The accent each section uses — matched to the surface it explains for continuity. */
     val accent: Color
         get() = when (this) {
-            SLEEP -> Palette.metricPurple    // sleep world
-            SCORES -> Palette.accent         // the daily scores' gold
-            RECORDING -> Palette.metricCyan  // live / sensor signal
-            PROVENANCE -> Palette.metricCyan // the By-Day provenance badge tint
+            SLEEP -> Palette.metricPurple        // sleep world
+            SCORES -> Palette.accent             // the daily scores' gold
+            SCORE_RECIPE -> Palette.chargeColor  // the Charge world the recipe explains
+            RECORDING -> Palette.metricCyan      // live / sensor signal
+            PROVENANCE -> Palette.metricCyan     // the By-Day provenance badge tint
         }
 }
 

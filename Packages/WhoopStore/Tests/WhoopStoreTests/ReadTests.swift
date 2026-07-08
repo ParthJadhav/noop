@@ -32,6 +32,27 @@ final class ReadTests: XCTestCase {
         XCTAssertEqual(limited.first?.ts, 100)
     }
 
+    // #836 — the idle-tick gate's change-detector: (count, maxTs) scoped to the device + window, no rows.
+    func testHrFingerprintCountMaxTsRangeAndDeviceScope() async throws {
+        let store = try await seeded()
+        // dev1 has hr ts 100/200/300 → full window is (count 3, maxTs 300).
+        let full = try await store.hrFingerprint(deviceId: "dev1", from: 0, to: 1000)
+        XCTAssertEqual(full.count, 3)
+        XCTAssertEqual(full.maxTs, 300)
+        // Inclusive sub-window [150,250] sees only ts 200 → (1, 200).
+        let windowed = try await store.hrFingerprint(deviceId: "dev1", from: 150, to: 250)
+        XCTAssertEqual(windowed.count, 1)
+        XCTAssertEqual(windowed.maxTs, 200)
+        // The decoy on "other" (single ts 200) is device-scoped, never folded into dev1.
+        let other = try await store.hrFingerprint(deviceId: "other", from: 0, to: 1000)
+        XCTAssertEqual(other.count, 1)
+        XCTAssertEqual(other.maxTs, 200)
+        // Empty window COALESCEs to (0, 0), never nil.
+        let empty = try await store.hrFingerprint(deviceId: "dev1", from: 5000, to: 6000)
+        XCTAssertEqual(empty.count, 0)
+        XCTAssertEqual(empty.maxTs, 0)
+    }
+
     func testHrBucketsAveragePerBucketOrderedAndDeviceScoped() async throws {
         let store = try await seeded()
         // 200s buckets over dev1's ts 100/200/300 (bpm 60/61/62):

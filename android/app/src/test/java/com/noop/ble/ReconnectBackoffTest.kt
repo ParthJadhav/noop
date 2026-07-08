@@ -56,4 +56,16 @@ class ReconnectBackoffTest {
             assertTrue("attempt $n gave $d (> cap)", d <= ReconnectBackoff.MAX_DELAY_MS)
         }
     }
+
+    @Test
+    fun scheduleMatchesTheClosedFormMinSixtyThreeTimesTwoToTheN() {
+        // Independent cross-check of the SAME curve the Oura auto-reconnect (#912) and the iOS
+        // BLEManager both ride: min(60, 3 * 2^(n-1)) seconds, computed here from scratch (not via the
+        // shift path) so a regression in the production `shl` implementation is caught by a second formula.
+        for (n in 1..12) {
+            val closedFormSeconds = minOf(60.0, 3.0 * Math.pow(2.0, (n - 1).toDouble()))
+            val expectedMs = (closedFormSeconds * 1000.0).toLong()
+            assertEquals("attempt $n", expectedMs, ReconnectBackoff.nextDelayMs(n))
+        }
+    }
 }

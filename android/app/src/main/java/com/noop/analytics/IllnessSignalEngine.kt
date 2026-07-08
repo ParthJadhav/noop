@@ -24,7 +24,7 @@ object IllnessSignalEngine {
     const val confounderDampen: Double = 0.45
 
     /** Standing not-a-diagnosis tail reused verbatim from the shipped IllnessNotifier copy. */
-    const val disclaimerTail = "On-device estimate — not a diagnosis."
+    const val disclaimerTail = "On-device estimate - not a diagnosis."
 
     // ── Inputs ──
 
@@ -110,23 +110,23 @@ object IllnessSignalEngine {
         // Gate 0: untrusted baseline → silent.
         if (!context.baselineTrusted) {
             return Result(score, Level.QUIET, firedSignals, emptyList(), signalCount,
-                "Still learning your baseline — keeping an eye out.")
+                "Still learning your baseline - keeping an eye out.")
         }
 
         // Already-unwell path: switch from "early warning" to a gentle "rest up".
         if (context.alreadyUnwell) {
             val agreeing = score >= mildThreshold && signalCount >= 1
             val copy = if (agreeing)
-                "Rest up — you logged feeling unwell, and your numbers agree. $disclaimerTail"
+                "Rest up - you logged feeling unwell, and your numbers agree. $disclaimerTail"
             else
-                "Rest up — you logged feeling unwell. Take it easy today. $disclaimerTail"
+                "Rest up - you logged feeling unwell. Take it easy today. $disclaimerTail"
             return Result(score, Level.ALREADY_UNWELL, firedSignals, emptyList(), signalCount, copy)
         }
 
         // Corroboration + magnitude gate.
         if (signalCount < minCorroboratingSignals || score < mildThreshold) {
             return Result(score, Level.QUIET, firedSignals, emptyList(), signalCount,
-                "Nothing notable — your signals look like your normal range.")
+                "Nothing notable - your signals look like your normal range.")
         }
 
         // Confounder suppression — the differentiating part.
@@ -142,20 +142,20 @@ object IllnessSignalEngine {
         if (suppressedBy.isNotEmpty()) {
             val dampened = score * confounderDampen
             val reason = joinReasons(suppressedBy)
-            val copy = "Some signals are up ($signalsPhrase), but you logged $reason — likely that, " +
+            val copy = "Some signals are up ($signalsPhrase), but you logged $reason - likely that, " +
                 "not illness. $disclaimerTail"
             return Result(dampened, Level.SUPPRESSED, firedSignals, suppressedBy, signalCount, copy)
         }
 
         // No confounder. Mild stays in the detail view; a strong composite raises.
         if (score < raiseThreshold) {
-            val copy = "A few signals are mildly up ($signalsPhrase). Nothing alarming — worth a calmer " +
+            val copy = "A few signals are mildly up ($signalsPhrase). Nothing alarming - worth a calmer " +
                 "day. $disclaimerTail"
             return Result(score, Level.MILD, firedSignals, emptyList(), signalCount, copy)
         }
 
         val ruledOut = "no alcohol or travel logged"
-        val copy = "Heads-up — your body looks strained. $signalsPhrase. With $ruledOut, consider " +
+        val copy = "Heads-up - your body looks strained. $signalsPhrase. With $ruledOut, consider " +
             "taking it easy. $disclaimerTail"
         return Result(score, Level.RAISED, firedSignals, emptyList(), signalCount, copy)
     }

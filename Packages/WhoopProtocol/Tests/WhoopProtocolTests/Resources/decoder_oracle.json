@@ -1,0 +1,191 @@
+{
+  "_comment": [
+    "GOLDEN DECODER ORACLE (lane-4 A8). Shared Swift<->Kotlin drift guard for the WHOOP type-47",
+    "HISTORICAL_DATA decoder. Each entry is a REAL captured frame (never synthetic except where",
+    "noted) whose expected decode is already pinned by the per-platform suites; this file makes BOTH",
+    "decoders prove the SAME output against the SAME bytes so a one-sided change is caught.",
+    "Seeded from existing in-repo test vectors:",
+    "  - Whoop4HistoricalV24HardwareTests.swift (real WHOOP 4 v24)",
+    "  - HistoricalV24Tests.swift (synthetic WHOOP 4 v24, flagged synthetic below)",
+    "  - Whoop4HistoricalV25Tests.swift / Whoop4HistoricalV25Test.kt (real WHOOP 4 v25)",
+    "  - Whoop5HistoricalTests.swift / Whoop5HistoricalDecodeTest.kt (real WHOOP 5 v18, two devices)",
+    "DO NOT EDIT one copy in isolation: an IDENTICAL copy lives at",
+    "android/app/src/test/resources/decoder_oracle.json and a test in each suite asserts the two",
+    "byte streams match. Doubles are compared within 1e-4; ints exact. A field absent from a record's",
+    "'expect' map is simply not asserted (decoders legitimately emit supersets per family).",
+    "Frames carry only biometrics + timestamp (no serial / name / token), so they are safe to commit."
+  ],
+  "tolerance": 1e-4,
+  "frames": [
+    {
+      "name": "whoop4_v24_real_worn",
+      "family": "whoop4",
+      "synthetic": false,
+      "hex": "aa6400a12f18054c1c0a023ed0266a5037805418016d022b0234020000000000006b07ff0085593c1f65cebed7b3e63eb85a5f3f000080401f65cebed7b3e63eb85a5f3f500264025d03640229014009010c020c00000000000f0001c4020000000000008fdeb278",
+      "expect": {
+        "hist_version": 24,
+        "unix": 1780928574,
+        "heart_rate": 109,
+        "rr_count": 2,
+        "rr_intervals": [555, 564],
+        "gravity_mag": 1.0
+      }
+    },
+    {
+      "name": "whoop4_v24_synthetic_anchor",
+      "family": "whoop4",
+      "synthetic": true,
+      "hex": "aa5a008e2f18000000000000f153650000000000003f0152030000000000000000dc053075000000cdcc4c3dcdcccc3d5a657e3f00000040cdcc4c3dcdcccc3d5a657e3f504668428403200364006400b80bb80b000000000000c25c1a88",
+      "expect": {
+        "hist_version": 24,
+        "unix": 1700000000,
+        "heart_rate": 63,
+        "rr_count": 1,
+        "rr_intervals": [850],
+        "spo2_red": 18000,
+        "spo2_ir": 17000,
+        "skin_temp_raw": 900,
+        "resp_rate_raw": 3000,
+        "gravity_mag": 1.0
+      }
+    },
+    {
+      "name": "whoop4_v25_real_a",
+      "family": "whoop4",
+      "synthetic": false,
+      "hex": "aa50000c2f1900006800007dff2a6a20430900433103007e026502ba026c022eff70f996f879fad6fd8300d6017e0267027201be00290258030e05c507f00c030ead11cb15791500d2553c9003000000d6393716",
+      "expect": {
+        "hist_version": 25,
+        "unix": 1781202813,
+        "rr_intervals": [],
+        "gravity_mag": 1.0
+      }
+    },
+    {
+      "name": "whoop4_v25_real_b",
+      "family": "whoop4",
+      "synthetic": false,
+      "hex": "aa50000c2f1900016800007eff2a6a283e0900a0ad03007a0e880698018bfff5fb61eee9f2a7fa2bfe1af5fdf618fdf0f9c2fb0804510a14046a004dffd0ff6dfdddfd670183014e071a3f9003000000587bbabf",
+      "expect": {
+        "hist_version": 25,
+        "unix": 1781202814,
+        "rr_intervals": [],
+        "gravity_mag": 1.0
+      }
+    },
+    {
+      "name": "whoop4_v25_real_c",
+      "family": "whoop4",
+      "synthetic": false,
+      "hex": "aa50000c2f1900026800007fff2a6a38390900729103003608a2fd0104850d4f1bd21aa60f080d850edb116b0f160b7d063f06ab04d5041704a4045f04f003f5ffd7ff7efe73ffa8b2333e9003010000fa54e5e9",
+      "expect": {
+        "hist_version": 25,
+        "unix": 1781202815,
+        "rr_intervals": [],
+        "gravity_mag": 1.0
+      }
+    },
+    {
+      "name": "whoop5_v18_real_worn",
+      "family": "whoop5",
+      "synthetic": false,
+      "hex": "aa01740001003fb12f1280733d8401b69f266a66460066025a0265020000000000007b0a8d656463ff0012163cf6a439bf2924fd3ed763fe3e3200aa000000000000000000f7000901f10b0007010c020c00000000000000000000000000000000000000000000000100656f1e1e0000009d61a7c00000003e862817",
+      "expect": {
+        "hist_version": 18,
+        "unix": 1780916150,
+        "heart_rate": 102,
+        "rr_count": 2,
+        "rr_intervals": [602, 613],
+        "skin_temp_raw": 3057,
+        "step_motion_counter": 50,
+        "motion_wear_quality": 0,
+        "activity_class": 0,
+        "record_index": 25443699,
+        "hr_fixed_8_8": 25997,
+        "step_cadence": 170,
+        "status_word": 1792,
+        "status_word_1": 3073,
+        "status_word_2": 3074,
+        "rr_packed": 25444,
+        "cardiac_flags": 0,
+        "cardiac_status": 255,
+        "sleep_state": 0,
+        "wake_quality": 0,
+        "onwrist": 0,
+        "aux_byte_82": 0,
+        "temp_aux_1_raw": 247,
+        "temp_aux_2_raw": 265,
+        "unknown_f32_113": -5.2307,
+        "gravity_mag": 1.0
+      }
+    },
+    {
+      "name": "whoop5_v18_real_one_rr",
+      "family": "whoop5",
+      "synthetic": false,
+      "hex": "aa01740001003fb12f1280753d8401b89f266a664600650153020000000000000000f8018d656365ff80702f3c7b7039bf71f5fd3e142a003f3200aa000000000000000000f7000901f30b0007010c020c0000000000000000000000000000000000000000000000010066701f1e0000005e77a8c00000001194fc6a",
+      "expect": {
+        "hist_version": 18,
+        "unix": 1780916152,
+        "heart_rate": 101,
+        "rr_count": 1,
+        "rr_intervals": [595]
+      }
+    },
+    {
+      "name": "whoop5_v18_real_offwrist",
+      "family": "whoop5",
+      "synthetic": false,
+      "hex": "aa01740001003fb12f12803a3d84018889266a3d0a00000000000000000000000000000000000000000064c33b52b47d3fe1ba1dbda470ecbd000064000000000000000000e500e200c708000c010c020c0000000000000000000000000000000000000000000000010000008080000000000000000000009ffafe6c",
+      "expect": {
+        "hist_version": 18,
+        "unix": 1780910472,
+        "heart_rate": 0,
+        "skin_temp_raw": 2247
+      }
+    },
+    {
+      "name": "whoop5_v18_real_ack_capture",
+      "family": "whoop5",
+      "synthetic": false,
+      "hex": "aa01740001003fb12f1280aaae6f01bea0286ae11a004200000000000000000000b0000084414b38dc80b96c3c717d243dd7638f3ee182773ff6007e00000000000000000026013601a60c5004010c020c00000000000000000000000000000000000000000000010100a27c2521000000bff73ec00000002ce4150a",
+      "expect": {
+        "hist_version": 18,
+        "unix": 1781047486,
+        "heart_rate": 66,
+        "skin_temp_raw": 3238,
+        "temp_aux_1_raw": 294,
+        "temp_aux_2_raw": 310,
+        "status_word_1": 3073,
+        "status_word_2": 3074,
+        "gravity_mag": 1.0
+      }
+    },
+    {
+      "name": "whoop5_v18_real_device2_hr57",
+      "family": "whoop5",
+      "synthetic": false,
+      "hex": "aa01740001003fb12f128093c47c006dbc296a00600039000000000000000000006137020b610000e1e04c063d8fce36bf7b08233f8fea993e38a50000000000000000000019012101920b5002010c020c0100000000000000000000000000000000000000000005010085808080000000a5538ec000000016d0680d",
+      "expect": {
+        "hist_version": 18,
+        "unix": 1781120109,
+        "heart_rate": 57,
+        "onwrist": 1,
+        "wake_quality": 0,
+        "sleep_state": 0,
+        "skin_temp_raw": 2962
+      }
+    },
+    {
+      "name": "whoop5_v18_real_device2_hr63",
+      "family": "whoop5",
+      "synthetic": false,
+      "hex": "aa01740001003fb12f128034d67c000ece296a0a77003f01fc0300000000000000203a0302e30000ff00f8093c1f8534bcc3a5473f4819243f85a6000000000000000000001b012601e80b5003010c020c00000000000000000000000000000000000000000000050100ced7241c0000006ead8cc00000008775b70c",
+      "expect": {
+        "hist_version": 18,
+        "unix": 1781124622,
+        "heart_rate": 63
+      }
+    }
+  ]
+}

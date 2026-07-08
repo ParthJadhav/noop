@@ -113,7 +113,10 @@ class WhoopCsvExporterTest {
                 """{"start":2000003600,"end":2000007200,"stage":"deep"}]""",
         )
         val table = CsvTable.fromData(
-            WhoopCsvExporter.sleepsCsv(listOf(imported, computed)).toByteArray(),
+            WhoopCsvExporter.sleepsCsv(
+                listOf(imported, computed),
+                cycleStart = { com.noop.analytics.AnalyticsEngine.dayString(it.endTs, 0L) + " 00:00:00" },
+            ).toByteArray(),
         )
         val byStart = table.rows.sortedBy { it["sleep_onset"] }
         assertEquals(2, byStart.size)

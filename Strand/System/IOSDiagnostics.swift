@@ -2,6 +2,11 @@ import Foundation
 #if os(iOS)
 import UIKit
 #endif
+#if os(macOS)
+import AppKit
+import IOKit.ps
+import Security
+#endif
 
 // MARK: - IOSDiagnostics
 //
@@ -41,6 +46,13 @@ struct IOSDiagnostics {
             isSideloaded: Self.isSideloadedBuild(),
             sideloadExpiry: Self.provisioningExpiryDate()
         )
+        #elseif os(macOS)
+        return IOSDiagnostics(
+            osVersionString: ProcessInfo.processInfo.operatingSystemVersionString,
+            macOnAC: Self.isOnAC(),
+            macSigned: Self.isSignedAndNotarized(),
+            macSandboxed: Self.isAppSandboxed()
+        )
         #else
         return IOSDiagnostics()
         #endif
@@ -64,6 +76,14 @@ struct IOSDiagnostics {
     var isSideloaded: Bool? = nil
     /// The provisioning profile's expiry date, if a profile is embedded and parseable. nil otherwise.
     var sideloadExpiry: Date? = nil
+
+    /// macOS: true when the Mac is on AC power, false on battery, nil off macOS. Net-new env (spec 3.4).
+    var macOnAC: Bool? = nil
+    /// macOS: best-effort "is this a signed plus notarized build". NOOP's macOS build is intentionally
+    /// unsigned/un-notarized for anonymity, so this is expected false; we report it honestly. nil off macOS.
+    var macSigned: Bool? = nil
+    /// macOS: whether the App Sandbox is in effect (the AI-Coach network-entitlement gate). nil off macOS.
+    var macSandboxed: Bool? = nil
 
     // MARK: Derived
 
@@ -92,10 +112,21 @@ struct IOSDiagnostics {
         if let side = isSideloaded { lines.append("Sideloaded build: \(side ? "yes" : "no (App Store / TestFlight)")") }
         if let days = expiryDaysRemaining() {
             if days < 0 {
-                lines.append("Sideload expiry: EXPIRED \(-days) day\(abs(days) == 1 ? "" : "s") ago — re-sign to relaunch")
+                lines.append("Sideload expiry: EXPIRED \(-days) day\(abs(days) == 1 ? "" : "s") ago - re-sign to relaunch")
             } else {
                 lines.append("Sideload expiry: \(days) day\(days == 1 ? "" : "s") remaining")
             }
+        }
+        return lines
+        #elseif os(macOS)
+        var lines: [String] = []
+        if let os = osVersionString { lines.append("macOS: \(os)") }
+        if let ac = macOnAC { lines.append("Power: \(ac ? "AC (plugged in)" : "battery")") }
+        if let signed = macSigned {
+            lines.append("Signed / notarized: \(signed ? "yes" : "no (unsigned build, Gatekeeper bypass expected)")")
+        }
+        if let sb = macSandboxed {
+            lines.append("App Sandbox: \(sb ? "on (network entitlement gates the AI Coach)" : "off")")
         }
         return lines
         #else
@@ -160,6 +191,46 @@ struct IOSDiagnostics {
         else { return nil }
 
         return plist["ExpirationDate"] as? Date
+    }
+
+    #endif
+
+    // MARK: - macOS-only probes
+
+    #if os(macOS)
+
+    /// True when the Mac is drawing AC power. Best-effort via IOKit power sources; false on battery,
+    /// false if the state can't be read (degrade gracefully, never fabricate).
+    private static func isOnAC() -> Bool {
+        guard let blob = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
+              let sources = IOPSCopyPowerSourcesList(blob)?.takeRetainedValue() as? [CFTypeRef]
+        else { return false }
+        for src in sources {
+            guard let desc = IOPSGetPowerSourceDescription(blob, src)?.takeUnretainedValue()
+                    as? [String: Any] else { continue }
+            if let state = desc[kIOPSPowerSourceStateKey] as? String {
+                return state == kIOPSACPowerValue
+            }
+        }
+        return false
+    }
+
+    /// Honest signing/notarization probe. NOOP's macOS build ships unsigned for anonymity, so this is
+    /// expected to be false; we report what is true rather than claim a state we can't verify.
+    private static func isSignedAndNotarized() -> Bool {
+        // No code signature on an unsigned build: validity fails, so we report a truthful "no".
+        return Bundle.main.executableURL.flatMap { url -> Bool? in
+            var staticCode: SecStaticCode?
+            guard SecStaticCodeCreateWithPath(url as CFURL, [], &staticCode) == errSecSuccess,
+                  let code = staticCode else { return false }
+            let status = SecStaticCodeCheckValidity(code, SecCSFlags(rawValue: 0), nil)
+            return status == errSecSuccess
+        } ?? false
+    }
+
+    /// Whether the App Sandbox is active for this process (presence of the container env marker).
+    private static func isAppSandboxed() -> Bool {
+        ProcessInfo.processInfo.environment["APP_SANDBOX_CONTAINER_ID"] != nil
     }
 
     #endif

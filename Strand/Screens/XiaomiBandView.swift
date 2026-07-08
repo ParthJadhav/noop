@@ -74,8 +74,8 @@ struct XiaomiBandView: View {
         var id: String { rawValue }
         var label: String {
             switch self {
-            case .week: return "W"; case .month: return "M"; case .quarter: return "3M"
-            case .half: return "6M"; case .year: return "1Y"; case .all: return "ALL"
+            case .week: return String(localized: "W"); case .month: return String(localized: "M"); case .quarter: return String(localized: "3M")
+            case .half: return String(localized: "6M"); case .year: return String(localized: "1Y"); case .all: return String(localized: "ALL")
             }
         }
         var days: Int? {
@@ -86,14 +86,14 @@ struct XiaomiBandView: View {
         }
         var caption: String {
             switch self {
-            case .week: return "7 DAYS"; case .month: return "30 DAYS"; case .quarter: return "90 DAYS"
-            case .half: return "180 DAYS"; case .year: return "365 DAYS"; case .all: return "ALL TIME"
+            case .week: return String(localized: "7 DAYS"); case .month: return String(localized: "30 DAYS"); case .quarter: return String(localized: "90 DAYS")
+            case .half: return String(localized: "180 DAYS"); case .year: return String(localized: "365 DAYS"); case .all: return String(localized: "ALL TIME")
             }
         }
         var name: String {
             switch self {
-            case .week: return "week"; case .month: return "month"; case .quarter: return "3 months"
-            case .half: return "6 months"; case .year: return "year"; case .all: return "all history"
+            case .week: return String(localized: "week"); case .month: return String(localized: "month"); case .quarter: return String(localized: "3 months")
+            case .half: return String(localized: "6 months"); case .year: return String(localized: "year"); case .all: return String(localized: "all history")
             }
         }
         var widening: [RangeWindow] {
@@ -224,7 +224,7 @@ struct XiaomiBandView: View {
     private var rangeSummaryCaption: String {
         let anyWidened = Self.seriesKeys.contains { !raw($0).isEmpty && effectiveRange($0) != range }
         let base = range.name
-        return anyWidened ? base + " · some sparse series widened" : base
+        return anyWidened ? String(localized: "\(base) · some sparse series widened") : base
     }
 
     private var spanSubtitle: String? {
@@ -232,7 +232,7 @@ struct XiaomiBandView: View {
         let allDays = series.values.flatMap { $0 }.map(\.day)
         guard let first = allDays.min(), let last = allDays.max(),
               let lo = date(first), let hi = date(last) else {
-            return "Steps, heart rate, sleep, SpO₂ and stress — imported from Mi Fitness, read locally on \(Platform.deviceNounPhrase)."
+            return String(localized: "Steps, heart rate, sleep, SpO₂ and stress, imported from Mi Fitness, read locally on \(Platform.deviceNounPhrase).")
         }
         let loS = Self.spanFormatter.string(from: lo)
         let hiS = Self.spanFormatter.string(from: hi)
@@ -264,8 +264,9 @@ struct XiaomiBandView: View {
                               trailing: Self.nightFormatter.string(from: Date(timeIntervalSince1970: TimeInterval(night.startTs))))
                 ChartCard(
                     title: "Stage breakdown",
-                    subtitle: "\(durationString(Double(night.endTs - night.startTs) / 60)) in bed"
-                        + (night.efficiency.map { " · \(Int($0.rounded()))% efficiency" } ?? ""),
+                    subtitle: night.efficiency.map { eff in
+                        String(localized: "\(durationString(Double(night.endTs - night.startTs) / 60)) in bed · \(Int(eff.rounded()))% efficiency")
+                    } ?? String(localized: "\(durationString(Double(night.endTs - night.startTs) / 60)) in bed"),
                     trailing: durationString(s.asleepMin),
                     height: NoopMetrics.chartHeight,
                     tint: StrandPalette.restColor,
@@ -366,11 +367,11 @@ struct XiaomiBandView: View {
             case .latest:
                 let v = values.last ?? 0
                 value = unit.isEmpty ? fmt(v) : "\(fmt(v)) \(unit)"
-                caption = rows.last.flatMap { date($0.day) }.map { "as of \(Self.asOfFormatter.string(from: $0))" }
+                caption = rows.last.flatMap { date($0.day) }.map { String(localized: "as of \(Self.asOfFormatter.string(from: $0))") }
             case .mean:
                 let m = mean(values) ?? 0
                 value = unit.isEmpty ? fmt(m) : "\(fmt(m)) \(unit)"
-                caption = "avg · \(values.count)d"
+                caption = String(localized: "avg · \(values.count)d")
             }
         }
         return StatTile(
@@ -487,9 +488,14 @@ struct XiaomiBandView: View {
         let rows = resolvedWindow(key)
         let eff = effectiveRange(key)
         let n = rows.count
-        let unit = n == 1 ? "reading" : "readings"
-        if eff != range { return "\(n) \(unit) · sparse — widened to \(eff.name)" }
-        return "\(n) \(unit) · \(range.name)"
+        if eff != range {
+            return n == 1
+                ? String(localized: "1 reading · sparse, widened to \(eff.name)")
+                : String(localized: "\(n) readings · sparse, widened to \(eff.name)")
+        }
+        return n == 1
+            ? String(localized: "1 reading · \(range.name)")
+            : String(localized: "\(n) readings · \(range.name)")
     }
 
     /// Cap a dense daily series to ~`max` points for charting. A year/all-time window holds
@@ -553,6 +559,6 @@ struct XiaomiBandView: View {
     private func durationString(_ minutes: Double) -> String {
         let total = Int(minutes.rounded())
         let h = total / 60, m = total % 60
-        return h > 0 ? "\(h)h \(m)m" : "\(m)m"
+        return h > 0 ? String(localized: "\(h)h \(m)m") : String(localized: "\(m)m")
     }
 }

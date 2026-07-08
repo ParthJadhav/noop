@@ -7,7 +7,7 @@ import SwiftUI
 // `TimeOfDayBackground` on the HERO only — the scene IS the atmosphere there now — while the rest of
 // the screen stays on the flat canvas.
 //
-// HARD RULES honoured here (Aaron, standing):
+// HARD RULES honoured here (standing):
 //  - NO GLOW / no bloom / no blur halos. The scene is a flat image masked by a linear gradient.
 //  - SUBTLE: the image caps at ~0.42 opacity so it reads as an atmospheric wash, never a literal photo.
 //    A faint bottom-up dark scrim under the ring content keeps the white ring numbers + labels crisp
@@ -121,7 +121,7 @@ public struct SceneHeroBackground: View {
 // MARK: - Scene SCREEN background — the scene as the PAGE backdrop (cards float OVER it)
 
 /// The day-cycle scene anchored to the TOP of the SCREEN, behind the header + hero card — so it "forms
-/// part of the background" and the cards sit OVER it (Aaron's direction). Aspect-filled to the full width,
+/// part of the background" and the cards sit OVER it (the design direction). Aspect-filled to the full width,
 /// top-aligned (sky shows), fading into the canvas over its lower portion so it dissolves before the
 /// dashboard cards. A faint dark scrim under the very top keeps white header text legible on a bright sky.
 /// Place it edge-to-edge as a top-anchored screen background (the caller ignores safe area). No glow.
@@ -135,7 +135,7 @@ public struct SceneScreenBackground: View {
         self.height = height
     }
 
-    /// Backdrop opacity — near-full so the scene reads VIVIDLY (Aaron). The dark hero CARD floating over it
+    /// Backdrop opacity, near-full so the scene reads VIVIDLY (by design). The dark hero CARD floating over it
     /// is what keeps the rings/data legible, so the scene itself doesn't need to be muted.
     private let imageOpacityCap: Double = 0.95
 
@@ -160,7 +160,7 @@ public struct SceneScreenBackground: View {
             )
             .opacity(imageOpacityCap)
             // A whisper of dark under the very top for header legibility — kept light so the scene reads at
-            // near-full vividness (Aaron wants ~95%, not muted).
+            // near-full vividness (the design calls for ~95%, not muted).
             .overlay(
                 LinearGradient(
                     colors: [StrandPalette.surfaceBase.opacity(0.12), .clear],

@@ -195,6 +195,61 @@ public enum HRVAnalyzer {
                          nInput: nInput, nClean: clean.count)
     }
 
+    // MARK: - Rolling / windowed rMSSD timeline (#803)
+
+    /// One windowed rMSSD point: the rMSSD (ms) over the trailing `windowSec` of R-R intervals ending at
+    /// `ts` (wall-clock unix seconds). This is an HONEST windowed rMSSD, NOT a single "HRV" number for the
+    /// night - the .hrv timeline plots a point per emitted window so an autonomic-tone report (#803) shows
+    /// rMSSD MOVING across the session instead of one opaque figure.
+    public struct RollingRmssdPoint: Equatable, Sendable {
+        /// Wall-clock unix seconds of the last R-R interval folded into this window (the window's right edge).
+        public let ts: Int
+        /// rMSSD (ms) over the cleaned R-R intervals inside the trailing window.
+        public let rmssd: Double
+        public init(ts: Int, rmssd: Double) { self.ts = ts; self.rmssd = rmssd }
+    }
+
+    /// Pure rolling/windowed rMSSD over an R-R series (#803). For each input interval, the window is the
+    /// trailing `windowSec` seconds ending at that interval's `ts`; the window's R-R values are cleaned with
+    /// the SAME range filter + Malik ectopic rejection the nightly path uses (`cleanRR`), and a point is
+    /// emitted only when at least `minBeatsPerWindow` clean intervals survive (so a sparse / artifact-heavy
+    /// window emits nothing rather than a noisy spike). The result is one `(ts, rMSSD)` per qualifying
+    /// window, in input order.
+    ///
+    /// - Parameters:
+    ///   - rr: the R-R intervals (each carries its own wall-clock `ts` and `rrMs`). Need not be pre-sorted;
+    ///     sorted ascending by `ts` internally so the trailing window is well-defined.
+    ///   - windowSec: the trailing window width in seconds (e.g. 120 for a 2-minute rMSSD).
+    ///   - stepSec: emit at most one point per this many seconds of advance (a thinning stride so a 1 Hz
+    ///     stream does not emit a point per beat). 0 (the default) emits a point at every interval.
+    ///   - minBeatsPerWindow: minimum clean intervals a window needs to emit a point. Defaults to a small
+    ///     floor (8) because a short window legitimately holds far fewer beats than the nightly `minBeats`.
+    public static func rollingRmssd(rr: [RRInterval],
+                                    windowSec: Int,
+                                    stepSec: Int = 0,
+                                    minBeatsPerWindow: Int = 8) -> [RollingRmssdPoint] {
+        guard windowSec > 0, rr.count >= minBeatsPerWindow else { return [] }
+        let sorted = rr.sorted { $0.ts < $1.ts }
+        var out: [RollingRmssdPoint] = []
+        var lastEmitTs: Int? = nil
+        var left = 0   // index of the oldest interval still inside the trailing window
+        for right in 0..<sorted.count {
+            let edgeTs = sorted[right].ts
+            // Advance the left edge so [left, right] spans only the trailing `windowSec` ending at edgeTs.
+            while left < right && edgeTs - sorted[left].ts > windowSec { left += 1 }
+            // Thinning stride: skip emitting until at least `stepSec` has passed since the last emitted point.
+            if stepSec > 0, let last = lastEmitTs, edgeTs - last < stepSec { continue }
+            // Clean the window's raw R-R values with the shared range + Malik ectopic pipeline, then
+            // require enough survivors before trusting a windowed rMSSD.
+            let windowRaw = sorted[left...right].map { Double($0.rrMs) }
+            let clean = cleanRR(windowRaw)
+            guard clean.count >= minBeatsPerWindow, let r = rmssdRaw(clean) else { continue }
+            out.append(RollingRmssdPoint(ts: edgeTs, rmssd: r))
+            lastEmitTs = edgeTs
+        }
+        return out
+    }
+
     // MARK: - Helpers
 
     /// Median of a non-empty array. (Caller guarantees non-empty.)

@@ -12,9 +12,12 @@
 # the end user signs it on-device with their own free Apple ID (AltStore / SideStore /
 # Sideloadly). So no Apple Developer identity ever touches the project or the builder.
 #
-#     xcodebuild -scheme NOOPiOS -configuration Release -sdk iphoneos \
+#     xcodebuild -scheme NOOPiOS -configuration Release -destination 'generic/platform=iOS' \
 #         -derivedDataPath build/ios-dd CODE_SIGNING_ALLOWED=NO build
 #     Tools/anonymize-ios-app.sh build/ios-dd/Build/Products/Release-iphoneos/NOOP.app
+#
+# os.walk below recurses the WHOLE bundle, so the embedded watch app (NOOP.app/Watch/NOOPWatch.app)
+# and its complication .appex are scrubbed and residual-checked along with everything else.
 #
 # The replacement is the SAME byte length as the original path, so all Mach-O offsets stay
 # valid; only the read-only string section changes. The script reads $HOME at runtime and

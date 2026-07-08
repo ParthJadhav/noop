@@ -148,6 +148,21 @@ public enum DaytimeStress {
     /// Returns `.empty` when there isn't a single hour with enough HR to score.
     public static func analyze(hr: [HRSample], rr: [RRInterval],
                                tzOffsetSeconds: Int = 0) -> Result {
+        // v7.0.2 perf (#707): buckets the day's full HR + R-R streams into per-hour aggregates and runs an
+        // RMSSD per hour — invoked from the Stress view, so a `body` re-evaluation re-buckets the whole day.
+        // Memoize on the streams' fingerprint + tz offset; result is a small `Result`, raw arrays not held.
+        let key = StressKey(
+            hr: StreamFingerprint.of(hr, ts: { $0.ts }, quant: { Int($0.bpm) }),
+            rr: StreamFingerprint.of(rr, ts: { $0.ts }, quant: { Int($0.rrMs) }),
+            tz: tzOffsetSeconds)
+        return analyzeCache.value(key) { analyzeUncached(hr: hr, rr: rr, tzOffsetSeconds: tzOffsetSeconds) }
+    }
+
+    private struct StressKey: Hashable { let hr: StreamFingerprint; let rr: StreamFingerprint; let tz: Int }
+    private static let analyzeCache = AnalyticsMemoCache<StressKey, Result>(capacity: 8)
+
+    private static func analyzeUncached(hr: [HRSample], rr: [RRInterval],
+                                        tzOffsetSeconds: Int) -> Result {
         guard !hr.isEmpty else { return .empty }
 
         // 1) Bucket HR + R-R into LOCAL hour-of-day buckets, keyed by the bucket start

@@ -193,7 +193,7 @@ object CaptureImporter {
             append(".")
             if (parsed.skipped > 0) append(" Skipped ${parsed.skipped} unrecognised frame(s).")
             if (rejectCount > 0) append(" Archived $rejectCount undecodable frame(s) for a future decoder.")
-            if (parsed.truncated) append(" File was very large — imported the first ${MAX_FRAMES} frames only.")
+            if (parsed.truncated) append(" File was very large - imported the first ${MAX_FRAMES} frames only.")
         }
         return ImportSummary(SOURCE_LABEL, counts, first, last, message)
     }

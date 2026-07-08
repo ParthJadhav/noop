@@ -490,6 +490,82 @@ final class SleepStagerTests: XCTestCase {
         XCTAssertNotEqual(withLowRmssd, "deep", "a measurable-but-low RMSSD epoch must still clear the high-tone bar")
     }
 
+    // #705: a still, low-HR sleep epoch with INFLATED HR-variance (hrVar ≥ the high bar) but a normal HR
+    // (below hrHigh) and a touch of movement used to be flipped to WAKE on a WHOOP 5/MG night, because the
+    // PPG-derived HR makes per-epoch hrVar noisy and the WAKE rule trusted hrvarHigh as cardiac activation.
+    // On a sparse/PPG night the WAKE rule must vet the cardiac half by HR only (down-weight hrVar), so the
+    // epoch stays sleep. A dense 4.0 night (cardiacSparse:false) keeps the original hrHigh||hrvarHigh signal.
+    private func ppgWakeEpoch() -> SleepStager.EpochFeatures {
+        // moveFrac just over the wake bar (0.15), HR normal (60, below hrHi=90, above hrLo=55 so not deep),
+        // hrVar inflated above the high bar, missing R-R (sparse → resp also NaN → regular).
+        SleepStager.EpochFeatures(index: 0, midTs: 0, count: 0, moveFrac: 0.16,
+                                  ckSleep: true, hr: 60, hrVar: 200, rmssd: .nan, sdnn: 0,
+                                  respRate: 14, rrv: .nan, clock: 0.5)
+    }
+
+    func testSparseCardiacDoesNotPromoteStillSleepToWakeOnHrVarAlone_705() {
+        // Dense path: hrvarHigh alone clears the WAKE cardiac bar → this epoch reads wake (old behaviour).
+        let dense = SleepStager.classifyOne(ppgWakeEpoch(),
+            hrLo: 55, hrHi: 90, rmssdHi: 50, hrvarHi: 100, rrvHi: 1, rrvLo: 0.5,
+            cardiacSparse: false)
+        XCTAssertEqual(dense, "wake", "dense 4.0 night keeps the full hrHigh||hrvarHigh wake signal")
+
+        // Sparse/PPG path: the noisy hrVar is down-weighted for the wake promotion → no longer wake.
+        let sparse = SleepStager.classifyOne(ppgWakeEpoch(),
+            hrLo: 55, hrHi: 90, rmssdHi: 50, hrvarHi: 100, rrvHi: 1, rrvLo: 0.5,
+            cardiacSparse: true)
+        XCTAssertNotEqual(sparse, "wake", "a sparse/PPG night must not flip still low-HR sleep to wake on hrVar alone")
+    }
+
+    func testCardiacSparseFlagFiresOnMostlyMissingRmssd_705() {
+        // A night where >= half the sleep epochs carry no finite RMSSD is PPG-derived / sparse-cardiac.
+        let withRR = SleepStager.EpochFeatures(index: 0, midTs: 0, count: 0, moveFrac: 0, ckSleep: true,
+            hr: 55, hrVar: 0, rmssd: 40, sdnn: 0, respRate: 14, rrv: .nan, clock: 0.5)
+        let noRR = SleepStager.EpochFeatures(index: 0, midTs: 0, count: 0, moveFrac: 0, ckSleep: true,
+            hr: 55, hrVar: 0, rmssd: .nan, sdnn: 0, respRate: 14, rrv: .nan, clock: 0.5)
+        XCTAssertTrue(SleepStager.isCardiacSparse([noRR, noRR, noRR, withRR]),
+            "3/4 epochs missing R-R is sparse-cardiac")
+        XCTAssertFalse(SleepStager.isCardiacSparse([withRR, withRR, withRR, noRR]),
+            "1/4 epochs missing R-R is a dense (4.0-style) night")
+        XCTAssertFalse(SleepStager.isCardiacSparse([]), "empty session is not sparse")
+    }
+
+    // #705 (golden): a still PPG night used to score mostly WAKE because the noisy PPG-derived hrVar
+    // tripped the high hrVar bar on still, low-HR sleep epochs and the WAKE rule treated that as cardiac
+    // activation. We classify a batch of such epochs with FIXED session bars (deterministic — same shape
+    // as the #127 tests) under both rules. On the dense rule the over-wake reproduces; with the
+    // sparse-cardiac gate the WAKE share collapses while the elevated-HR awakenings still read wake.
+    func testStillPpgNightNoLongerScoresMostlyWake_705() {
+        // Fixed bars: hrLo=48, hrHi=70, hrvarHi=120. A still, low-HR (52) epoch with a touch of motion
+        // (0.16) and inflated hrVar (200) — no finite R-R/resp. 9/10 such, 1/10 a real HR-elevated wake.
+        func epoch(hr: Double, hrVar: Double) -> SleepStager.EpochFeatures {
+            SleepStager.EpochFeatures(index: 0, midTs: 0, count: 0, moveFrac: 0.16,
+                                      ckSleep: true, hr: hr, hrVar: hrVar, rmssd: .nan, sdnn: 0,
+                                      respRate: 14, rrv: .nan, clock: 0.5)
+        }
+        let night: [SleepStager.EpochFeatures] = (0..<40).map { i in
+            (i % 10 == 9) ? epoch(hr: 80, hrVar: 200)   // genuine elevated-HR awakening
+                          : epoch(hr: 52, hrVar: 200)   // still, low-HR sleep with noisy PPG hrVar
+        }
+        let bars = (hrLo: 48.0, hrHi: 70.0, rmssdHi: 50.0, hrvarHi: 120.0, rrvHi: 1.0, rrvLo: 0.5)
+
+        func wakeShare(cardiacSparse: Bool) -> Double {
+            let labels = night.map {
+                SleepStager.classifyOne($0, hrLo: bars.hrLo, hrHi: bars.hrHi, rmssdHi: bars.rmssdHi,
+                                        hrvarHi: bars.hrvarHi, rrvHi: bars.rrvHi, rrvLo: bars.rrvLo,
+                                        cardiacSparse: cardiacSparse)
+            }
+            return Double(labels.filter { $0 == "wake" }.count) / Double(labels.count)
+        }
+
+        // Dense rule reproduces the bug: almost the whole night reads wake (hrvarHigh alone promotes).
+        XCTAssertGreaterThan(wakeShare(cardiacSparse: false), 0.80,
+            "dense rule still over-reports wake on a noisy-hrVar night (reproduces #705)")
+        // Sparse-cardiac gate: only the real HR-elevated awakenings stay wake (~10%).
+        XCTAssertLessThan(wakeShare(cardiacSparse: true), 0.40,
+            "a still PPG night must not be classified as mostly wake (was 40%+ before #705)")
+    }
+
     // #127 (follow-up): the "deep is front-loaded" re-imposition zeroed deep entirely on nights whose
     // whole deep block lands after the first third (clock > 1/3). It must only re-impose late "deep" to
     // light when there's deep in the first third to anchor it; otherwise keep the best estimate.
@@ -873,6 +949,70 @@ final class SleepStagerTests: XCTestCase {
     func testSessionEpochMotionEmptyWhenNoGravity() {
         // Too little gravity to grid → [] so the caller persists NULL, never a fabricated zero series.
         XCTAssertTrue(SleepStager.sessionEpochMotion(start: 0, end: 1800, grav: []).isEmpty)
+    }
+
+    // MARK: - #175 per-session band sleep_state gridding (persisted beside stagesJSON)
+
+    func testSessionEpochSleepStateGridsOnePerEpoch() {
+        // 90-min session at 1 sample/30 s all "asleep" (2) → 180 epochs, all 2, on the same grid as staging.
+        let start = 1_000_000
+        let dur = 90 * 60
+        var band: [(ts: Int, state: Int)] = []
+        for i in 0..<(dur / 30) { band.append((ts: start + i * 30, state: 2)) }
+        let states = SleepStager.sessionEpochSleepState(start: start, end: start + dur, sleepState: band)
+        XCTAssertEqual(states.count, 180, "one band-state value per 30 s epoch (matches sessionEpochMotion)")
+        XCTAssertTrue(states.allSatisfy { $0 == 2 }, "an all-asleep band grids to all-asleep epochs")
+    }
+
+    func testSessionEpochSleepStateCarriesForwardAndVerbatim() {
+        // A sparse band that flips wake(0)→asleep(2)→up(3): each epoch takes the last in-window state and
+        // carries it forward across empty epochs. state 0 is a REAL wake reading, carried verbatim.
+        let start = 0
+        let dur = 6 * 30                       // 6 epochs
+        let band: [(ts: Int, state: Int)] = [
+            (ts: 0, state: 0),                 // epoch 0 → 0 (wake)
+            (ts: 75, state: 2),                // epoch 2 → 2 (asleep); epoch 1 carries 0 forward
+            (ts: 160, state: 3),               // epoch 5 → 3 (up); epochs 3,4 carry 2 forward
+        ]
+        let states = SleepStager.sessionEpochSleepState(start: start, end: start + dur, sleepState: band)
+        XCTAssertEqual(states, [0, 0, 2, 2, 2, 3], "last-in-epoch wins; empty epochs carry forward; 0 kept")
+    }
+
+    func testSessionEpochSleepStateEmptyWhenNoBandSamples() {
+        // No band samples in the window → [] so the caller persists NULL (a WHOOP 4.0 / unbanded window),
+        // never a fabricated array. This is what keeps the derived-only path intact for straps without it.
+        XCTAssertTrue(SleepStager.sessionEpochSleepState(start: 0, end: 1800, sleepState: []).isEmpty)
+        // Samples entirely outside the window are also ignored.
+        let far: [(ts: Int, state: Int)] = [(ts: 9_000, state: 2)]
+        XCTAssertTrue(SleepStager.sessionEpochSleepState(start: 0, end: 1800, sleepState: far).isEmpty)
+    }
+
+    func testSessionGridFeedsTheReonsetGuardEndToEnd() {
+        // The FULL #175 consume chain, as a unit: an "asleep"-banded morning block grids to a per-session
+        // state array (what IntelligenceEngine persists via persistSessionSleepState), which — expanded back
+        // to (startTs + i·30, state) samples exactly as IntelligenceEngine.bandSleepStateSamples does — makes
+        // the H7 re-onset CONFIRM guard KEEP a borderline-HR block it would otherwise reject. This is the
+        // dormant guard the missing stream starved; it never overrides the derived stage, only confirms.
+        let p = daytimePeriod(9, durMin: 120)         // 120-min morning block → 240 epochs (clears the 90-min bar)
+        let wakeEnd = startAtHour(8)
+        // The strap banked this block predominantly "asleep" (2).
+        var band: [(ts: Int, state: Int)] = []
+        for i in 0..<240 { band.append((ts: p.start + i * 30, state: 2)) }
+
+        // 1) Grid it per session (the persist-ready array).
+        let states = SleepStager.sessionEpochSleepState(start: p.start, end: p.end, sleepState: band)
+        XCTAssertEqual(states.count, 240)
+        XCTAssertTrue(states.allSatisfy { $0 == 2 })
+
+        // 2) Expand back to timestamped samples the way the H7 read path does (startTs + i·epochS).
+        let epochS = 30
+        let reconstructed = states.enumerated().map { (ts: p.start + $0.offset * epochS, state: $0.element) }
+
+        // 3) The guard now CONFIRMS the borderline-HR re-onset (74 > 0.90×80=72 would otherwise reject).
+        XCTAssertTrue(
+            SleepStager.passesMorningStillnessGuard(p, restingHR: 74, baseline: 80,
+                                                    morningWakeEnd: wakeEnd, bandSleepState: reconstructed),
+            "the persisted+re-expanded band grid drives the H7 confirm end to end")
     }
 
     // MARK: - REM-funnel diagnostic (#688)

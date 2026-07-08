@@ -17,7 +17,11 @@ struct WhatsNewView: View {
                 }
             Divider().overlay(StrandPalette.hairline)
             ScrollView {
-                VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
+                // PERF: the changelog grows with every release, so this is an ever-lengthening column.
+                // LazyVStack (byte-identical layout to VStack inside a ScrollView — same leading
+                // alignment + sectionGap spacing) builds the off-screen release cards on demand instead
+                // of constructing the entire history up-front each time the sheet opens.
+                LazyVStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
                     expectationsCard
                     ForEach(Array(AppChangelog.releases.enumerated()), id: \.element.id) { index, release in
                         // The newest release is the headline — give it the brand-green wash; the

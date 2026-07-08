@@ -61,6 +61,18 @@ interface WhoopDao : DeviceRegistryDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertSteps(rows: List<StepSample>): List<Long>
 
+    /** The strap's OWN band sleep_state per record (#175). Idempotent by (deviceId, ts). */
+    @Insert(onConflict = OnConflictStrategy.IGNORE)
+    suspend fun insertSleepState(rows: List<SleepStateSampleEntity>): List<Long>
+
+    /** Upsert one Live Session (v22). Natural key (deviceId, startTs) — start (endTs null) then end. */
+    @Upsert
+    suspend fun upsertLiveSession(row: LiveSessionRow)
+
+    /** Most-recent Live Sessions first, for the look-back summary + streak. */
+    @Query("SELECT * FROM liveSession WHERE deviceId = :deviceId ORDER BY startTs DESC LIMIT :limit")
+    suspend fun recentLiveSessions(deviceId: String, limit: Int): List<LiveSessionRow>
+
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertResp(rows: List<RespSample>): List<Long>
 
@@ -256,6 +268,14 @@ interface WhoopDao : DeviceRegistryDao {
     )
     suspend fun stepSamples(deviceId: String, from: Long, to: Long, limit: Int): List<StepSample>
 
+    /** The strap's OWN banked band sleep_state (#175) in [from, to], ascending. Feeds the Deep Timeline
+     *  band-state track and the per-session grid the H7 re-onset confirm guard reads. */
+    @Query(
+        "SELECT * FROM sleepStateSample WHERE deviceId = :deviceId AND ts >= :from AND ts <= :to " +
+            "ORDER BY ts ASC LIMIT :limit"
+    )
+    suspend fun sleepStateSamples(deviceId: String, from: Long, to: Long, limit: Int): List<SleepStateSampleEntity>
+
     @Query(
         "SELECT * FROM respSample WHERE deviceId = :deviceId AND ts >= :from AND ts <= :to " +
             "ORDER BY ts ASC LIMIT :limit"
@@ -297,6 +317,17 @@ interface WhoopDao : DeviceRegistryDao {
     /** Reactive stream of all daily metrics for a device, oldest first. */
     @Query("SELECT * FROM dailyMetric WHERE deviceId = :deviceId ORDER BY day ASC")
     fun daysFlow(deviceId: String): Flow<List<DailyMetric>>
+
+    /**
+     * #797: the most-recent [limit] daily metrics for a device, returned oldest-first. Backs the bounded
+     * dashboard merge: the SQL takes the newest rows (ORDER BY day DESC LIMIT), and the repository flips
+     * them to ascending so every downstream consumer sees the SAME oldest-first order as [daysFlow]. A
+     * generous bound (the repository's RECENT_DAYS_CAP) keeps every current surface intact (Trends' deepest
+     * view, Fitness Age / Vitality 7-day windows) while a years-deep import no longer re-merges the WHOLE
+     * history on every DB change.
+     */
+    @Query("SELECT * FROM dailyMetric WHERE deviceId = :deviceId ORDER BY day DESC LIMIT :limit")
+    fun recentDaysFlow(deviceId: String, limit: Int): Flow<List<DailyMetric>>
 
     @Query(
         "SELECT * FROM sleepSession WHERE deviceId = :deviceId AND startTs >= :from AND startTs <= :to " +
@@ -505,9 +536,17 @@ interface WhoopDao : DeviceRegistryDao {
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertDismissedSleep(rows: List<DismissedSleep>)
 
-    /** All deleted-sleep markers for a [deviceId] (the computed "<id>-noop" source the engine writes). */
+    /** All deleted-sleep markers for a [deviceId]. The engine reads the UNION of the imported id and its
+     *  computed "<id>-noop" id (see WhoopRepository.dismissedSleeps, #65 3A), since a tombstone is written
+     *  under whichever namespace owned the deleted row. */
     @Query("SELECT * FROM dismissedSleep WHERE deviceId = :deviceId")
     suspend fun dismissedSleeps(deviceId: String): List<DismissedSleep>
+
+    /** Lift ONE deleted-sleep tombstone (#65 undo / "allow re-detection"): removes the marker so the
+     *  night is re-detected from raw on the next analyze pass. Keyed by (deviceId, startTs): the same
+     *  natural key the insert uses, so it removes exactly the tombstone [deleteSleepSession] wrote. */
+    @Query("DELETE FROM dismissedSleep WHERE deviceId = :deviceId AND startTs = :startTs")
+    suspend fun deleteDismissedSleep(deviceId: String, startTs: Long)
 
     // MARK: - Frontier / stats (Reads.swift)
 
@@ -524,6 +563,9 @@ interface WhoopDao : DeviceRegistryDao {
     suspend fun latestHrSampleTs(deviceId: String): Long?
 
     @Query("SELECT COUNT(*) FROM hrSample") suspend fun countHr(): Int
+    // #836: max raw-HR timestamp across all devices. Paired with countHr() as a cheap whole-history change
+    // fingerprint so the 15-min idle rescore can skip when nothing new has landed (COALESCE → 0 when empty).
+    @Query("SELECT COALESCE(MAX(ts), 0) FROM hrSample") suspend fun maxHrTs(): Long
     @Query("SELECT COUNT(*) FROM rrInterval") suspend fun countRr(): Int
     @Query("SELECT COUNT(*) FROM event") suspend fun countEvents(): Int
     @Query("SELECT COUNT(*) FROM battery") suspend fun countBattery(): Int

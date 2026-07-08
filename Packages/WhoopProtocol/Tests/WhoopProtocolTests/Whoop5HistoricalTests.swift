@@ -172,6 +172,50 @@ final class Whoop5HistoricalTests: XCTestCase {
         }
     }
 
+    // MARK: - #175 band sleep_state STREAM extraction (decode → extractHistoricalStreams row)
+
+    func testHistoricalV18SleepStateReachesStream() {
+        // #175: the decoded band sleep_state must now survive extractHistoricalStreams as a
+        // SleepStateSample row (it was decoded but DROPPED before). On the REAL worn daytime fixture the
+        // band reads 0 (wake) — the only value we have ever captured — and that 0 is carried verbatim
+        // (0 is a real wake reading, NOT "absent"), stamped at the record's own unix (1780916150).
+        let f = parseFrame(bytes(historicalHex), family: .whoop5)
+        let s = extractHistoricalStreams([f], deviceClockRef: 1780916150, wallClockRef: 1780916150)
+        XCTAssertEqual(s.sleepState, [SleepStateSample(ts: 1780916150, state: 0)],
+                       "the real worn fixture's band wake state (0) must reach the stream")
+    }
+
+    /// Set frame byte @index and RE-STAMP the WHOOP5 CRC32 trailer so the mutated frame still passes the
+    /// extractor's CRC gate (unlike the parse-only tests, extractHistoricalStreams drops CRC-failed frames,
+    /// which is correct). WHOOP5: declaredLength@2 (payload+4 trailer), total = len+8, payload = [8, total-4),
+    /// CRC32 stored LE at total-4.
+    private func mutatingCRCValid(_ index: Int, to value: UInt8) -> [UInt8] {
+        var b = bytes(historicalHex)
+        b[index] = value
+        let declaredLength = Int(b[2]) | (Int(b[3]) << 8)
+        let total = declaredLength + 8
+        let payloadEnd = total - 4
+        let crc = crc32(b, 8, payloadEnd)
+        b[payloadEnd] = UInt8(crc & 0xFF)
+        b[payloadEnd + 1] = UInt8((crc >> 8) & 0xFF)
+        b[payloadEnd + 2] = UInt8((crc >> 16) & 0xFF)
+        b[payloadEnd + 3] = UInt8((crc >> 24) & 0xFF)
+        return b
+    }
+
+    func testHistoricalV18SleepStateStreamCarriesEachNibble() {
+        // The non-zero codes come only from an in-memory byte override (we hold NO real sleeping-night
+        // capture), so this proves the PLUMBING carries whatever the band reports — it does NOT assert
+        // the code meanings against real data. The CRC is re-stamped so the extractor's CRC gate passes.
+        for (raw, expected) in [(0x10, 1), (0x20, 2), (0x30, 3)] {
+            let f = parseFrame(mutatingCRCValid(81, to: UInt8(raw)), family: .whoop5)
+            XCTAssertEqual(f.crcOK, true, "the re-stamped frame must pass CRC (raw 0x\(String(raw, radix: 16)))")
+            let s = extractHistoricalStreams([f], deviceClockRef: 1780916150, wallClockRef: 1780916150)
+            XCTAssertEqual(s.sleepState, [SleepStateSample(ts: 1780916150, state: expected)],
+                           "band code \(expected) must reach the stream (raw 0x\(String(raw, radix: 16)))")
+        }
+    }
+
     func testHistoricalV18SkinTempTracksWristContact() {
         // Proof @73 is the real skin-temp sensor: worn it reads skin; off-wrist the same sensor reads a
         // cooler ambient value — both pass the guard, so a valid-but-cooler off-wrist reading is still
@@ -189,7 +233,8 @@ final class Whoop5HistoricalTests: XCTestCase {
     func testHeartRateOffsetIsNotTheNaivePlusFour() {
         // Guard the firmware caveat: v18 HR is at offset 22, NOT v24's 21+4=25. If a future change
         // wrongly reuses the 4.0 v24 layout at +4, this fails instead of silently shipping HR=0.
-        let f = parseFrame(bytes(historicalHex), family: .whoop5)
+        // collectFields: the annotated fields array is opt-in diagnostics (D#742).
+        let f = parseFrame(bytes(historicalHex), family: .whoop5, collectFields: true)
         XCTAssertEqual(f.fields.first { $0.name == "heart_rate" }?.off, 22)
         XCTAssertNotEqual(f.fields.first { $0.name == "heart_rate" }?.off, 25)
     }

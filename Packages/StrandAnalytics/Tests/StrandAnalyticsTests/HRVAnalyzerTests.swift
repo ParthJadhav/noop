@@ -80,7 +80,7 @@ final class HRVAnalyzerTests: XCTestCase {
         XCTAssertEqual(gated.nInput, 40)
         XCTAssertEqual(gated.nClean, 0)   // empty() reports no clean beats on refusal
 
-        // SAME beats with NO gate (nil) still produce a value — 24 clean ≥ minBeats. Proves the gate is
+        // SAME beats with NO gate (nil) still produce a value , 24 clean ≥ minBeats. Proves the gate is
         // the only thing rejecting it, not the beat count.
         let ungated = HRVAnalyzer.analyze(rawRR: rr)
         XCTAssertEqual(ungated.nClean, 24)
@@ -98,7 +98,7 @@ final class HRVAnalyzerTests: XCTestCase {
 
     func testNightlyWindowedRMSSDUnchangedWithDefaultedGate() {
         // The nightly windowed analyze(_:windowStart:windowEnd:) passes NO maxRejectedFraction, so the
-        // gate is skipped and the result is byte-identical to analyze(rawRR:) on the same beats — even
+        // gate is skipped and the result is byte-identical to analyze(rawRR:) on the same beats , even
         // when the series WOULD trip a spot gate (here 0.40 rejected). Overnight HRV must not move (#585).
         var rr: [RRInterval] = []
         for t in 0..<24 { rr.append(RRInterval(ts: 1000 + t, rrMs: 800)) }   // 24 valid 800 ms
@@ -112,6 +112,68 @@ final class HRVAnalyzerTests: XCTestCase {
         XCTAssertEqual(windowed.rmssd!, raw.rmssd!, accuracy: 1e-12)
         XCTAssertEqual(windowed.sdnn ?? .nan, raw.sdnn ?? .nan, accuracy: 1e-12)
         XCTAssertEqual(windowed.nClean, raw.nClean)
+    }
+
+    // MARK: - #803 rolling / windowed rMSSD timeline
+
+    func testRollingRmssdEmitsWindowedTimelineWithKnownValue() {
+        // A clean 1 Hz R-R series oscillating 800/810 ms. Over any trailing window the successive diffs
+        // alternate ±10, so rMSSD = sqrt(mean(10^2)) = 10 ms. We build 60 beats (1 s apart) and ask for a
+        // 30 s trailing window; every emitted point must read ~10 ms.
+        var rr: [RRInterval] = []
+        for t in 0..<60 { rr.append(RRInterval(ts: 1000 + t, rrMs: t.isMultiple(of: 2) ? 800 : 810)) }
+        let pts = HRVAnalyzer.rollingRmssd(rr: rr, windowSec: 30, stepSec: 0, minBeatsPerWindow: 8)
+        XCTAssertFalse(pts.isEmpty, "a dense clean stream must yield a windowed timeline")
+        // The first ~7 beats can't fill minBeatsPerWindow(8); once the window holds >= 8 beats every point
+        // is the steady ±10 oscillation → 10 ms rMSSD.
+        for p in pts { XCTAssertEqual(p.rmssd, 10.0, accuracy: 1e-9) }
+        // Right edge of each point is a real interval timestamp inside the series, and points are time-ordered.
+        XCTAssertTrue(pts.allSatisfy { $0.ts >= 1000 && $0.ts <= 1059 })
+        XCTAssertEqual(pts.map { $0.ts }, pts.map { $0.ts }.sorted())
+    }
+
+    func testRollingRmssdStepThinsEmission() {
+        // Same 60-beat 1 Hz stream, but a 10 s stride: points must be at least 10 s apart, so far fewer
+        // than one-per-beat are emitted while the value stays the steady 10 ms.
+        var rr: [RRInterval] = []
+        for t in 0..<60 { rr.append(RRInterval(ts: 1000 + t, rrMs: t.isMultiple(of: 2) ? 800 : 810)) }
+        let dense = HRVAnalyzer.rollingRmssd(rr: rr, windowSec: 30, stepSec: 0, minBeatsPerWindow: 8)
+        let thinned = HRVAnalyzer.rollingRmssd(rr: rr, windowSec: 30, stepSec: 10, minBeatsPerWindow: 8)
+        XCTAssertLessThan(thinned.count, dense.count, "a stride must emit fewer points than every-beat")
+        // Adjacent emitted points are >= stepSec apart.
+        for i in 1..<thinned.count { XCTAssertGreaterThanOrEqual(thinned[i].ts - thinned[i - 1].ts, 10) }
+    }
+
+    func testRollingRmssdCleansArtifactWindows() {
+        // A steady 800 ms stream with one impossible 1400 ms spike. The Malik ectopic filter drops the
+        // spike inside whatever window holds it, so no point spikes , every emitted rMSSD is 0 (all-800
+        // survivors have no successive difference).
+        var rr: [RRInterval] = []
+        for t in 0..<40 { rr.append(RRInterval(ts: 2000 + t, rrMs: 800)) }
+        rr[20] = RRInterval(ts: 2020, rrMs: 1400)   // the artifact beat
+        let pts = HRVAnalyzer.rollingRmssd(rr: rr, windowSec: 20, stepSec: 0, minBeatsPerWindow: 8)
+        XCTAssertFalse(pts.isEmpty)
+        for p in pts { XCTAssertEqual(p.rmssd, 0.0, accuracy: 1e-9, "the 1400 ms artifact must be filtered, never spiking a window") }
+    }
+
+    func testRollingRmssdSparseSeriesEmitsNothing() {
+        // Fewer beats than minBeatsPerWindow → no point at all (honest absence, no fabricated value).
+        let rr = (0..<5).map { RRInterval(ts: 3000 + $0, rrMs: 800) }
+        XCTAssertTrue(HRVAnalyzer.rollingRmssd(rr: rr, windowSec: 30).isEmpty)
+        // Zero / negative window width is rejected.
+        XCTAssertTrue(HRVAnalyzer.rollingRmssd(rr: rr, windowSec: 0).isEmpty)
+    }
+
+    func testRollingRmssdSortsUnorderedInput() {
+        // Input shuffled in time; the function sorts internally so the trailing window is well-defined and
+        // the emitted points are time-ordered with the same steady 10 ms value.
+        var rr: [RRInterval] = []
+        for t in 0..<40 { rr.append(RRInterval(ts: 4000 + t, rrMs: t.isMultiple(of: 2) ? 800 : 810)) }
+        rr.shuffle()
+        let pts = HRVAnalyzer.rollingRmssd(rr: rr, windowSec: 30, stepSec: 0, minBeatsPerWindow: 8)
+        XCTAssertFalse(pts.isEmpty)
+        XCTAssertEqual(pts.map { $0.ts }, pts.map { $0.ts }.sorted())
+        for p in pts { XCTAssertEqual(p.rmssd, 10.0, accuracy: 1e-9) }
     }
 
     func testAnalyzeWindowFiltersByTimestamp() {

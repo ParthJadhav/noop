@@ -11,11 +11,14 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.draw.clip
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -30,6 +33,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -70,6 +74,17 @@ fun LiveWorkoutScreen(vm: AppViewModel, onClose: () -> Unit) {
         onDispose { vm.releaseRealtimeHr() }
     }
 
+    // Keep the screen awake while recording (#703). Opt-in, default off; the toggle lives in Settings.
+    // Read the same pref key the iOS @AppStorage uses ("workoutKeepScreenOn") and flag the view's window
+    // only while this screen is up, clearing it on the way out so normal screen-timeout resumes. Mirrors
+    // iOS calling ScreenIdle.keepAwake(true) on appear and false on disappear.
+    val view = LocalView.current
+    DisposableEffect(Unit) {
+        val on = NoopPrefs.of(context).getBoolean("workoutKeepScreenOn", false)
+        if (on) view.keepScreenOn = true
+        onDispose { view.keepScreenOn = false }
+    }
+
     val w = activeWorkout
     // If the workout ended elsewhere (e.g. process restart cleared it), close out.
     LaunchedEffect(w == null) { if (w == null) onClose() }
@@ -88,9 +103,18 @@ fun LiveWorkoutScreen(vm: AppViewModel, onClose: () -> Unit) {
     // an Effort-world hero, not a flat panel.
     Box(modifier = Modifier.fillMaxSize().background(Palette.surfaceBase)) {
         ScenicHeroBackground(modifier = Modifier.matchParentSize(), domain = DomainTheme.Effort)
+        // #845: the in-exercise content is fixed-height (HR hero + effort gauge + zone rail + stat row +
+        // End button). On a tall, content-dense screen it ran PAST the available height: the old layout was a
+        // plain fillMaxSize Column with a weighted Spacer pushing End down, so when content overflowed the
+        // Spacer collapsed to nothing and the bottom Avg/Peak/Effort stat row got squeezed against the edge
+        // with its values clipped. Make the column scrollable so the whole stack stays fully readable when it
+        // doesn't fit, and add navigationBarsPadding so the bottom row/button clear the Android 15 gesture
+        // inset. When everything DOES fit there's nothing to scroll, so it looks unchanged.
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                .verticalScroll(rememberScrollState())
+                .navigationBarsPadding()
                 .padding(28.dp),
             verticalArrangement = Arrangement.spacedBy(20.dp),
         ) {
@@ -129,7 +153,11 @@ fun LiveWorkoutScreen(vm: AppViewModel, onClose: () -> Unit) {
             // Additive sensor readout — only renders when a connected standard fitness sensor is feeding.
             SensorRow(sensor)
 
-            Spacer(Modifier.weight(1f))
+            // #845: a fixed gap before End instead of a weighted Spacer. A weight needs a bounded height to
+            // share out, but the column is now scrollable (unbounded), so a weighted Spacer can't size and
+            // the End button would no longer be separated from the stats. A constant gap keeps the spacing
+            // and the button stays reachable by scrolling when the content overflows.
+            Spacer(Modifier.height(12.dp))
 
             Button(
                 onClick = { vm.endWorkout(); onClose() },
@@ -263,8 +291,8 @@ private fun ZoneRail(zone: Int, zoneSet: com.noop.analytics.HrZoneSet) {
         val band = zoneSet.zones.firstOrNull { it.number == zone }
         Text(
             if (band != null)
-                "Zone $zone: ${band.lower.toInt()}–${band.upper.toInt()} bpm (${(band.lowerPct * 100).toInt()}–${(band.upperPct * 100).toInt()}% max HR)"
-            else "Warming up — keep moving to climb into Zone 1.",
+                "Zone $zone: ${band.lower.toInt()} - ${band.upper.toInt()} bpm (${(band.lowerPct * 100).toInt()} - ${(band.upperPct * 100).toInt()}% max HR)"
+            else "Warming up - keep moving to climb into Zone 1.",
             style = NoopType.footnote,
             color = Palette.textTertiary,
         )

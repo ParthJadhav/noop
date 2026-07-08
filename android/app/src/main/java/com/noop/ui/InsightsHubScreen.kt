@@ -94,30 +94,36 @@ fun InsightsHubScreen(vm: AppViewModel) {
     var outcome by remember { mutableStateOf(InsightsOutcome.Recovery) }
     val ranked = remember(state, outcome) { hub.rankFor(state, outcome) }
 
-    ScreenScaffold(title = "Insights", subtitle = "Patterns in your own data — association, not cause.") {
+    // PERF (#707): lazy scaffold — each section (and its standalone Spacer, a real child of the eager
+    // `spacedBy(20.dp)` Column) becomes one `item { }`, so the LazyColumn's matching `spacedBy(20.dp)`
+    // reproduces identical spacing and only on-screen sections compose + are semantics-walked.
+    LazyScreenScaffold(title = "Insights", subtitle = "Patterns in your own data: association, not cause.") {
         if (!state.loaded) {
+            item {
             NoopCard {
                 Text("Reading your journal and outcomes…", style = NoopType.subhead, color = Palette.textTertiary)
             }
-            return@ScreenScaffold
+            }
+            return@LazyScreenScaffold
         }
 
         // --- What moves your Charge -------------------------------------------
-        MoversSection(outcome = outcome, onOutcome = { outcome = it }, ranked = ranked)
+        item { MoversSection(outcome = outcome, onOutcome = { outcome = it }, ranked = ranked) }
 
-        Spacer(Modifier.height(Metrics.sectionGap - 20.dp))
+        item { Spacer(Modifier.height(Metrics.sectionGap - 20.dp)) }
 
         // --- Dose-response (alcohol / caffeine) -------------------------------
-        DoseSection(state.doseCards)
+        item { DoseSection(state.doseCards) }
 
-        Spacer(Modifier.height(Metrics.sectionGap - 20.dp))
+        item { Spacer(Modifier.height(Metrics.sectionGap - 20.dp)) }
 
         // --- Method / honesty note --------------------------------------------
+        item {
         NoopCard {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 Overline("How to read this", color = Palette.textTertiary)
                 Text(
-                    "Everything here is a pattern in your own logged days — an association with an " +
+                    "Everything here is a pattern in your own logged days: an association with an " +
                         "effect size and confidence, never a cause or a diagnosis. Population patterns " +
                         "are shown as “typical” and are always overridden by your own data once " +
                         "you have enough of it. Approximations, not WHOOP’s scores; not a medical device.",
@@ -125,6 +131,7 @@ fun InsightsHubScreen(vm: AppViewModel) {
                     color = Palette.textTertiary,
                 )
             }
+        }
         }
     }
 }
@@ -155,7 +162,7 @@ private fun MoversSection(
             NoopCard {
                 Text(
                     "Not enough overlap between your journal answers and " +
-                        "${outcome.outcomeName.lowercase(Locale.US)} yet. Keep logging — each behaviour " +
+                        "${outcome.outcomeName.lowercase(Locale.US)} yet. Keep logging. Each behaviour " +
                         "needs days both with and without it before NOOP can read its effect.",
                     style = NoopType.subhead,
                     color = Palette.textTertiary,
@@ -262,8 +269,8 @@ private fun DoseSection(cards: List<DoseCardData>) {
         if (cards.isEmpty()) {
             NoopCard {
                 Text(
-                    "Log alcohol or late caffeine with an amount and NOOP fits a personal dose curve " +
-                        "— how much each extra unit tends to move your numbers. Until then it shows " +
+                    "Log alcohol or late caffeine with an amount and NOOP fits a personal dose curve: " +
+                        "how much each extra unit tends to move your numbers. Until then it shows " +
                         "typical patterns, clearly labelled as not yet yours.",
                     style = NoopType.subhead,
                     color = Palette.textSecondary,
@@ -309,7 +316,7 @@ private fun DoseResponseCard(card: DoseCardData) {
 
             if (r.priorDominated) {
                 HonestyBanner(
-                    "Based mostly on typical patterns — not yet yours. Log a few more " +
+                    "Based mostly on typical patterns, not yet yours. Log a few more " +
                         "${card.unitLabel.lowercase(Locale.US)} days and this becomes yours.",
                     accent = Palette.textTertiary,
                 )
@@ -623,7 +630,7 @@ internal class InsightsHubViewModel {
 
 private fun forecastSentence(card: DoseCardData, previewDose: Int, delta: Double, stepLabel: String): String {
     if (previewDose <= 1) {
-        return "No extra tonight — your ${card.outcomeName.lowercase(Locale.US)} forecast stays where it is."
+        return "No extra tonight. Your ${card.outcomeName.lowercase(Locale.US)} forecast stays where it is."
     }
     val mag = abs(delta).roundToInt()
     val dir = if (delta <= 0) "lower" else "higher"
@@ -633,7 +640,7 @@ private fun forecastSentence(card: DoseCardData, previewDose: Int, delta: Double
         "based on ${card.response.nUser} of your ${card.unitLabel.lowercase(Locale.US)} days"
     }
     return "A $stepLabel tonight tends to line up with about $mag${card.outcomeSuffix} $dir on " +
-        "tomorrow’s ${card.outcomeName.lowercase(Locale.US)} for you — $basis."
+        "tomorrow’s ${card.outcomeName.lowercase(Locale.US)} for you, $basis."
 }
 
 private fun curveDescription(card: DoseCardData, r: DoseResponse): String =

@@ -38,22 +38,41 @@ import sys, os, glob
 app, home, repl = sys.argv[1], sys.argv[2].encode(), sys.argv[3].encode()
 assert len(home) == len(repl), "replacement length must match"
 total = 0
-for binp in glob.glob(os.path.join(app, "Contents/MacOS/*")):
-    if not os.path.isfile(binp):
-        continue
-    data = open(binp, "rb").read()
-    hits = data.count(home)
-    if hits:
-        open(binp, "wb").write(data.replace(home, repl))
-        total += hits
-print(f"scrubbed {total} occurrence(s) of the build home path")
+scrubbed_files = 0
+# Walk the ENTIRE bundle, not just Contents/MacOS. Swift/clang bake the builder home path into
+# EVERY Mach-O it compiles, which includes embedded app-extensions (Contents/PlugIns/*.appex,
+# e.g. the macOS widget) and frameworks, not only the main executable. Length-preserving
+# replacement keeps all Mach-O offsets valid in whatever file it lands in.
+for root, _dirs, files in os.walk(app):
+    for name in files:
+        binp = os.path.join(root, name)
+        if os.path.islink(binp) or not os.path.isfile(binp):
+            continue
+        data = open(binp, "rb").read()
+        hits = data.count(home)
+        if hits:
+            open(binp, "wb").write(data.replace(home, repl))
+            total += hits
+            scrubbed_files += 1
+print(f"scrubbed {total} occurrence(s) of the build home path across {scrubbed_files} file(s)")
 PY
 
 # --options runtime applies the Hardened Runtime (CS_RUNTIME), which blocks
 # DYLD_INSERT_LIBRARIES dylib injection into the process. Safe: the app uses no JIT.
+#
+# Re-sign INSIDE-OUT: the scrub above rewrote bytes inside every embedded app-extension and
+# framework, invalidating their signatures. A nested binary must be signed BEFORE the outer
+# .app or the app's signature will not validate. Sign all nested code first, then the app.
+while IFS= read -r nested; do
+  [ -e "$nested" ] || continue
+  codesign --force --options runtime --sign - "$nested"
+done < <(find "$APP/Contents/PlugIns" "$APP/Contents/Frameworks" -mindepth 1 -maxdepth 1 \
+           \( -name '*.appex' -o -name '*.framework' -o -name '*.dylib' \) 2>/dev/null)
 codesign --force --options runtime --sign - "$APP"
-codesign --verify --verbose=1 "$APP"
+codesign --verify --deep --verbose=1 "$APP"
 
-residual=$(strings -a "$APP/Contents/MacOS/"* 2>/dev/null | grep -c "$HOME" || true)
-echo "residual home-path hits: ${residual:-0}"
+# Residual check across the WHOLE bundle (main exe + every app-extension binary + frameworks),
+# not just Contents/MacOS, so an embedded widget/extension can never ship the builder path.
+residual=$(find "$APP" -type f -exec strings -a {} + 2>/dev/null | grep -c "$HOME" || true)
+echo "residual home-path hits (whole bundle): ${residual:-0}"
 [ "${residual:-0}" -eq 0 ] && echo "✓ clean" || { echo "✗ residual paths remain" >&2; exit 1; }

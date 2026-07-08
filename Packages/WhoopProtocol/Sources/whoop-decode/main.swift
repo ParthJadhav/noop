@@ -187,7 +187,9 @@ for (n, rec) in records.enumerated() {
         continue
     }
     let family = resolveFamily(rec)
-    let parsed = parseFrame(frame, family: family)
+    // Full diagnostic decode (D#742): the CLI is the annotated-fields inspector, so it opts into
+    // the per-field metadata the live pipeline skips.
+    let parsed = parseFrame(frame, family: family, collectFields: true)
     total += 1
     if parsed.ok { okCount += 1 }
     typeCounts[parsed.typeName, default: 0] += 1

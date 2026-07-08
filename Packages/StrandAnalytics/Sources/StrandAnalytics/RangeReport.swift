@@ -324,7 +324,7 @@ public enum RangeReportEngine {
         } else {
             let up = s.trend == .rising
             let good = (up == s.metric.higherIsBetter)
-            frame = good ? " — a good sign" : " — worth a look"
+            frame = good ? " - a good sign" : " - worth a look"
         }
         let unit = s.metric.unit.isEmpty ? "" : " \(s.metric.unit)"
         return "\(s.metric.label) is \(word) (avg \(round1(s.firstHalfMean))\(unit) → "

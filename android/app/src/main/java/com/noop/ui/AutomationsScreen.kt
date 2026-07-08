@@ -16,7 +16,6 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Alarm
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.BatteryStd
 import androidx.compose.material.icons.filled.Bedtime
@@ -52,7 +51,6 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.noop.analytics.HrZones
 import com.noop.analytics.NapCandidate
-import com.noop.ble.PuffinExperiment
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 
@@ -72,21 +70,13 @@ fun AutomationsScreen(viewModel: AppViewModel) {
 
     var stressNudge by remember { mutableStateOf(false) }
     var autoLockOnWristOff by remember { mutableStateOf(false) }
-    // Smart alarm is real + persisted (issue #51): backed by the ViewModel, which arms the strap's
-    // firmware alarm. (The toggles above are still preview-only — separate follow-up.)
-    val smartAlarm by viewModel.smartAlarmEnabled.collectAsStateWithLifecycle()
-    val alarmMinutes by viewModel.smartAlarmMinutes.collectAsStateWithLifecycle()
-    val alarmWeekdays by viewModel.smartAlarmWeekdays.collectAsStateWithLifecycle()
-    val alarmDayOverrides by viewModel.smartAlarmDayOverrides.collectAsStateWithLifecycle()
+    // (#766) The strap firmware wake-alarm state used to be read here; it moved to SmartAlarmScreen with
+    // the rest of the alarm UI.
     // Illness watch is real + persisted (opt-OUT — the watch has always run on Android).
     val illnessWatch by viewModel.illnessWatchEnabled.collectAsStateWithLifecycle()
     // Battery alerts are real + persisted (opt-OUT, default ON; #368, thanks @ujix).
     val batteryAlerts by viewModel.batteryAlertsEnabled.collectAsStateWithLifecycle()
-    // The firmware alarm is EXPERIMENTAL: on a WHOOP 5/MG it is ONLY armed when the Experimental
-    // probes toggle is on — otherwise enabling the alarm silently arms nothing (#111). Read the flag
-    // so the UI can say so instead of promising a wake that never fires.
     val ctx = LocalContext.current
-    val experimentalOn = PuffinExperiment.from(ctx).isEnabled
 
     // HR-zone coaching is real + persisted (zone-based, mirrors macOS): the ViewModel owns the toggle +
     // recovery option and buzzes the strap on entering the top zone (and Zone 1 if recovery is on).
@@ -114,13 +104,18 @@ fun AutomationsScreen(viewModel: AppViewModel) {
     // enabling the reminder while master is off isn't silently inert.
     val notifMasterOn = NotifPrefs.getBool(ctx, NotifPrefs.MASTER, false)
 
-    ScreenScaffold(
+    // PERF (#707): lazy scaffold — each settings section is an unconditional top-level child, so each
+    // becomes one `item { }` in the same order. No standalone Spacers (the eager `spacedBy(20.dp)` is
+    // reproduced by the LazyColumn), so spacing is byte-identical; only on-screen sections compose + get
+    // accessibility-walked on scroll.
+    LazyScreenScaffold(
         title = "Automations",
-        subtitle = "Make the strap do things — tap to act, walk away to lock, train by feel.",
+        subtitle = "Make the strap do things: tap to act, walk away to lock, train by feel.",
     ) {
         // Double-tap (parity since 4.2.8): a real, persisted action picker bound to the ViewModel, with a
         // Test action button. Mirrors AutomationsView.swift's Picker (Apple-applicable subset only; no
         // lockScreen / runShortcut on Android).
+        item {
         SettingsSection(
             icon = Icons.Filled.TouchApp,
             title = "Double-tap",
@@ -153,17 +148,19 @@ fun AutomationsScreen(viewModel: AppViewModel) {
                 )
             }
         }
+        }
 
         // Haptic coaching.
+        item {
         SettingsSection(
             icon = Icons.Filled.Bolt,
             title = "Haptic coaching",
-            blurb = "Train by feel — the strap buzzes so you don't have to watch a screen.",
+            blurb = "Train by feel. The strap buzzes so you don't have to watch a screen.",
             active = zoneCoaching || stressNudge,
         ) {
             ToggleRow(
                 label = "HR-zone coaching",
-                help = "A triple-buzz when you climb into your top zone (Zone 5, ≥ $zone5Bpm bpm) — a cue to ease off. Max HR comes from Settings.",
+                help = "A triple-buzz when you climb into your top zone (Zone 5, ≥ $zone5Bpm bpm), a cue to ease off. Max HR comes from Settings.",
                 checked = zoneCoaching,
                 onChange = { viewModel.setZoneCoaching(it) },
             )
@@ -171,7 +168,7 @@ fun AutomationsScreen(viewModel: AppViewModel) {
                 RowDivider()
                 ToggleRow(
                     label = "Recovery buzz",
-                    help = "Also buzz once when your heart rate drops back to Zone 1 — a cue that you've recovered.",
+                    help = "Also buzz once when your heart rate drops back to Zone 1, a cue that you've recovered.",
                     checked = zoneCoachRecovery,
                     onChange = { viewModel.setZoneCoachRecovery(it) },
                 )
@@ -179,13 +176,15 @@ fun AutomationsScreen(viewModel: AppViewModel) {
             RowDivider()
             ToggleRow(
                 label = "Resting stress nudge (experimental)",
-                help = "A gentle buzz when your HRV drops while your heart rate is calm — a cue to take a paced breath. Rate-limited to once every 15 minutes; off by default.",
+                help = "A gentle buzz when your HRV drops while your heart rate is calm, a cue to take a paced breath. Rate-limited to once every 15 minutes; off by default.",
                 checked = stressNudge,
                 onChange = { stressNudge = it },
             )
         }
+        }
 
         // Wear & presence.
+        item {
         SettingsSection(
             icon = Icons.Filled.TouchApp,
             title = "Wear & presence",
@@ -199,71 +198,18 @@ fun AutomationsScreen(viewModel: AppViewModel) {
                 onChange = { autoLockOnWristOff = it },
             )
         }
-
-        // Smart alarm.
-        SettingsSection(
-            icon = Icons.Filled.Alarm,
-            title = "Smart alarm",
-            blurb = "Wake to a buzz from the strap's own firmware alarm, even if NOOP is closed. Still experimental on WHOOP 4.0, so keep a backup alarm until you've confirmed it wakes you.",
-            active = smartAlarm,
-        ) {
-            ToggleRow(
-                label = "Enable smart alarm",
-                help = "Arms the strap to buzz at your wake time.",
-                checked = smartAlarm,
-                onChange = { viewModel.setSmartAlarmEnabled(it) },
-            )
-            if (smartAlarm) {
-                RowDivider()
-                Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text("Wake at", style = NoopType.body, color = Palette.textPrimary)
-                    Spacer(Modifier.weight(1f))
-                    TimeChip(
-                        minutes = alarmMinutes,
-                        accessibilityLabel = "Smart alarm wake time",
-                        onPicked = { viewModel.setSmartAlarmMinutes(it) },
-                    )
-                }
-                RowDivider()
-                AlarmWeekdayPicker(
-                    selected = alarmWeekdays,
-                    onToggle = { dow -> viewModel.setSmartAlarmWeekdays(toggledSmartAlarmWeekday(dow, alarmWeekdays)) },
-                )
-                RowDivider()
-                // Per-weekday wake-time OVERRIDES (#554 reimpl): set a different time for any day the alarm
-                // fires on; a day with no override uses the "Wake at" time above.
-                AlarmDayOverridePicker(
-                    defaultMinutes = alarmMinutes,
-                    enabledDays = alarmWeekdays,
-                    overrides = alarmDayOverrides,
-                    onSetOverride = { dow, minutes -> viewModel.setSmartAlarmDayOverride(dow, minutes) },
-                )
-                RowDivider()
-                // A WHOOP 5/MG only arms when Experimental probes are on; without it the time is saved
-                // but the strap is NEVER armed, so call that out in amber rather than promise a wake (#111).
-                if (live.whoop5Detected && !experimentalOn) {
-                    Text(
-                        "Your WHOOP 5/MG won't arm this until Experimental mode is on (Settings → " +
-                            "Experimental). Right now your wake time is saved but the strap is NOT armed.",
-                        style = NoopType.footnote, color = Palette.statusWarning,
-                    )
-                } else {
-                    Text(
-                        if (live.bonded)
-                            "Armed on the strap itself, so it can buzz at your wake time even if your phone is asleep or NOOP is closed. Still experimental — we can't yet guarantee it fires, so keep a backup alarm."
-                        else
-                            "Connect your strap to arm this — it's set on the strap's own firmware alarm. Still experimental, so keep a backup alarm until you've confirmed it wakes you.",
-                        style = NoopType.footnote, color = Palette.textTertiary,
-                    )
-                }
-            }
         }
 
+        // #766: the strap's silent wake-alarm card used to sit here, which let users conflate it with the
+        // Wake Window + Wind-Down reminder over on the Alarms screen. It's moved to SmartAlarmScreen so
+        // every wake/alarm control lives in one place. Automations is just inputs-to-actions now.
+
         // Inactivity reminder (#419) — real + persisted via InactivityPrefs; opt-in, default OFF.
+        item {
         SettingsSection(
             icon = Icons.Filled.Timer,
             title = "Inactivity reminder",
-            blurb = "A gentle wrist buzz when you've been sitting too long — a nudge to get up and move. Inferred from the strap's motion on each history sync, so it lags real time by a sync or two.",
+            blurb = "A gentle wrist buzz when you've been sitting too long, a nudge to get up and move. Inferred from the strap's motion on each history sync, so it lags real time by a sync or two.",
             active = inactivityEnabled,
         ) {
             ToggleRow(
@@ -279,7 +225,7 @@ fun AutomationsScreen(viewModel: AppViewModel) {
                 if (!notifMasterOn) {
                     RowDivider()
                     Text(
-                        "Notifications are off, so this can't buzz yet — turn on the master switch in " +
+                        "Notifications are off, so this can't buzz yet. Turn on the master switch in " +
                             "Settings → Notifications to let it through.",
                         style = NoopType.footnote, color = Palette.statusWarning,
                     )
@@ -363,28 +309,32 @@ fun AutomationsScreen(viewModel: AppViewModel) {
                 }
             }
         }
+        }
 
         // On-device short-nap detection (PR #569 reimpl) — opt-in, default OFF. Detected on the offload
         // hook; a confident nap is offered as a review card you accept (it becomes a nap session) or
         // dismiss. NEVER auto-written.
-        NapDetectionSection(viewModel)
+        item { NapDetectionSection(viewModel) }
 
         // Illness early-warning (real + persisted; opt-OUT — the watch has always run on Android).
+        item {
         SettingsSection(
             icon = Icons.Filled.MonitorHeart,
             title = "Illness early-warning",
-            blurb = "Watches your resting HR, HRV, skin temperature and respiration against your own 28-day baseline. On-device and approximate — informational only, not a diagnosis.",
+            blurb = "Watches your resting HR, HRV, skin temperature and respiration against your own 28-day baseline. On-device and approximate: informational only, not a diagnosis.",
             active = illnessWatch,
         ) {
             ToggleRow(
                 label = "Watch for early-illness signs",
-                help = "Needs at least 14 days of history. When two or more signals drift together you get a banner on Today and a notification — at most once a day.",
+                help = "Needs at least 14 days of history. When two or more signals drift together you get a banner on Today and a notification, at most once a day.",
                 checked = illnessWatch,
                 onChange = { viewModel.setIllnessWatchEnabled(it) },
             )
         }
+        }
 
         // Battery alerts (real + persisted; opt-OUT, default ON — #368, thanks @ujix).
+        item {
         SettingsSection(
             icon = Icons.Filled.BatteryStd,
             title = "Battery alerts",
@@ -393,10 +343,11 @@ fun AutomationsScreen(viewModel: AppViewModel) {
         ) {
             ToggleRow(
                 label = "Notify on low and full battery",
-                help = "Sends a notification when the strap drops to 15% or reaches a full charge — at most once per charge cycle.",
+                help = "Sends a notification when the strap drops to 15% or reaches a full charge, at most once per charge cycle.",
                 checked = batteryAlerts,
                 onChange = { viewModel.setBatteryAlertsEnabled(it) },
             )
+        }
         }
     }
 }
@@ -420,7 +371,7 @@ private fun NapDetectionSection(viewModel: AppViewModel) {
         icon = Icons.Filled.Bedtime,
         title = "Nap detection",
         blurb = "Spots a likely daytime nap from the strap's motion and heart rate on each history sync, " +
-            "then asks you to confirm it. Inferred and approximate — NOOP never adds a nap to your sleep " +
+            "then asks you to confirm it. Inferred and approximate: NOOP never adds a nap to your sleep " +
             "without your OK.",
         active = enabled,
     ) {
@@ -491,7 +442,7 @@ private fun napWindowLabel(nap: NapCandidate, ctx: android.content.Context): Str
     val start = fmt.format(java.util.Date(nap.start * 1000L))
     val end = fmt.format(java.util.Date(nap.end * 1000L))
     val mins = nap.durationS / 60
-    return "$start – $end · ~$mins min"
+    return "$start-$end · ~$mins min"
 }
 
 private fun napDetailLabel(nap: NapCandidate): String =
@@ -505,8 +456,10 @@ private fun napDetailLabel(nap: NapCandidate): String =
  * day's override, and a "Reset" affordance clears it back to the default. Days the alarm doesn't fire on
  * aren't shown (no point overriding a day it won't ring). Empty enabledDays = every day, so all seven show.
  */
+// internal (not private) so the consolidated Alarms screen (SmartAlarmScreen, #766) can reuse the
+// exact same picker. The strap wake-alarm card moved there but its weekday/override UI is unchanged.
 @Composable
-private fun AlarmDayOverridePicker(
+internal fun AlarmDayOverridePicker(
     defaultMinutes: Int,
     enabledDays: Set<Int>,
     overrides: Map<Int, Int>,
@@ -665,8 +618,9 @@ private fun RowDivider() {
  * Weekday selector for the smart alarm (#539). One tappable circle per weekday, Monday-first. An empty
  * [selected] set means "every day" (all circles read as on). Mirrors the macOS AutomationsView picker.
  */
+// internal (not private) so SmartAlarmScreen (the consolidated Alarms surface, #766) can reuse it.
 @Composable
-private fun AlarmWeekdayPicker(selected: Set<Int>, onToggle: (Int) -> Unit) {
+internal fun AlarmWeekdayPicker(selected: Set<Int>, onToggle: (Int) -> Unit) {
     Column(
         modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),

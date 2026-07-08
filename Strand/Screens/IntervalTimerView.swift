@@ -24,9 +24,9 @@ struct IntervalTimerView: View {
     private enum Phase { case work, rest, done
         var label: String {
             switch self {
-            case .work: return "WORK"
-            case .rest: return "REST"
-            case .done: return "DONE"
+            case .work: return String(localized: "WORK")
+            case .rest: return String(localized: "REST")
+            case .done: return String(localized: "DONE")
             }
         }
     }
@@ -100,7 +100,7 @@ struct IntervalTimerView: View {
 
     var body: some View {
         ScreenScaffold(title: "Interval Timer",
-                       subtitle: "Silent haptic HIIT — the strap buzzes the transitions") {
+                       subtitle: "Silent haptic HIIT: the strap buzzes the transitions") {
             VStack(alignment: .leading, spacing: NoopMetrics.sectionSpacing) {
                 let cards: [AnyView] = [
                     AnyView(statusRow),
@@ -301,10 +301,10 @@ struct IntervalTimerView: View {
                     .accessibilityValue("\(Int((sessionProgress * 100).rounded())) percent")
 
                 HStack(spacing: 0) {
-                    overviewStat("Work", "\(workSeconds)s", StrandPalette.effortColor)
-                    overviewStat("Rest", "\(restSeconds)s", StrandPalette.restColor)
-                    overviewStat("Rounds", "\(rounds)", StrandPalette.textPrimary)
-                    overviewStat("Remaining", timeString(max(0, totalPlanned - elapsed)), StrandPalette.textSecondary)
+                    overviewStat(String(localized: "Work"), "\(workSeconds)s", StrandPalette.effortColor)
+                    overviewStat(String(localized: "Rest"), "\(restSeconds)s", StrandPalette.restColor)
+                    overviewStat(String(localized: "Rounds"), "\(rounds)", StrandPalette.textPrimary)
+                    overviewStat(String(localized: "Remaining"), timeString(max(0, totalPlanned - elapsed)), StrandPalette.textSecondary)
                 }
             }
         }
@@ -329,13 +329,13 @@ struct IntervalTimerView: View {
         StrandCard {
             VStack(alignment: .leading, spacing: 14) {
                 Text("Configure").strandOverline()
-                configStepper(title: "Work", unit: "sec", value: $workSeconds,
+                configStepper(title: String(localized: "Work"), unit: String(localized: "sec"), value: $workSeconds,
                               range: 5...600, step: 5, tint: StrandPalette.effortColor)
                 Divider().overlay(StrandPalette.hairline)
-                configStepper(title: "Rest", unit: "sec", value: $restSeconds,
+                configStepper(title: String(localized: "Rest"), unit: String(localized: "sec"), value: $restSeconds,
                               range: 5...600, step: 5, tint: StrandPalette.restColor)
                 Divider().overlay(StrandPalette.hairline)
-                configStepper(title: "Rounds", unit: nil, value: $rounds,
+                configStepper(title: String(localized: "Rounds"), unit: nil, value: $rounds,
                               range: 1...30, step: 1, tint: StrandPalette.textPrimary)
             }
             .disabled(running)
@@ -348,7 +348,7 @@ struct IntervalTimerView: View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
                 Text(title).font(StrandFont.headline).foregroundStyle(StrandPalette.textPrimary)
-                Text("\(range.lowerBound)–\(range.upperBound)\(unit.map { " \($0)" } ?? "") · step \(step)")
+                Text("\(range.lowerBound)-\(range.upperBound)\(unit.map { " \($0)" } ?? "") · step \(step)")
                     .font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
             }
             Spacer()

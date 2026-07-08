@@ -32,7 +32,9 @@ struct BuzzStrapIntent: AppIntent {
     func perform() async throws -> some IntentResult {
         guard let model = AppModel.shared else { throw NOOPIntentError.notRunning }
         guard model.live.bonded else { throw NOOPIntentError.notConnected }
-        model.buzz(loops: 2)
+        // #921: a bare RUN_HAPTICS_PATTERN write from a shortcut could be silently ignored by a
+        // WHOOP 4.0; the one-shot routine sends the confirmed pattern + RUN_ALARM sequence, acked.
+        model.buzzStrapOnce()
         return .result()
     }
 }

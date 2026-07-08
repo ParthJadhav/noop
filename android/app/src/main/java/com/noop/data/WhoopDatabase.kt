@@ -8,15 +8,15 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 
 /**
- * Local Room database — the Android port of the GRDB store in
+ * Local Room database, the Android port of the GRDB store in
  * Packages/WhoopStore (Database.swift schema). Holds phone-collected raw streams
  * AND the offline cache of server-computed derived metrics.
  *
  * The schema bundles every Swift migration (v1..v9) into a single fresh shape, since the
  * Android app starts from an empty store (no in-place migration from a prior Android version).
  * version 2 added the v8 journal/workout/appleDaily caches. **v3 (#78)** adds the stepSample table
- * + dailyMetric.steps/activeKcalEst via a REAL additive migration (MIGRATION_2_3) — NOT a destructive
- * rebuild — so a user's already-offloaded raw streams survive (the strap trims acked history and won't
+ * + dailyMetric.steps/activeKcalEst via a REAL additive migration (MIGRATION_2_3), NOT a destructive
+ * rebuild, so a user's already-offloaded raw streams survive (the strap trims acked history and won't
  * re-send it). The destructive fallback is deliberately GONE: with exportSchema=false there's no
  * build-time schema check, so a hand-written-SQL mismatch would otherwise SILENTLY wipe that history;
  * without the fallback Room throws loudly instead, and MigrationRoundTripTest guards the SQL in CI.
@@ -31,6 +31,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         Spo2Sample::class,
         SkinTempSample::class,
         StepSample::class,
+        SleepStateSampleEntity::class,
         RespSample::class,
         GravitySample::class,
         DailyMetric::class,
@@ -45,8 +46,9 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         PairedDeviceRow::class,
         DayOwnershipRow::class,
         LabMarkerRow::class,
+        LiveSessionRow::class,
     ],
-    version = 12,
+    version = 16,
     exportSchema = false,
 )
 abstract class WhoopDatabase : RoomDatabase() {
@@ -66,7 +68,7 @@ abstract class WhoopDatabase : RoomDatabase() {
 
         /**
          * Close and forget the singleton so all file handles on [DB_NAME] are released.
-         * The next [get] call rebuilds against whatever file is on disk — used by
+         * The next [get] call rebuilds against whatever file is on disk, used by
          * [DataBackup.importFrom] to swap the database file underneath the app.
          */
         fun close() {
@@ -77,11 +79,11 @@ abstract class WhoopDatabase : RoomDatabase() {
         }
 
         /**
-         * v2 → v3: ADDITIVE ONLY — adds the stepSample table + dailyMetric.steps/activeKcalEst.
+         * v2 → v3: ADDITIVE ONLY, adds the stepSample table + dailyMetric.steps/activeKcalEst.
          * A real (non-destructive) migration so an existing user's already-offloaded raw streams are
          * PRESERVED (the strap trims acked history chunks and will not re-send them, so a destructive
          * rebuild would lose that history permanently). The SQL MUST match Room's generated schema
-         * exactly — NOT NULL for `synced` (Kotlin default, no SQL DEFAULT), nullable INTEGER/REAL for
+         * exactly, NOT NULL for `synced` (Kotlin default, no SQL DEFAULT), nullable INTEGER/REAL for
          * the two new dailyMetric columns. Guarded by MigrationRoundTripTest.
          */
         internal val MIGRATION_2_3 = object : Migration(2, 3) {
@@ -97,7 +99,7 @@ abstract class WhoopDatabase : RoomDatabase() {
         }
 
         /**
-         * v3 -> v4: ADDITIVE — adds `workout.routePolyline` (nullable TEXT) for GPS routes. Nullable so
+         * v3 -> v4: ADDITIVE, adds `workout.routePolyline` (nullable TEXT) for GPS routes. Nullable so
          * existing workouts migrate untouched; the SQL must match Room's generated schema for a `String?`
          * column exactly (TEXT, no NOT NULL, no default). Mirrors MIGRATION_2_3's additive form.
          */
@@ -108,10 +110,10 @@ abstract class WhoopDatabase : RoomDatabase() {
         }
 
         /**
-         * v4 -> v5: ADDITIVE — adds the `dismissedWorkout` table (#107): a durable marker that keeps a
+         * v4 -> v5: ADDITIVE, adds the `dismissedWorkout` table (#107): a durable marker that keeps a
          * dismissed auto-detected bout hidden after the engine re-derives it. CREATE TABLE only (no
          * data touched), so existing workouts/history are untouched. The SQL MUST match Room's
-         * generated schema for the [DismissedWorkout] entity exactly — all three PK columns NOT NULL,
+         * generated schema for the [DismissedWorkout] entity exactly, all three PK columns NOT NULL,
          * composite PRIMARY KEY in declaration order. Guarded by MigrationRoundTripTest like the others.
          */
         internal val MIGRATION_4_5 = object : Migration(4, 5) {
@@ -125,10 +127,10 @@ abstract class WhoopDatabase : RoomDatabase() {
         }
 
         /**
-         * v5 -> v6: ADDITIVE — adds the `ppgHrSample` table (#156): HR derived from the WHOOP 5/MG
+         * v5 -> v6: ADDITIVE, adds the `ppgHrSample` table (#156): HR derived from the WHOOP 5/MG
          * v26 optical PPG waveform (autocorrelation). CREATE TABLE only (no existing data touched), so
          * already-offloaded raw streams survive (the strap trims acked history and won't re-send it).
-         * The SQL MUST match Room's generated schema for [PpgHrSample] exactly — every column NOT NULL
+         * The SQL MUST match Room's generated schema for [PpgHrSample] exactly, every column NOT NULL
          * (Kotlin defaults, no SQL DEFAULT), `conf` is REAL, composite PRIMARY KEY (deviceId, ts) in
          * declaration order. Guarded by MigrationRoundTripTest like the others.
          */
@@ -143,12 +145,12 @@ abstract class WhoopDatabase : RoomDatabase() {
         }
 
         /**
-         * v6 -> v7: ADDITIVE — adds `sleepSession.userEdited` + `sleepSession.startTsAdjusted` for
-         * durable bed/wake editing (port of iOS PR #395 — the GRDB v13 `userEdited` + v14
+         * v6 -> v7: ADDITIVE, adds `sleepSession.userEdited` + `sleepSession.startTsAdjusted` for
+         * durable bed/wake editing (port of iOS PR #395, the GRDB v13 `userEdited` + v14
          * `startTsAdjusted` migrations). `userEdited` is a non-null Kotlin Boolean → Room stores it as
          * INTEGER NOT NULL DEFAULT 0; `startTsAdjusted` is a nullable Long → INTEGER (no NOT NULL).
          * Both are ALTER ... ADD COLUMN only (no data touched), so existing rows are untouched and read
-         * back as userEdited=false / startTsAdjusted=null — exactly the additive, nullable-safe form of
+         * back as userEdited=false / startTsAdjusted=null, exactly the additive, nullable-safe form of
          * MIGRATION_2_3. The SQL MUST match Room's generated schema for the new columns; like the
          * others this is the no-destructive-fallback path so a mismatch throws loudly instead of
          * silently wiping non-resendable strap history.
@@ -161,15 +163,14 @@ abstract class WhoopDatabase : RoomDatabase() {
         }
 
         /**
-         * v7 -> v8: ADDITIVE — adds the device registry (`pairedDevice` + `dayOwnership`), the Android
+         * v7 -> v8: ADDITIVE, adds the device registry (`pairedDevice` + `dayOwnership`), the Android
          * port of the Swift Database.swift v15 migration. CREATE TABLE only (no existing data touched),
          * so already-offloaded raw streams survive (the strap trims acked history and won't re-send it).
          *
          * The SQL MUST match Room's generated schema for [PairedDeviceRow]/[DayOwnershipRow] exactly:
          *  - pairedDevice: `nickname` is the only nullable column (TEXT, no NOT NULL); every other is
          *    NOT NULL with no SQL DEFAULT (Kotlin construction defaults don't emit a schema default).
-         *  - dayOwnership: `locked` is a non-null Kotlin Boolean with a *constructor* default of false —
-         *    Room stores it as INTEGER NOT NULL with NO SQL DEFAULT (the Kotlin default never reaches the
+         *  - dayOwnership: `locked` is a non-null Kotlin Boolean with a *constructor* default of false,          *    Room stores it as INTEGER NOT NULL with NO SQL DEFAULT (the Kotlin default never reaches the
          *    schema), so the migration must NOT add `DEFAULT 0` or MigrationRoundTripTest would flag a
          *    schema mismatch.
          *
@@ -205,16 +206,16 @@ abstract class WhoopDatabase : RoomDatabase() {
         }
 
         /**
-         * v8 -> v9: ADDITIVE — adds `pairedDevice.peripheralId` (nullable TEXT) — the strap's stable BLE
+         * v8 -> v9: ADDITIVE, adds `pairedDevice.peripheralId` (nullable TEXT), the strap's stable BLE
          * peripheral identifier (the Android twin of the Swift Database.swift `peripheralId` migration).
          * On Android this is the [android.bluetooth.BluetoothDevice] MAC address; it lets the BLE client
          * pin a connect to ONE specific strap (multi-WHOOP) and lets a freshly-paired device be looked up
          * by its address.
          *
          * ALTER ... ADD COLUMN only (no data touched), so existing rows are untouched and read back with
-         * `peripheralId = NULL` — including the seeded "my-whoop" row (WHOOP has no stored MAC until it is
-         * (re)paired — fine). The SQL MUST match Room's generated column for a `String?` field exactly:
-         * TEXT, no NOT NULL, no SQL DEFAULT (a Kotlin construction default never reaches the schema) — the
+         * `peripheralId = NULL`, including the seeded "my-whoop" row (WHOOP has no stored MAC until it is
+         * (re)paired, fine). The SQL MUST match Room's generated column for a `String?` field exactly:
+         * TEXT, no NOT NULL, no SQL DEFAULT (a Kotlin construction default never reaches the schema), the
          * additive, nullable-safe form of MIGRATION_3_4. Like the others this is the no-destructive-
          * fallback path: a mismatch throws loudly rather than silently wiping non-resendable strap history;
          * CI's MigrationRoundTripTest guards the SQL.
@@ -226,10 +227,10 @@ abstract class WhoopDatabase : RoomDatabase() {
         }
 
         /**
-         * v9 -> v10: ADDITIVE — adds the `dismissedSleep` tombstone table (#33): a durable marker that
+         * v9 -> v10: ADDITIVE, adds the `dismissedSleep` tombstone table (#33): a durable marker that
          * keeps a user-DELETED computed sleep night from regenerating on the next recompute. CREATE TABLE
          * only (no data touched), so already-offloaded raw streams survive. The SQL MUST match Room's
-         * generated schema for [DismissedSleep] exactly — all three columns NOT NULL, composite PRIMARY
+         * generated schema for [DismissedSleep] exactly, all three columns NOT NULL, composite PRIMARY
          * KEY (deviceId, startTs) in declaration order. Mirrors MIGRATION_4_5 (the dismissedWorkout table).
          */
         internal val MIGRATION_9_10 = object : Migration(9, 10) {
@@ -243,7 +244,7 @@ abstract class WhoopDatabase : RoomDatabase() {
         }
 
         /**
-         * v10 -> v11: ADDITIVE — adds the `labMarker` table (Health Records "Lab Book" pillar), the
+         * v10 -> v11: ADDITIVE, adds the `labMarker` table (Health Records "Lab Book" pillar), the
          * Android port of the Swift Database.swift v17 migration. One row per dated reading the USER
          * entered themselves; the daily `metricSeries` projection under source `lab-book` is how the
          * book talks to the rest of the app. CREATE TABLE + indexes only (no existing data touched),
@@ -282,7 +283,7 @@ abstract class WhoopDatabase : RoomDatabase() {
                 "ON `labMarker` (`deviceId`, `category`)",
         )
 
-        /** All statements the migration runs, in order — the table then its indexes. */
+        /** All statements the migration runs, in order, the table then its indexes. */
         internal val LAB_MARKER_MIGRATION_SQL: List<String> =
             listOf(LAB_MARKER_CREATE_SQL) + LAB_MARKER_INDEX_SQL
 
@@ -293,13 +294,13 @@ abstract class WhoopDatabase : RoomDatabase() {
         }
 
         /**
-         * v11 -> v12: ADDITIVE — adds `sleepSession.motionJSON` + `sleepSession.sleepStateJSON` (nullable
+         * v11 -> v12: ADDITIVE, adds `sleepSession.motionJSON` + `sleepSession.sleepStateJSON` (nullable
          * TEXT), the Android port of the Swift WhoopStore v18 migration. Per-epoch analytics banked beside
          * the existing `stagesJSON` on the same row: the SleepStager's per-epoch motion magnitudes (H8) and
          * the decoded v18 band sleep_state per epoch (H2 persist half).
          *
          * ALTER ... ADD COLUMN only (no data touched), so existing rows are untouched and read back with
-         * both columns = NULL — exactly the additive, nullable-safe form of MIGRATION_3_4 (already-offloaded
+         * both columns = NULL, exactly the additive, nullable-safe form of MIGRATION_3_4 (already-offloaded
          * raw streams survive; the strap trims acked history and won't re-send it). The SQL MUST match Room's
          * generated column for a `String?` field exactly: TEXT, no NOT NULL, no SQL DEFAULT (a Kotlin
          * construction default never reaches the schema). Like the others this is the no-destructive-fallback
@@ -319,15 +320,127 @@ abstract class WhoopDatabase : RoomDatabase() {
             }
         }
 
+        /**
+         * v12 -> v13: ADDITIVE, adds `stepSample.activityClass` (nullable INTEGER), the Android port of the
+         * Swift WhoopStore v19 migration. The @63 activity-class enum (0=still, 1=walk, 2=run; null when the
+         * byte was 0xFF/invalid/absent) the decoder ALREADY carries on [StepRow] but which was DROPPED at the
+         * insert boundary, the v2_3 `stepSample` held only ts/counter, so a classed sample could never be
+         * persisted, read, or shown. (#316)
+         *
+         * ALTER ... ADD COLUMN only (no data touched), so existing rows are untouched and read back with
+         * `activityClass = NULL`, an absent class stays absent, never a fabricated 0/"still". The SQL MUST
+         * match Room's generated column for an `Int?` field exactly: INTEGER, no NOT NULL, no SQL DEFAULT (a
+         * Kotlin construction default never reaches the schema), the additive, nullable-safe form of
+         * MIGRATION_3_4. Already-offloaded raw streams survive (the strap trims acked history and won't
+         * re-send it). Like the others this is the no-destructive-fallback path: a mismatch throws loudly
+         * rather than silently wiping non-resendable history.
+         *
+         * The SQL is exposed as [STEP_ACTIVITY_CLASS_MIGRATION_SQL] so a plain-JVM unit test
+         * ([com.noop.data.StepActivityClassMigrationTest]) can pin this shape without Robolectric.
+         */
+        internal val STEP_ACTIVITY_CLASS_MIGRATION_SQL: List<String> = listOf(
+            "ALTER TABLE `stepSample` ADD COLUMN `activityClass` INTEGER",
+        )
+
+        internal val MIGRATION_12_13 = object : Migration(12, 13) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                for (stmt in STEP_ACTIVITY_CLASS_MIGRATION_SQL) db.execSQL(stmt)
+            }
+        }
+
+        /**
+         * v13 -> v14: ADDITIVE, adds `journal.numericValue` (#322 / task #53). A journal entry can carry a
+         * numeric value (caffeine mg, alcohol units) alongside the yes/no answer. A numeric log writes
+         * answeredYes=1 AND numericValue=v, so the EffectRanker with/without split keeps working unchanged;
+         * the value is carried for dose-response.
+         *
+         * ALTER ... ADD COLUMN only (no data touched): existing rows read back `numericValue = NULL`
+         * (a plain yes/no answer with no numeric reading), an absent value stays absent, never a fabricated
+         * 0. The SQL MUST match Room's generated column for a `Double?` field exactly: REAL, no NOT NULL, no
+         * SQL DEFAULT, the additive, nullable-safe form of MIGRATION_3_4. Twin of the Swift WhoopStore v20
+         * migration. No destructive fallback (see the class doc): a mismatch throws loudly rather than
+         * silently wiping non-resendable strap history.
+         *
+         * The SQL is exposed as [JOURNAL_NUMERIC_MIGRATION_SQL] so a plain-JVM unit test
+         * ([com.noop.data.JournalNumericMigrationTest]) can pin this shape without Robolectric.
+         */
+        internal val JOURNAL_NUMERIC_MIGRATION_SQL: List<String> = listOf(
+            "ALTER TABLE `journal` ADD COLUMN `numericValue` REAL",
+        )
+
+        internal val MIGRATION_13_14 = object : Migration(13, 14) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                for (stmt in JOURNAL_NUMERIC_MIGRATION_SQL) db.execSQL(stmt)
+            }
+        }
+
+        /**
+         * v14 -> v15: ADDITIVE, adds the `sleepStateSample` table (#175). The strap's OWN band sleep_state
+         * (the @81 high nibble: 0 wake/1 still/2 asleep/3 up) was DECODED but DROPPED at stream extraction,
+         * so the band-state chain (the H7 morning-stillness re-onset CONFIRM guard + a Deep Timeline track)
+         * had no source and the per-session `sleepStateJSON` column was never fed. This new RAW per-sample
+         * table, keyed by (deviceId, ts) like stepSample/ppgHrSample, idempotently upserts a second's band
+         * state from the offload stream. `state` is the raw 0-3 code carried VERBATIM — never a fabricated
+         * value; a strap that never reports it simply has no rows.
+         *
+         * CREATE TABLE only (no existing data touched), so already-offloaded raw streams survive (the strap
+         * trims acked history and won't re-send it). The SQL MUST match Room's generated schema for
+         * [SleepStateSampleEntity] exactly, every column NOT NULL (Kotlin, no SQL DEFAULT), composite PRIMARY
+         * KEY (deviceId, ts) in declaration order. Twin of the Swift WhoopStore v21 migration. No destructive
+         * fallback (see the class doc). Exposed as [SLEEP_STATE_SAMPLE_MIGRATION_SQL] so a plain-JVM unit test
+         * can pin the shape without Robolectric.
+         */
+        internal val SLEEP_STATE_SAMPLE_MIGRATION_SQL: List<String> = listOf(
+            "CREATE TABLE IF NOT EXISTS `sleepStateSample` (`deviceId` TEXT NOT NULL, " +
+                "`ts` INTEGER NOT NULL, `state` INTEGER NOT NULL, PRIMARY KEY(`deviceId`, `ts`))",
+        )
+
+        internal val MIGRATION_14_15 = object : Migration(14, 15) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                for (stmt in SLEEP_STATE_SAMPLE_MIGRATION_SQL) db.execSQL(stmt)
+            }
+        }
+
+        /**
+         * v15 -> v16: ADDITIVE, adds the `liveSession` table (Live Sessions). One row per silent-guardian
+         * coaching session, natural key (deviceId, startTs); `endTs` null while in progress. Twin of the Swift
+         * WhoopStore v22 migration. CREATE TABLE only (no existing data touched). The SQL MUST match Room's
+         * generated schema for [LiveSessionRow] exactly: nullable `endTs`/`chargeAtStart` (no NOT NULL), the
+         * rest NOT NULL (Kotlin non-null, no SQL DEFAULT), composite PRIMARY KEY (deviceId, startTs) in
+         * declaration order. No destructive fallback (see the class doc). Exposed as [LIVE_SESSION_MIGRATION_SQL]
+         * so a plain-JVM unit test can pin the shape without Robolectric.
+         * See docs/superpowers/specs/2026-07-04-live-sessions-design.md.
+         */
+        internal val LIVE_SESSION_MIGRATION_SQL: List<String> = listOf(
+            "CREATE TABLE IF NOT EXISTS `liveSession` (`deviceId` TEXT NOT NULL, " +
+                "`startTs` INTEGER NOT NULL, `endTs` INTEGER, `chargeAtStart` REAL, " +
+                "`floorBpm` REAL NOT NULL, `ceilingBpm` REAL NOT NULL, `inBandSec` REAL NOT NULL, " +
+                "`belowSec` REAL NOT NULL, `aboveSec` REAL NOT NULL, `pushCount` INTEGER NOT NULL, " +
+                "`easeCount` INTEGER NOT NULL, `hrSource` TEXT NOT NULL, " +
+                "PRIMARY KEY(`deviceId`, `startTs`))",
+        )
+
+        internal val MIGRATION_15_16 = object : Migration(15, 16) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                for (stmt in LIVE_SESSION_MIGRATION_SQL) db.execSQL(stmt)
+            }
+        }
+
         private fun build(appContext: Context): WhoopDatabase =
             Room.databaseBuilder(appContext, WhoopDatabase::class.java, DB_NAME)
-                // Real additive migration — NO destructive fallback (see the class doc): with
+                // #1014: replace ONLY the corruption handling of the default open-helper. The
+                // platform default silently DELETES a corrupt database file (non-resendable strap
+                // history gone without a trace); this factory logs + preserves the file instead.
+                // Every migration/lifecycle callback is delegated to Room unchanged.
+                .openHelperFactory(CorruptionPreservingOpenHelperFactory())
+                // Real additive migration, NO destructive fallback (see the class doc): with
                 // exportSchema=false a silent rebuild would lose already-acked, non-resendable strap
                 // history on any schema mismatch. Room throws loudly instead; CI guards the SQL.
                 .addMigrations(
                     MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5,
                     MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10,
-                    MIGRATION_10_11, MIGRATION_11_12,
+                    MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14,
+                    MIGRATION_14_15, MIGRATION_15_16,
                 )
                 .build()
     }

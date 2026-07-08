@@ -1,5 +1,6 @@
 import SwiftUI
 import Foundation
+import UniformTypeIdentifiers
 import StrandDesign
 import StrandImport
 import StrandAnalytics
@@ -29,6 +30,7 @@ import WhoopStore
 
 struct LabBookView: View {
     @EnvironmentObject var repo: Repository
+    @EnvironmentObject var live: LiveState
 
     /// All readings, grouped + ordered for display. Loaded off the store on appear/refresh.
     @State private var markers: [LabMarkerRow] = []
@@ -41,11 +43,25 @@ struct LabBookView: View {
     /// Whether the first-use disclaimer sheet is open.
     @State private var showingDisclaimer = false
 
+    // Markers CSV import (LabMarkerCsvImport, Phase 2).
+    @State private var showingCsvImporter = false   // macOS .fileImporter presentation
+    @State private var csvImporting = false
+    @State private var csvSummary: String?
+    @State private var csvFailed = false
+
     var body: some View {
         ScreenScaffold(
             title: "Lab Book",
-            subtitle: "Your bloods, BP and body numbers — kept private, on \(Platform.deviceNounPhrase).",
-            onRefresh: { await load() }
+            subtitle: "Your bloods, BP and body numbers. Kept private, on \(Platform.deviceNounPhrase).",
+            onRefresh: { await load() },
+            // PERF: the column ends in one `categorySection` per marker category (bloods / BP / body / …),
+            // each carrying its own sparkline-bearing cards. The LazyVStack path builds the off-screen
+            // categories on demand — byte-identical layout — so a logbook with many categories doesn't
+            // render every section + sparkline up-front.
+            lazy: true,
+            // Liquid finish: the day-of-sky backdrop, so Lab Book sits in the same liquid atmosphere as
+            // Today and the other analysis screens.
+            topBackground: liquidScaffoldSky()
         ) {
             VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
                 headerCard
@@ -76,6 +92,18 @@ struct LabBookView: View {
         .sheet(isPresented: $showingDisclaimer) {
             LabBookDisclaimerView()
         }
+        // macOS picker for the markers CSV; iOS goes through DocumentPicker (see
+        // presentCsvImporter) for the iCloud download-on-pick behaviour (#179).
+        .fileImporter(isPresented: $showingCsvImporter,
+                      allowedContentTypes: [.commaSeparatedText, .plainText],
+                      allowsMultipleSelection: false) { result in
+            switch result {
+            case .success(let urls):
+                if let url = urls.first { importMarkersCsv(url: url) }
+            case .failure(let error):
+                NSLog("Import: markers CSV picker failed - \(error.localizedDescription)")
+            }
+        }
     }
 
     // MARK: - Header (count + scope + actions)
@@ -104,9 +132,9 @@ struct LabBookView: View {
                             .foregroundStyle(StrandPalette.textTertiary)
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("What Lab Book is — and isn't")
+                    .accessibilityLabel("What Lab Book is (and isn't)")
                 }
-                Text("It's a notebook, not a lab. NOOP lines up the numbers you enter — it doesn't test, read, or judge them. Not medical advice.")
+                Text("It's a notebook, not a lab. NOOP lines up the numbers you enter. It doesn't test, read, or judge them. Not medical advice.")
                     .font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Button {
@@ -120,18 +148,24 @@ struct LabBookView: View {
         }
     }
 
+    /// Whole-phrase variants per count so translators see complete phrases (never stitched plurals).
     private var countLine: String {
         let keys = Set(markers.map(\.markerKey)).count
-        let markerWord = keys == 1 ? "marker" : "markers"
-        let readingWord = markers.count == 1 ? "reading" : "readings"
-        return "\(keys) \(markerWord) tracked · \(markers.count) \(readingWord)"
+        switch (keys == 1, markers.count == 1) {
+        case (true, true):   return String(localized: "1 marker tracked · 1 reading")
+        case (true, false):  return String(localized: "1 marker tracked · \(markers.count) readings")
+        case (false, true):  return String(localized: "\(keys) markers tracked · 1 reading")
+        case (false, false): return String(localized: "\(keys) markers tracked · \(markers.count) readings")
+        }
     }
 
-    // MARK: - Import entry (reuses the Data Sources import-card idiom)
+    // MARK: - Import entry (the Phase-2 markers CSV importer, LabMarkerCsvImport)
     //
-    // The cross-platform floor is manual entry (above). A bulk "Markers CSV" import is a Phase-2
-    // engine (LabMarkerCsvImport, spec §"Phasing"); until it lands the card honestly points the
-    // user at Data Sources, where every file importer lives, rather than fabricating a flow.
+    // The cross-platform floor is manual entry (above). The bulk markers CSV import is the
+    // Phase-2 engine (LabMarkerCsvImport, spec §"Phasing"): (date, marker, value, unit) rows
+    // with tolerant headers, catalog + custom marker mapping, and skip-and-count on anything
+    // unreadable. The picker follows the Data Sources idiom (DocumentPicker on iOS,
+    // .fileImporter on macOS).
 
     private var importCard: some View {
         NoopCard(padding: 18, tint: StrandPalette.metricAmber) {
@@ -145,14 +179,125 @@ struct LabBookView: View {
                         .accessibilityHidden(true)
                     Text("Import readings").font(StrandFont.headline).foregroundStyle(StrandPalette.textPrimary)
                     Spacer(minLength: 8)
-                    StatePill("Coming soon", tone: .neutral, showsDot: false)
                 }
-                Text("A bulk markers CSV import (date, marker, value, unit) lands with the file importers in Data Sources — same as nutrition and lifting. For now, add readings one at a time above. Everything you import stays on \(Platform.deviceNounPhrase).")
+                Text("Bring in a markers CSV (date, marker, value, unit). Names that match the catalog fold onto your existing markers; anything else comes in as a custom marker. Rows that can't be read are skipped and counted, never guessed. Everything you import stays on \(Platform.deviceNounPhrase).")
                     .font(StrandFont.subhead)
                     .foregroundStyle(StrandPalette.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
+                HStack(spacing: 10) {
+                    Button {
+                        presentCsvImporter()
+                    } label: {
+                        Label(csvImporting ? "Importing…" : "Choose CSV…", systemImage: "tray.and.arrow.down")
+                    }
+                    .buttonStyle(.noopPrimary)
+                    .disabled(csvImporting)
+                    .accessibilityLabel("Choose a markers CSV file to import")
+                    if csvImporting { ProgressView().controlSize(.small) }
+                }
+                if let s = csvSummary {
+                    Text(s).font(StrandFont.subhead)
+                        .foregroundStyle(csvFailed ? StrandPalette.statusWarning : StrandPalette.statusPositive)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
+    }
+
+    private func presentCsvImporter() {
+        #if os(iOS)
+        // iOS: UIDocumentPickerViewController with asCopy:true (DocumentPicker) so an
+        // undownloaded iCloud file is fetched and handed over readable (#179).
+        Task {
+            guard let url = await DocumentPicker.importFile([.commaSeparatedText, .plainText]) else { return } // cancelled
+            importMarkersCsv(url: url)
+        }
+        #else
+        showingCsvImporter = true
+        #endif
+    }
+
+    /// Parse a markers CSV (LabMarkerCsvImport) and upsert the readings into the Lab Book
+    /// under this device id with the `lab-csv` provenance tag; the daily `lab-book`
+    /// projection rides the store's upsert, then a refresh lets Compare/Explore/Coach see
+    /// the new markers.
+    private func importMarkersCsv(url: URL) {
+        csvImporting = true
+        csvSummary = nil
+        csvFailed = false
+        Task {
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            do {
+                let data = try Data(contentsOf: url)
+                let result = LabMarkerCsvImport.parse(data: data)
+                guard !result.fileTooLarge else {
+                    csvSummary = String(localized: "That file is too large for a markers CSV import.")
+                    csvFailed = true
+                    csvImporting = false
+                    return
+                }
+                guard result.importedReadings > 0 else {
+                    csvSummary = String(localized: "No usable rows found. Check the file has date, marker and value columns.")
+                    csvFailed = true
+                    logImport("Lab Book CSV: no usable rows (\(result.skippedRows) skipped)")
+                    csvImporting = false
+                    return
+                }
+                guard let store = await repo.storeHandle() else {
+                    csvSummary = String(localized: "Couldn't open the local store.")
+                    csvFailed = true
+                    csvImporting = false
+                    return
+                }
+                let rows = result.rows.map { r -> LabMarkerRow in
+                    // Local noon of the row's literal day: deterministic, so re-importing
+                    // the same file updates in place (natural key
+                    // deviceId+markerKey+takenAt+source) instead of duplicating.
+                    let epoch = LabBookFormat.noonEpoch(r.day)
+                    return LabMarkerRow(
+                        id: "\(r.markerKey)-\(epoch)-\(UUID().uuidString.prefix(8))",
+                        deviceId: repo.deviceId,
+                        markerKey: r.markerKey,
+                        category: r.category.rawValue,
+                        day: r.day,
+                        takenAt: epoch,
+                        value: r.value,
+                        valueText: nil,
+                        unit: r.unit,
+                        source: LabMarkerCsvImport.sourceId,
+                        note: nil,
+                        referenceText: nil
+                    )
+                }
+                try await store.upsertLabMarkers(rows)
+                await repo.refresh()   // re-resolves the lab-book projection into Compare/Explore/Coach
+                await load()
+                var msg = String(localized: "Imported \(result.importedReadings) readings (\(result.distinctMarkers) markers)")
+                if let a = result.earliestDay, let b = result.latestDay, a != b { msg += " · \(a)-\(b)" }
+                if result.skippedRows > 0 {
+                    // Whole-phrase variants per count; the separator stays outside the localized key.
+                    msg += " · " + (result.skippedRows == 1
+                                    ? String(localized: "1 row skipped")
+                                    : String(localized: "\(result.skippedRows) rows skipped"))
+                }
+                csvSummary = msg
+                csvFailed = false
+                logImport("Lab Book CSV: \(result.importedReadings) readings, \(result.distinctMarkers) markers, \(result.skippedRows) rejected")
+            } catch {
+                csvSummary = String(localized: "Import failed: \(error.localizedDescription)")
+                csvFailed = true
+                logImport("Lab Book CSV failed: \(error.localizedDescription)")
+            }
+            csvImporting = false
+        }
+    }
+
+    /// One privacy-safe line into the SAME exported strap log the other importers use
+    /// (issue #421 parity): COUNTS only, never a file name, a path, or any health value.
+    /// Same shape as DataSourcesView.logImport.
+    private func logImport(_ line: String) {
+        live.append(log: "[\(AppModel.logTimeFormatter.string(from: Date()))] Import \(line)")
     }
 
     // MARK: - Empty state (honest)
@@ -242,7 +387,9 @@ struct LabBookView: View {
                 }
             }
         }
-        .buttonStyle(.plain)
+        // Liquid press language: the settle-inward LiquidPressStyle the Today / batch-1 rows use, so
+        // opening a marker's detail feels physical (replaces the flat .plain style).
+        .buttonStyle(LiquidPressStyle())
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(displayName(for: key)), latest \(latestLabel(latest, key: key)), \(series.count) readings")
     }
@@ -251,7 +398,7 @@ struct LabBookView: View {
 
     private var disclaimerNote: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Lab Book is a private notebook, not a medical service. NOOP stores and lines up the numbers you enter — it doesn't test, read, diagnose, or advise. Your records never leave \(Platform.deviceNounPhrase); there's no account or cloud, so it isn't \"HIPAA-covered.\" Always rely on your doctor or pharmacist to interpret results.")
+            Text("Lab Book is a private notebook, not a medical service. NOOP stores and lines up the numbers you enter. It doesn't test, read, diagnose, or advise. Your records never leave \(Platform.deviceNounPhrase); there's no account or cloud, so it isn't \"HIPAA-covered.\" Always rely on your doctor or pharmacist to interpret results.")
                 .font(StrandFont.footnote)
                 .foregroundStyle(StrandPalette.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -287,8 +434,8 @@ struct LabBookView: View {
     }
 
     private func lastTakenCaption(_ row: LabMarkerRow?) -> String {
-        guard let row else { return "no readings yet" }
-        return "last taken \(LabBookFormat.day(row.takenAt))"
+        guard let row else { return String(localized: "no readings yet") }
+        return String(localized: "last taken \(LabBookFormat.day(row.takenAt))")
     }
 
     private var detailBinding: Binding<MarkerKeyID?> {
@@ -337,12 +484,12 @@ extension LabMarkerCategory {
     /// Human label for the Lab Book grouping header. Organisational only — never a clinical panel name.
     var displayName: String {
         switch self {
-        case .bloodPanel:      return "Blood panel"
-        case .bloodPressure:   return "Blood pressure"
-        case .bodyMeasurement: return "Body"
-        case .imaging:         return "Imaging"
-        case .appointmentNote: return "Notes"
-        case .other:           return "Custom"
+        case .bloodPanel:      return String(localized: "Blood panel")
+        case .bloodPressure:   return String(localized: "Blood pressure")
+        case .bodyMeasurement: return String(localized: "Body")
+        case .imaging:         return String(localized: "Imaging")
+        case .appointmentNote: return String(localized: "Notes")
+        case .other:           return String(localized: "Custom")
         }
     }
 }
@@ -368,6 +515,24 @@ enum LabBookFormat {
         dayFormatter.string(from: Date(timeIntervalSince1970: TimeInterval(epoch)))
     }
 
+    /// "12 Jun 2026" rendered from a stored `yyyy-MM-dd` day string, LOCATION-INDEPENDENTLY: the day key
+    /// is parsed in UTC and reformatted in UTC, so the history date never shifts with the device zone the
+    /// way `day(takenAt)` (a local render of a stored instant) can near midnight. Falls back to the raw
+    /// string if it doesn't parse.
+    static func dayFromKey(_ day: String) -> String {
+        guard let date = utcKeyFormatter.date(from: day) else { return day }
+        return utcDayFormatter.string(from: date)
+    }
+
+    /// "d MMM yyyy" pinned to UTC, paired with `utcKeyFormatter` so `dayFromKey` round-trips a UTC day.
+    private static let utcDayFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.dateFormat = "d MMM yyyy"
+        return f
+    }()
+
     /// The `yyyy-MM-dd` day key the projection uses (LOCAL day of the reading).
     private static let keyFormatter: DateFormatter = {
         let f = DateFormatter()
@@ -376,6 +541,28 @@ enum LabBookFormat {
         return f
     }()
     static func dayKey(_ date: Date) -> String { keyFormatter.string(from: date) }
+
+    /// A `yyyy-MM-dd` parser PINNED to UTC, so a day string always maps to the same instant regardless
+    /// of the device zone. The local-zone `keyFormatter` above returns nil for a day whose LOCAL midnight
+    /// is skipped by a DST transition (e.g. Chile/Cuba, 06 Sep) - which used to collapse `noonEpoch` to
+    /// epoch 0 and collide different days on the natural key. UTC never skips midnight.
+    private static let utcKeyFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
+
+    /// Epoch seconds of UTC noon on a `yyyy-MM-dd` day — the deterministic, LOCATION-INDEPENDENT `takenAt`
+    /// for CSV-imported readings, so re-importing the same file (even after travel to another zone) upserts
+    /// in place instead of minting a duplicate (natural key deviceId+markerKey+takenAt+source). Pinned to
+    /// UTC so a DST-skipped local midnight can never collapse the key to epoch 0. 0 only for a genuinely
+    /// unparseable day string. History dates render from the stored `day` string, not this takenAt.
+    static func noonEpoch(_ day: String) -> Int {
+        guard let midnight = utcKeyFormatter.date(from: day) else { return 0 }
+        return Int(midnight.timeIntervalSince1970) + 12 * 3600
+    }
 }
 
 // MARK: - Marker detail (history + trend + "compare with a signal")
@@ -405,7 +592,14 @@ private struct MarkerDetailView: View {
 
     var body: some View {
         ScreenScaffold(title: LocalizedStringKey(displayName),
-                       subtitle: "\(readings.count) reading\(readings.count == 1 ? "" : "s") · your own entries") {
+                       // Whole-phrase variants per count (never a stitched plural).
+                       subtitle: readings.count == 1 ? "1 reading · your own entries"
+                                                     : "\(readings.count) readings · your own entries",
+                       // PERF: chart + full-history column (a trend Sparkline, the compare card, then a
+                       // row-per-reading history list). The LazyVStack path builds the off-screen history
+                       // rows on demand — byte-identical layout — so a marker with many readings doesn't
+                       // materialise its whole list before the trend chart is on screen.
+                       lazy: true) {
             VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
                 trendSection
                 if !numericReadings.isEmpty { compareSection }
@@ -458,22 +652,25 @@ private struct MarkerDetailView: View {
     }
 
     /// "Your last 3 LDL readings: 3.4 → 3.1 → 2.9 mmol/L, trending down." — descriptive only.
+    /// Whole-phrase variants per direction so translators never see a stitched trend fragment.
     private var trendSentence: String {
         let nums = numericReadings
         guard let last = nums.last?.value else {
-            return readings.last?.valueText.map { "Latest entry: \($0)." } ?? "No numeric readings yet."
+            return readings.last?.valueText.map { String(localized: "Latest entry: \($0).") } ?? String(localized: "No numeric readings yet.")
         }
         guard nums.count >= 2 else {
-            return "One reading so far: \(LabBookFormat.value(last, key: markerKey)) \(unit). Log a few more to see a trend."
+            return String(localized: "One reading so far: \(LabBookFormat.value(last, key: markerKey)) \(unit). Log a few more to see a trend.")
         }
         let shown = nums.suffix(3).compactMap { $0.value }
         let arrowed = shown.map { LabBookFormat.value($0, key: markerKey) }.joined(separator: " → ")
         let first = shown.first ?? last
-        let direction: String
-        if last > first { direction = "trending up" }
-        else if last < first { direction = "trending down" }
-        else { direction = "holding steady" }
-        return "Your last \(shown.count) readings: \(arrowed) \(unit), \(direction)."
+        if last > first {
+            return String(localized: "Your last \(shown.count) readings: \(arrowed) \(unit), trending up.")
+        }
+        if last < first {
+            return String(localized: "Your last \(shown.count) readings: \(arrowed) \(unit), trending down.")
+        }
+        return String(localized: "Your last \(shown.count) readings: \(arrowed) \(unit), holding steady.")
     }
 
     private var latestReferenceText: String? {
@@ -551,9 +748,12 @@ private struct MarkerDetailView: View {
             Text("Lining them up…").font(StrandFont.subhead).foregroundStyle(StrandPalette.textTertiary)
         } else if n < LabBookSignals.floor {
             // Below the floor: show the points exist, withhold the conclusion sentence.
+            // Whole-phrase variants per count (never a stitched plural).
             Text(n == 0
-                 ? "No overlap yet between this marker and \(signal?.title.lowercased() ?? "that signal"). Log a few more readings (and keep wearing your strap)."
-                 : "\(n) reading\(n == 1 ? "" : "s") line up so far — not enough to read a trend yet (NOOP waits for \(LabBookSignals.floor)).")
+                 ? "No overlap yet between this marker and \(signal?.title.lowercased() ?? String(localized: "that signal")). Log a few more readings (and keep wearing your strap)."
+                 : (n == 1
+                    ? "1 reading lines up so far, not enough to read a trend yet (NOOP waits for \(LabBookSignals.floor))."
+                    : "\(n) readings line up so far, not enough to read a trend yet (NOOP waits for \(LabBookSignals.floor))."))
                 .font(StrandFont.subhead)
                 .foregroundStyle(StrandPalette.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -572,6 +772,12 @@ private struct MarkerDetailView: View {
         let tint = LabBookSignals.correlationColor(c.r)
         return VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 10) {
+                // A small liquid vessel posed at the association STRENGTH (|r|, a neutral 0–1 statistical
+                // magnitude — never a clinical value), tinted by the relationship's own colour. Matches
+                // Compare's pair card. Decorative — the r read-out + sentence carry the meaning.
+                LiquidVessel(value: min(abs(c.r), 1), tint: tint, animated: false)
+                    .frame(width: 30, height: 30)
+                    .accessibilityHidden(true)
                 Text("\(displayName) ↔ \(signal?.title ?? "")")
                     .font(StrandFont.headline)
                     .foregroundStyle(StrandPalette.textPrimary)
@@ -588,8 +794,12 @@ private struct MarkerDetailView: View {
                 .font(StrandFont.subhead)
                 .foregroundStyle(StrandPalette.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
+            // The association strength as a liquid tube (the horizontal magnitude idiom), reading |r|
+            // from no link (0) to a perfect one (1). Decorative and non-clinical.
+            LiquidTube(frac: min(abs(c.r), 1), tint: tint, height: 8, animated: false)
+                .accessibilityHidden(true)
             // The mandatory clause for markers (spec §"On-device algorithm").
-            Text("\(n) readings used · \(LabBookSignals.strengthWord(c.r)) \(LabBookSignals.directionWord(c.r)) association. This is your own data sitting side by side — it's not a medical finding, and it shows association, not cause.")
+            Text("\(n) readings used · \(LabBookSignals.strengthWord(c.r)) \(LabBookSignals.directionWord(c.r)) association. This is your own data sitting side by side. It's not a medical finding, and it shows association, not cause.")
                 .font(StrandFont.footnote)
                 .foregroundStyle(StrandPalette.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -622,7 +832,7 @@ private struct MarkerDetailView: View {
                 Text(valueLabel(row))
                     .font(StrandFont.number(16))
                     .foregroundStyle(StrandPalette.textPrimary)
-                Text(LabBookFormat.day(row.takenAt))
+                Text(LabBookFormat.dayFromKey(row.day))
                     .font(StrandFont.footnote)
                     .foregroundStyle(StrandPalette.textTertiary)
                 if let note = row.note, !note.isEmpty {
@@ -679,9 +889,9 @@ enum LabWindow: String, CaseIterable, Identifiable {
     var id: String { rawValue }
     var label: String {
         switch self {
-        case .week:      return "7d"
-        case .fortnight: return "14d"
-        case .month:     return "30d"
+        case .week:      return String(localized: "7d")
+        case .fortnight: return String(localized: "14d")
+        case .month:     return String(localized: "30d")
         }
     }
     var days: Int {
@@ -693,9 +903,9 @@ enum LabWindow: String, CaseIterable, Identifiable {
     }
     var phrase: String {
         switch self {
-        case .week:      return "7 days"
-        case .fortnight: return "14 days"
-        case .month:     return "30 days"
+        case .week:      return String(localized: "7 days")
+        case .fortnight: return String(localized: "14 days")
+        case .month:     return String(localized: "30 days")
         }
     }
 }
@@ -734,26 +944,28 @@ enum LabBookSignals {
 
     static func strengthWord(_ r: Double) -> String {
         switch abs(r) {
-        case ..<0.1:  return "negligible"
-        case ..<0.3:  return "weak"
-        case ..<0.5:  return "moderate"
-        case ..<0.7:  return "strong"
-        default:      return "very strong"
+        case ..<0.1:  return String(localized: "negligible")
+        case ..<0.3:  return String(localized: "weak")
+        case ..<0.5:  return String(localized: "moderate")
+        case ..<0.7:  return String(localized: "strong")
+        default:      return String(localized: "very strong")
         }
     }
 
     static func directionWord(_ r: Double) -> String {
         if abs(r) < 0.1 { return "" }
-        return r >= 0 ? "positive" : "negative"
+        return r >= 0 ? String(localized: "positive") : String(localized: "negative")
     }
 
     /// "When LDL is higher, HRV tends to be lower." — descriptive, no causal language.
+    /// Whole-phrase variants per direction so translators never see a stitched verb fragment.
     static func insightSentence(markerName: String, signalName: String, r: Double) -> String {
         guard abs(r) >= 0.3 else {
-            return "Over your readings, \(markerName) and \(signalName.lowercased()) move largely independently — no clear relationship."
+            return String(localized: "Over your readings, \(markerName) and \(signalName.lowercased()) move largely independently. No clear relationship.")
         }
-        let verb = r < 0 ? "tends to be lower" : "tends to be higher"
-        return "When \(markerName) is higher, \(signalName.lowercased()) \(verb)."
+        return r < 0
+            ? String(localized: "When \(markerName) is higher, \(signalName.lowercased()) tends to be lower.")
+            : String(localized: "When \(markerName) is higher, \(signalName.lowercased()) tends to be higher.")
     }
 
     static func correlationColor(_ r: Double) -> Color {
@@ -770,11 +982,11 @@ private struct LabBookDisclaimerView: View {
     var body: some View {
         ScreenScaffold(title: "About Lab Book", subtitle: "A private notebook, not a medical service.") {
             VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-                bullet("NOOP stores and lines up the numbers you enter yourself. It does not test you, read your results, give medical advice, or diagnose anything.")
-                bullet("Anything you see here — including any side-by-side trend — is your own information shown back to you. It's an association, never a cause, and never a medical finding.")
-                bullet("NOOP never decides whether a value is \"normal,\" \"high,\" or \"low.\" Any reference range shown is exactly what you typed from your own report.")
-                bullet("Your records never leave \(Platform.deviceNounPhrase). There's no account, no cloud, no NOOP server. Because NOOP is an independent app you run yourself — not a healthcare provider — it isn't \"HIPAA-covered,\" and that protection doesn't apply here; the safety comes from the data being local-only and yours.")
-                bullet("Always rely on your doctor, pharmacist, or a qualified professional to interpret results and make decisions. If a number worries you, talk to them — not to an app.")
+                bullet(String(localized: "NOOP stores and lines up the numbers you enter yourself. It does not test you, read your results, give medical advice, or diagnose anything."))
+                bullet(String(localized: "Anything you see here (including any side-by-side trend) is your own information shown back to you. It's an association, never a cause, and never a medical finding."))
+                bullet(String(localized: "NOOP never decides whether a value is \"normal,\" \"high,\" or \"low.\" Any reference range shown is exactly what you typed from your own report."))
+                bullet(String(localized: "Your records never leave \(Platform.deviceNounPhrase). There's no account, no cloud, no NOOP server. Because NOOP is an independent app you run yourself (not a healthcare provider), it isn't \"HIPAA-covered,\" and that protection doesn't apply here; the safety comes from the data being local-only and yours."))
+                bullet(String(localized: "Always rely on your doctor, pharmacist, or a qualified professional to interpret results and make decisions. If a number worries you, talk to them, not to an app."))
                 Button("Got it") { dismiss() }
                     .buttonStyle(.noopPrimary)
                     .padding(.top, 4)
@@ -814,6 +1026,7 @@ private func labBookPreviewRepo() -> Repository {
 #Preview("Lab Book") {
     LabBookView()
         .environmentObject(labBookPreviewRepo())
+        .environmentObject(LiveState())
         .frame(width: 920, height: 860)
         .preferredColorScheme(.dark)
 }

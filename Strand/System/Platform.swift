@@ -53,8 +53,10 @@ enum Platform {
         #endif
     }
 
-    /// "this iPhone" / "this Mac" — the common demonstrative form.
-    static var deviceNounPhrase: String { "this \(deviceNoun)" }
+    /// "this iPhone" / "this Mac", the common demonstrative form. Localized so the demonstrative
+    /// reads natively when interpolated into translated copy (key "this %@"); the noun itself is a
+    /// product name and stays as-is.
+    static var deviceNounPhrase: String { String(localized: "this \(deviceNoun)") }
 }
 
 // MARK: - Opening URLs

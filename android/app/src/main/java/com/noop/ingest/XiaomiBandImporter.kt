@@ -303,7 +303,7 @@ object XiaomiBandImporter {
 
         val first = days.firstOrNull()?.day
         val last = days.lastOrNull()?.day
-        val span = if (first != null && last != null && first != last) " · $first – $last" else ""
+        val span = if (first != null && last != null && first != last) " · $first-$last" else ""
         return ImportSummary(
             source = SOURCE_LABEL,
             counts = mapOf("dailyMetric" to dailyMetrics.size, "sleepSession" to sleepRows.size, "metricSeries" to series.size),

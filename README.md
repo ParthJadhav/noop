@@ -6,7 +6,7 @@
 
 <p align="center"><b>Your strap. Your data. Your machine. Offline, on-device, no cloud.</b></p>
 
-<p align="center"><sub>Now in the <b>"Titanium &amp; Gold"</b> redesign: one feature set across iPhone, Android and Mac.</sub></p>
+<p align="center"><sub>Now in the all-new <b>Liquid Metal</b> design: one living look across iPhone, Android and Mac.</sub></p>
 
 <p align="center">
   <img alt="Platforms" src="https://img.shields.io/badge/platforms-macOS%20%C2%B7%20Android%20%C2%B7%20iOS-E8B84B?style=flat-square">
@@ -16,7 +16,10 @@
   <a href="LICENSE"><img alt="License: PolyForm Noncommercial 1.0.0" src="https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-6B737B?style=flat-square"></a>
   <a href="https://www.reddit.com/r/NOOPApp/"><img alt="Community: r/NOOPApp" src="https://img.shields.io/badge/community-r%2FNOOPApp-E8B84B?style=flat-square&logo=reddit&logoColor=white"></a>
   <a href="https://discord.com/invite/nHK9FHczu"><img alt="Chat: Discord" src="https://img.shields.io/badge/chat-Discord-5865F2?style=flat-square&logo=discord&logoColor=white"></a>
+  <a href="https://noop.fans"><img alt="Mirror: noop.fans" src="https://img.shields.io/badge/mirror-noop.fans-C8902F?style=flat-square"></a>
 </p>
+
+<p align="center"><sub><b>GitHub down?</b> Every release is mirrored at <a href="https://noop.fans"><b>noop.fans</b></a> &mdash; same downloads, release for release, as a fallback.</sub></p>
 
 <p align="center">
   <a href="https://github.com/NoopApp/noop/releases/latest"><img alt="Latest release" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FNoopApp%2Fnoop%2Fmain%2Fdocs%2Fstats%2Frelease.json&style=flat-square"></a>
@@ -31,6 +34,7 @@
 <p align="center">
   <a href="#keeping-noop-alive">♥&nbsp;Support</a> ·
   <a href="#download">⬇&nbsp;Download</a> ·
+  <a href="https://noop.fans">🪞&nbsp;Mirror</a> ·
   <a href="https://github.com/NoopApp/noop/wiki/FAQ">❓&nbsp;FAQ</a> ·
   <a href="https://discord.com/invite/nHK9FHczu">💬&nbsp;Discord</a> ·
   <a href="https://www.reddit.com/r/NOOPApp/">👽&nbsp;Reddit</a> ·
@@ -40,13 +44,17 @@
 </p>
 
 <p align="center">
-  <img src="docs/assets/shot-ios-today.png" alt="Today — iPhone" width="218">
-  &nbsp;&nbsp;
-  <img src="docs/assets/shot-android-sleep.png" alt="Sleep — Android" width="218">
-  &nbsp;&nbsp;
-  <img src="docs/assets/shot-ios-stress.png" alt="Stress — iPhone" width="218">
+  <a href="https://github.com/NoopApp/noop/releases/latest"><img src="docs/assets/hero-v8.jpg" alt="NOOP in the new Liquid Metal design, on iPhone, Mac and Android" width="820"></a>
 </p>
-<p align="center"><sub>Today · Sleep · Stress — the new <b>Titanium &amp; Gold</b> look. One feature set across iPhone, Android &amp; Mac.</sub></p>
+
+<p align="center">
+  <img src="docs/assets/shot-ios-today.png" alt="Today on iPhone" width="218">
+  &nbsp;&nbsp;
+  <img src="docs/assets/shot-android-today.png" alt="Today on Android" width="218">
+  &nbsp;&nbsp;
+  <img src="docs/assets/shot-android-trend.png" alt="A metric's own trend on Android" width="218">
+</p>
+<p align="center"><sub>The all-new <b>Liquid Metal</b> look: living liquid scores, a sky that moves with your day, rebuilt on every screen. The same Today on iPhone and Android, and a metric&rsquo;s own trend. One design across iPhone, Android &amp; Mac.</sub></p>
 
 ---
 

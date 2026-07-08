@@ -9,13 +9,11 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Air
@@ -27,10 +25,14 @@ import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Remove
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.VolumeOff
+import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -45,12 +47,24 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import android.content.Context
+import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioManager
+import android.media.AudioTrack
+import kotlin.math.PI
+import kotlin.math.sin
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.noop.analytics.BreathPacer
 import com.noop.analytics.Hrv
@@ -106,6 +120,15 @@ private enum class Pace(val label: String) {
 
 private enum class Phase { Inhale, Exhale }
 
+// MARK: - Liquid hero tokens (the liquid Breathe restyle)
+//
+// The frosted hero panel the breathe vessel floats on, matching the liquid Today heroCard. `heroFill` is a
+// translucent near-black (mock rgba(13,14,20,.80)) so it floats over the day-of-sky and the vessel + white
+// count-up read crisp on it; radius 26 + a white@0.11 hairline give the frosted-glass edge. Declared here
+// (not shared from Today) because the Today copies are file-private — same values, kept in lockstep.
+private val LIQUID_HERO_FILL: Color = Color(red = 13f / 255f, green = 14f / 255f, blue = 20f / 255f, alpha = 0.80f)
+private val LIQUID_HERO_RADIUS = 26.dp
+
 /** The three biofeedback layers as a mode switch (mirrors BreathingView.Mode). */
 private enum class BreatheMode(val label: String) {
     Breathe("Breathe"),
@@ -131,6 +154,16 @@ fun BreatheScreen(viewModel: AppViewModel) {
 
     var pace by remember { mutableStateOf(Pace.Coherence) }
     var running by remember { mutableStateOf(false) }
+
+    // Opt-in audio pacer — a soft tone at each phase change (a brighter note on the inhale, a lower one
+    // on the exhale). Default OFF (manual-first). The tone player honours the ringer mode, so a phone on
+    // silent/vibrate stays quiet — the Android twin of the iOS ambient session that obeys the silent
+    // switch. SharedPreferences isn't reactive: read once, mirror writes into this state.
+    var audioCues by remember {
+        mutableStateOf(NoopPrefs.of(context).getBoolean(KEY_BREATHE_AUDIO_CUES, false))
+    }
+    val tonePlayer = remember { BreathTonePlayer(context) }
+    DisposableEffect(Unit) { onDispose { tonePlayer.release() } }
     var phase by remember { mutableStateOf(Phase.Inhale) }
     var sessionSeconds by remember { mutableIntStateOf(0) }
     var breathCount by remember { mutableIntStateOf(0) }
@@ -220,10 +253,12 @@ fun BreatheScreen(viewModel: AppViewModel) {
             // Inhale: cue, then hold for the inhale duration.
             phase = Phase.Inhale
             viewModel.buzz(loops = 1)
+            if (audioCues) tonePlayer.play(BreathTone.Inhale)
             delay((pace.inhale(lockedBpm) * 1000).toLong())
             // Exhale: cue, then hold for the exhale duration.
             phase = Phase.Exhale
             viewModel.buzz(loops = 2)
+            if (audioCues) tonePlayer.play(BreathTone.Exhale)
             delay((pace.exhale(lockedBpm) * 1000).toLong())
             breathCount += 1
         }
@@ -232,14 +267,36 @@ fun BreatheScreen(viewModel: AppViewModel) {
     DisposableEffect(Unit) {
         onDispose {
             // Leaving mid-session still banks the outcome (mirrors macOS onDisappear → stop()).
-            if (running) endSession()
+            if (running) {
+                endSession()
+                // #769: also tell the strap to stop haptics on the way out so a leftover pattern can't
+                // wedge the strap if the link drops after we navigate away. Best-effort (guarded send).
+                viewModel.stopHaptics()
+            }
             running = false
+        }
+    }
+
+    // #769: if the strap drops WHILE a session is live, end the session AND fire the stop-haptics clear.
+    // The breath-engine LaunchedEffect already stops scheduling pulses once `running` flips false; this
+    // adds the strap-side clear (best-effort) and banks the outcome, mirroring the macOS
+    // BiofeedbackController bond watch.
+    LaunchedEffect(live.bonded) {
+        if (!live.bonded && running) {
+            running = false
+            endSession()
+            viewModel.stopHaptics()
         }
     }
 
     ScreenScaffold(
         title = "Breathe",
         subtitle = "Haptic-paced breathing · find your pace · calm down",
+        // LIQUID SKY BACKDROP (the pilot pattern — LiquidScreenSky.kt): the time-of-day liquid sky settles
+        // into the theme canvas behind the header + top card and bleeds full-width up behind the status bar
+        // via the scaffold's topBackground plumbing. The Android equivalent of the iOS
+        // `ScreenScaffold(topBackground: liquidScaffoldSky())`; the cards float OVER it on the flat canvas.
+        topBackground = { LiquidScreenSky() },
     ) {
         // Mode switch — Breathe / Resonance / Calm me.
         SegmentedPillControl(
@@ -299,8 +356,17 @@ fun BreatheScreen(viewModel: AppViewModel) {
             Text("$breathCount breaths", style = NoopType.captionNumber, color = Palette.textSecondary)
         }
 
-        // The orb card.
-        NoopCard(padding = 24.dp, tint = Palette.restColor) {
+        // The liquid hero CARD: a translucent near-black frosted panel (mock rgba(13,14,20,.80), radius 26,
+        // white@0.11 hairline) that floats over the day-of-sky so the breathe vessel + white count-up stay
+        // crisp — the card does the contrast work, not a muted sky. Mirrors the iOS liquid heroCard.
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(LIQUID_HERO_RADIUS))
+                .background(LIQUID_HERO_FILL)
+                .border(1.dp, Color.White.copy(alpha = 0.11f), RoundedCornerShape(LIQUID_HERO_RADIUS))
+                .padding(24.dp),
+        ) {
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(18.dp),
@@ -314,21 +380,36 @@ fun BreatheScreen(viewModel: AppViewModel) {
                     )
                 }
 
-                // The breathing orb is the immersive hero: it floats over a calm Rest-world
-                // starfield, the scenic bloom deepening as the orb expands so the field breathes.
+                // The breathe pacer is now a liquid VESSEL: it FILLS on the inhale and EMPTIES on the exhale,
+                // driven by the SAME eased `orbProgress` the orb used (0..1, from the phase-duration tween), so
+                // the breath timing is untouched — the fluid just replaces the scaling orb. Only animates while
+                // a session is live (posed/static otherwise, so the still hero costs nothing). The live BPM
+                // counts up over it (white, tabular, soft shadow, hit-transparent so a tap falls to the vessel,
+                // which owns its own splash+haptic). Rest-tinted (restBright), matching the iOS breathe hero.
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(300.dp)
-                        .clip(RoundedCornerShape(Metrics.cardRadius)),
+                        .height(280.dp),
                     contentAlignment = Alignment.Center,
                 ) {
-                    ScenicHeroBackground(
-                        modifier = Modifier.matchParentSize(),
-                        domain = DomainTheme.Rest,
-                        starCount = 56,
+                    LiquidVessel(
+                        value = orbProgress.toDouble(),
+                        tint = Palette.restBright,
+                        animated = running,
+                        modifier = Modifier.height(280.dp),
                     )
-                    BreathingOrb(progress = orbProgress, bpm = bpm, modifier = Modifier.height(280.dp))
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier.clearAndSetSemantics {},
+                    ) {
+                        Text(
+                            bpm?.toString() ?: "—",
+                            style = NoopType.number(40f, weight = FontWeight.Bold)
+                                .copy(shadow = Shadow(color = Color.Black.copy(alpha = 0.5f), offset = Offset(0f, 1f), blurRadius = 6f)),
+                            color = Color.White,
+                        )
+                        Text("BPM", style = NoopType.footnote.copy(letterSpacing = 0.8.sp), color = Palette.textTertiary)
+                    }
                 }
 
                 Text(
@@ -350,6 +431,15 @@ fun BreatheScreen(viewModel: AppViewModel) {
                     label = { it.label },
                     onSelect = { pace = it },
                 )
+
+                // Opt-in audio pacer toggle — soft tone on each phase, honours the ringer mode.
+                AudioCueToggle(
+                    checked = audioCues,
+                    onChange = {
+                        audioCues = it
+                        NoopPrefs.of(context).edit().putBoolean(KEY_BREATHE_AUDIO_CUES, it).apply()
+                    },
+                )
             }
         }
 
@@ -360,6 +450,9 @@ fun BreatheScreen(viewModel: AppViewModel) {
                     if (running) {
                         running = false
                         endSession()
+                        // #769: clear any pattern the strap is mid-way through so a drop right after stop
+                        // can't wedge its haptic manager. Best-effort (no-op when unbonded / on a 5/MG).
+                        viewModel.stopHaptics()
                     } else {
                         sessionSeconds = 0
                         breathCount = 0
@@ -401,7 +494,7 @@ fun BreatheScreen(viewModel: AppViewModel) {
         // Hidden while running and when there is nothing honest to show.
         val outcomeLine = when {
             running -> null
-            endedOutcome == "—" -> "RMSSD — · not enough R-R data"
+            endedOutcome == "—" -> "RMSSD - · not enough R-R data"
             endedOutcome != null -> "RMSSD $endedOutcome"
             lastStoredOutcome.isNotEmpty() -> "Last session: $lastStoredOutcome"
             else -> null
@@ -471,66 +564,36 @@ fun BreatheScreen(viewModel: AppViewModel) {
     }
 }
 
-// MARK: - Breathing orb
+// MARK: - Audio cue toggle
 
 @Composable
-private fun BreathingOrb(progress: Float, bpm: Int?, modifier: Modifier = Modifier) {
-    val minScale = 0.42f
-    val scale = minScale + (1f - minScale) * progress
-    Box(
-        modifier = modifier
-            .fillMaxWidth()
-            .aspectRatio(1f),
-        contentAlignment = Alignment.Center,
-    ) {
-        // Static guide ring at the inhale extent.
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .aspectRatio(1f)
-                .clip(CircleShape)
-                .border(1.dp, Palette.restColor.copy(alpha = 0.28f), CircleShape),
+private fun AudioCueToggle(checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Icon(
+            if (checked) Icons.Filled.VolumeUp else Icons.Filled.VolumeOff,
+            contentDescription = null,
+            tint = if (checked) Palette.restBright else Palette.textTertiary,
+            modifier = Modifier.size(16.dp).padding(end = 10.dp),
         )
-        // Outer halo — a Rest-world bloom that brightens as the orb expands. Roughly HALVED to match
-        // the iOS refresh (less glow, crisper): the peak alpha is ~0.15 and it scales with the orb's
-        // expansion (an envelope, like iOS's 0.55 + 0.45·progress) so it stays calm rather than blooming.
-        Box(
-            modifier = Modifier
-                .fillMaxWidth(scale * 1.35f)
-                .aspectRatio(1f)
-                .clip(CircleShape)
-                .background(
-                    Brush.radialGradient(
-                        colors = listOf(
-                            Palette.restBright.copy(alpha = 0.15f * scale.coerceIn(0f, 1f)),
-                            Color.Transparent,
-                        ),
-                    ),
-                ),
-        )
-        // Orb body — soft indigo→periwinkle Rest gradient.
-        Box(
-            modifier = Modifier
-                .fillMaxWidth(scale)
-                .aspectRatio(1f)
-                .clip(CircleShape)
-                .background(
-                    Brush.radialGradient(
-                        colors = listOf(
-                            Palette.restBright.copy(alpha = 0.90f),
-                            Palette.restColor.copy(alpha = 0.62f),
-                            Palette.restDeep.copy(alpha = 0.85f),
-                        ),
-                    ),
-                )
-                .border(1.dp, Palette.restBright.copy(alpha = 0.50f), CircleShape),
-            contentAlignment = Alignment.Center,
-        ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(bpm?.toString() ?: "—", style = NoopType.number(40f), color = Palette.textPrimary)
-                Text("BPM", style = NoopType.footnote.copy(letterSpacing = 0.8.sp), color = Palette.textTertiary)
-            }
+        Column(modifier = Modifier.weight(1f)) {
+            Text("Audio cues", style = NoopType.footnote, color = Palette.textSecondary)
+            Text(
+                "Soft tone on each phase · honours silent mode",
+                style = NoopType.caption, color = Palette.textTertiary, maxLines = 1,
+            )
         }
+        Switch(
+            checked = checked,
+            onCheckedChange = onChange,
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = Palette.surfaceBase,
+                checkedTrackColor = Palette.accent,
+                uncheckedThumbColor = Palette.textSecondary,
+                uncheckedTrackColor = Palette.surfaceInset,
+                uncheckedBorderColor = Palette.hairline,
+            ),
+            modifier = Modifier.semantics { contentDescription = "Audio cues" },
+        )
     }
 }
 
@@ -575,28 +638,17 @@ private fun CoherenceCard(rmssd: Double?) {
                 Spacer(Modifier.weight(1f))
                 StatePill(label, tone = tone)
             }
-            // Normalized bar — RMSSD 0..120ms → 0..1.
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(10.dp)
-                    .clip(RoundedCornerShape(50))
-                    .background(Palette.surfaceInset),
-            ) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth(frac.coerceAtLeast(0.02f))
-                        .height(10.dp)
-                        .clip(RoundedCornerShape(50))
-                        .background(
-                            Brush.horizontalGradient(
-                                listOf(Palette.restDeep, Palette.restBright),
-                            ),
-                        ),
-                )
-            }
+            // Normalized bar — RMSSD 0..120ms → 0..1 — as a liquid tube (a genuine single-value fill).
+            // Static (animated = false): it settles to the level, no per-frame clock, matching the pilot's
+            // tube usage on non-live contributor bars.
+            LiquidTube(
+                frac = frac.toDouble(),
+                tint = Palette.restBright,
+                animated = false,
+                modifier = Modifier.fillMaxWidth(),
+            )
             Text(
-                "Estimate only — a higher RMSSD while paced usually means your parasympathetic \"rest\" branch is engaging. It is not a clinical reading; trends over a session matter more than any single number.",
+                "Estimate only: a higher RMSSD while paced usually means your parasympathetic \"rest\" branch is engaging. It is not a clinical reading; trends over a session matter more than any single number.",
                 style = NoopType.footnote, color = Palette.textTertiary,
             )
         }
@@ -664,7 +716,7 @@ private fun HapticHint() {
     ) {
         Icon(Icons.Filled.GraphicEq, contentDescription = null, tint = Palette.statusWarning)
         Text(
-            "Connect your strap for haptic guidance — you'll feel one pulse on the inhale, two on the exhale, so you can breathe with your eyes closed.",
+            "Connect your strap for haptic guidance. You'll feel one pulse on the inhale, two on the exhale, so you can breathe with your eyes closed.",
             style = NoopType.footnote, color = Palette.textSecondary,
         )
     }
@@ -705,7 +757,7 @@ private fun StressCheckInCard(onBreatheNow: () -> Unit) {
                 StatePill("Passive", tone = StrandTone.Neutral)
             }
             Text(
-                "Your HRV dipped while you were still — want a minute to breathe?",
+                "Your HRV dipped while you were still. Want a minute to breathe?",
                 style = NoopType.subhead, color = Palette.textPrimary,
             )
             honestNudgeLine(n)?.let {
@@ -728,7 +780,7 @@ private fun StressCheckInCard(onBreatheNow: () -> Unit) {
                 }) { Text("Turn off", style = NoopType.body, color = Palette.textSecondary) }
             }
             Text(
-                "Relaxation guidance from your own numbers — not a health alert, and not a diagnosis. Trends matter more than any single number.",
+                "Relaxation guidance from your own numbers: not a health alert, and not a diagnosis. Trends matter more than any single number.",
                 style = NoopType.footnote, color = Palette.textTertiary,
             )
         }
@@ -819,11 +871,11 @@ private fun ResonanceMode(
                         tone = if (live.bonded) StrandTone.Positive else StrandTone.Warning)
                 }
                 Text(
-                    "Everyone has a breathing pace — usually between 4.5 and 7 breaths a minute — where the heart's rhythm swings the most with each breath. We pace you through a few candidate paces, measure how your HRV responds, and lock the one that resonates best for you.",
+                    "Everyone has a breathing pace (usually between 4.5 and 7 breaths a minute) where the heart's rhythm swings the most with each breath. We pace you through a few candidate paces, measure how your HRV responds, and lock the one that resonates best for you.",
                     style = NoopType.subhead, color = Palette.textSecondary,
                 )
                 Text(
-                    "Estimate from PPG-derived R-R — relaxation guidance, not a clinical reading. Your pace drifts, so we date it and you can re-measure anytime.",
+                    "Estimate from PPG-derived R-R: relaxation guidance, not a clinical reading. Your pace drifts, so we date it and you can re-measure anytime.",
                     style = NoopType.footnote, color = Palette.textTertiary,
                 )
             }
@@ -908,7 +960,7 @@ private fun ResonanceResultCard(result: ResonanceEngine.SweepResult, context: an
             }
             if (!result.didLock) {
                 Text(
-                    "Not enough clean beat data to lock a pace today — try again rested, sitting still with the strap snug. For now we'll pace you at 5.5 br/min (coherence).",
+                    "Not enough clean beat data to lock a pace today. Try again rested, sitting still with the strap snug. For now we'll pace you at 5.5 br/min (coherence).",
                     style = NoopType.footnote, color = Palette.textTertiary,
                 )
             }
@@ -1040,7 +1092,7 @@ private fun CalmMode(viewModel: AppViewModel, live: com.noop.ble.LiveState, bpm:
                         tone = if (canRun) StrandTone.Neutral else StrandTone.Warning)
                 }
                 Text(
-                    "The strap buzzes a gentle rhythm just below your current heart rate — a felt metronome to relax toward. It trails your heart down rather than yanking it, and stops on its own.",
+                    "The strap buzzes a gentle rhythm just below your current heart rate, a felt metronome to relax toward. It trails your heart down rather than yanking it, and stops on its own.",
                     style = NoopType.subhead, color = Palette.textSecondary,
                 )
                 Text(
@@ -1102,10 +1154,10 @@ private fun CalmMode(viewModel: AppViewModel, live: com.noop.ble.LiveState, bpm:
                     }
                     when {
                         !canBuzz -> Text(
-                            "Connect your strap — Calm me is a felt rhythm on the wrist, so it needs a bonded connection.",
+                            "Connect your strap. Calm me is a felt rhythm on the wrist, so it needs a bonded connection.",
                             style = NoopType.footnote, color = Palette.textTertiary)
                         !canRun -> Text(
-                            "Waiting for a resting heart rate — start a live reading first, or come back when you're still.",
+                            "Waiting for a resting heart rate. Start a live reading first, or come back when you're still.",
                             style = NoopType.footnote, color = Palette.textTertiary)
                     }
                 }
@@ -1129,7 +1181,7 @@ private fun CalmMode(viewModel: AppViewModel, live: com.noop.ble.LiveState, bpm:
                     }
                     if (didNotFall) {
                         Text(
-                            "That's normal — a paced breath often settles things when a metronome alone doesn't.",
+                            "That's normal. A paced breath often settles things when a metronome alone doesn't.",
                             style = NoopType.footnote, color = Palette.textTertiary)
                     }
                 }
@@ -1152,8 +1204,8 @@ private fun calmOutcomeLine(
         else ->
             if (startHr != null && endHr != null && endHr < startHr) "HR eased $startHr → $endHr over $mmss."
             else if (startHr != null && endHr != null)
-                "HR held steady ($startHr → $endHr) — try a paced breath instead."
-            else "Session ended — try a paced breath instead."
+                "HR held steady ($startHr → $endHr). Try a paced breath instead."
+            else "Session ended. Try a paced breath instead."
     }
 }
 
@@ -1170,24 +1222,125 @@ private fun calmDidNotFall(
 
 @Composable
 private fun ProgressBar(frac: Float) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(10.dp)
-            .clip(RoundedCornerShape(50))
-            .background(Palette.surfaceInset),
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth(frac.coerceIn(0.02f, 1f))
-                .height(10.dp)
-                .clip(RoundedCornerShape(50))
-                .background(
-                    Brush.horizontalGradient(listOf(Palette.restDeep, Palette.restBright)),
-                ),
-        )
-    }
+    // The sweep progress as a liquid tube — a single-value fill. Static (animated = false): it settles to
+    // the current sweep fraction with no per-frame clock, matching the pilot's tube usage.
+    LiquidTube(
+        frac = frac.toDouble(),
+        tint = Palette.restBright,
+        animated = false,
+        modifier = Modifier.fillMaxWidth(),
+    )
 }
 
 private fun formatDay(epochMs: Long): String =
     SimpleDateFormat("d MMM", Locale.getDefault()).format(Date(epochMs))
+
+// ════════════════════════════════════════════════════════════════════════════
+// Audio pacer (opt-in soft phase tones)
+// ════════════════════════════════════════════════════════════════════════════
+
+/** SharedPreferences key for the opt-in audio pacer toggle (mirrors macOS `@AppStorage("breathe.audioCues")`). */
+private const val KEY_BREATHE_AUDIO_CUES = "breathe.audioCues"
+
+enum class BreathTone(val frequencyHz: Double) {
+    Inhale(440.0),   // A4, brighter for "in"
+    Exhale(330.0),   // E4, lower for "out"
+}
+
+/**
+ * The Android twin of [BreathTonePlayer] (iOS) — a tiny on-device tone player for the opt-in audio pacer.
+ * It synthesises a short, soft sine "ding" per phase (a higher note on the inhale, a lower one on the
+ * exhale) into an [AudioTrack].
+ *
+ * iOS uses an *ambient* audio session so the silent switch mutes it; Android has no silent switch, so the
+ * honest equivalent is to honour the **ringer mode** — when the phone is on silent or vibrate we simply
+ * don't play, the same "quiet means quiet" promise. The track is tagged as a sonification assistance cue
+ * (not media), so it ducks politely and won't hijack the music stream. Buffers are generated once and
+ * reused; [release] frees the track when the screen goes away or the pacer is switched off.
+ */
+class BreathTonePlayer(context: Context) {
+
+    private val appContext = context.applicationContext
+    private val audioManager = appContext.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+
+    private val sampleRate = 44_100
+    private val toneSeconds = 0.45
+    private val tracks = HashMap<BreathTone, AudioTrack?>()
+
+    /** Play the phase tone, unless the phone is on silent/vibrate (the "honours silent mode" promise). */
+    fun play(tone: BreathTone) {
+        val am = audioManager ?: return
+        if (am.ringerMode != AudioManager.RINGER_MODE_NORMAL) return
+        val track = tracks.getOrPut(tone) { buildTrack(tone) } ?: return
+        try {
+            // Restart from the top each phase so a fresh tone fires even if the last one is still tailing.
+            track.pause()
+            track.flush()
+            writeTone(track, tone)
+            track.play()
+        } catch (_: IllegalStateException) {
+            // Audio is a nicety, never load-bearing — if the track is in a bad state we just stay silent.
+        }
+    }
+
+    /** Release the underlying tracks. Idempotent. */
+    fun release() {
+        tracks.values.forEach { runCatching { it?.release() } }
+        tracks.clear()
+    }
+
+    private fun buildTrack(tone: BreathTone): AudioTrack? {
+        val samples = sampleData(tone)
+        val sizeBytes = samples.size * 2  // 16-bit PCM
+        return try {
+            val track = AudioTrack.Builder()
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                        .build(),
+                )
+                .setAudioFormat(
+                    AudioFormat.Builder()
+                        .setSampleRate(sampleRate)
+                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                        .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                        .build(),
+                )
+                .setBufferSizeInBytes(maxOf(sizeBytes, 1))
+                .setTransferMode(AudioTrack.MODE_STREAM)
+                .build()
+            writeTone(track, tone)
+            track
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun writeTone(track: AudioTrack, tone: BreathTone) {
+        val samples = sampleData(tone)
+        track.write(samples, 0, samples.size)
+    }
+
+    /**
+     * Build a single soft sine tone with a short attack and a longer release envelope, so it fades in and
+     * out rather than clicking. Cached per tone so we synthesise it once.
+     */
+    private val cache = HashMap<BreathTone, ShortArray>()
+    private fun sampleData(tone: BreathTone): ShortArray = cache.getOrPut(tone) {
+        val total = (toneSeconds * sampleRate).toInt()
+        val attack = (0.02 * sampleRate).toInt()
+        val release = (0.18 * sampleRate).toInt()
+        val peak = 0.28  // kept quiet — a gentle cue, not a beep
+        ShortArray(total) { i ->
+            val t = i.toDouble() / sampleRate
+            val s = sin(2.0 * PI * tone.frequencyHz * t)
+            val env = when {
+                i < attack -> i.toDouble() / maxOf(attack, 1)
+                i > total - release -> (total - i).toDouble() / maxOf(release, 1)
+                else -> 1.0
+            }
+            (s * env * peak * Short.MAX_VALUE).toInt().toShort()
+        }
+    }
+}

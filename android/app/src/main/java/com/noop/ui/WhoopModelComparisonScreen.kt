@@ -63,21 +63,21 @@ private val CAPABILITIES: List<CapabilityRow> = listOf(
     CapabilityRow(
         "Sleep, recovery & strain history",
         Support.YES, Support.PARTIAL,
-        "The 4.0's history is fully decoded. On a 5/MG, history decoding is experimental — live HR works, " +
+        "The 4.0's history is fully decoded. On a 5/MG, history decoding is experimental: live HR works, " +
             "deeper history is still being mapped.",
     ),
     CapabilityRow(
         "NOOP re-broadcasts your HR (gym / Zwift / Garmin)",
         Support.YES, Support.YES,
         "Data Sources → \"Broadcast heart rate\" turns your PHONE into a standard BLE HR sensor using " +
-            "whatever HR NOOP is reading — so this works on a 4.0 too. It's local Bluetooth; nothing leaves " +
+            "whatever HR NOOP is reading, so this works on a 4.0 too. It's local Bluetooth; nothing leaves " +
             "your phone.",
     ),
     CapabilityRow(
         "Strap broadcasts its own HR (firmware flag)",
         Support.NO, Support.YES,
         "Making the STRAP itself advertise HR (the whoop_live_hr_in_adv_ind_pkt config) only exists on " +
-            "5/MG firmware. A 4.0 can't do this — but the phone re-broadcast above covers the same use.",
+            "5/MG firmware. A 4.0 can't do this, but the phone re-broadcast above covers the same use.",
     ),
     CapabilityRow(
         "Steps",
@@ -127,8 +127,8 @@ private fun IntroCard() {
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("Both straps are supported", style = NoopType.headline, color = Palette.textPrimary)
             Text(
-                "NOOP pairs with the WHOOP 4.0 and the WHOOP 5.0/MG. They share most of what matters — live " +
-                    "heart rate, your scores, buzzing the strap — but a few firmware features differ. Here's " +
+                "NOOP pairs with the WHOOP 4.0 and the WHOOP 5.0/MG. They share most of what matters (live " +
+                    "heart rate, your scores, buzzing the strap), but a few firmware features differ. Here's " +
                     "what each can do, and why.",
                 style = NoopType.subhead,
                 color = Palette.textSecondary,
@@ -194,7 +194,7 @@ private fun ReassuranceCard() {
             Text("On a WHOOP 4.0?", style = NoopType.headline, color = Palette.textPrimary)
             Text(
                 "You're not missing the broadcast feature. To share your heart rate with a gym machine, " +
-                    "Zwift, Peloton or a Garmin, open Data Sources and turn on \"Broadcast heart rate\" — " +
+                    "Zwift, Peloton or a Garmin, open Data Sources and turn on \"Broadcast heart rate\": " +
                     "your phone becomes a standard Bluetooth HR sensor using your strap's live reading. The " +
                     "firmware-only flag a 5/MG has just does the same job from the strap instead of the phone.",
                 style = NoopType.subhead,

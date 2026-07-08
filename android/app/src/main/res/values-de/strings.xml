@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- German (de). App name stays untranslated (brand). Nav terms mirror the iOS German pass where
+         one exists, so the two platforms read the same. -->
+    <string name="widget_description">Ruhe, Ladung und Anstrengung von heute, mit Live-Herzfrequenz und Band-Akku auf einen Blick.</string>
+    <string name="widget_error">Das NOOP-Widget konnte nicht gezeichnet werden. Es erholt sich beim nächsten Update.</string>
+
+    <string name="nav_today">Heute</string>
+    <string name="nav_intelligence">Intelligenz</string>
+    <string name="nav_coupled_view">Gekoppelte Ansicht</string>
+    <string name="nav_live">Live</string>
+    <string name="nav_intervals">Intervalle</string>
+    <string name="nav_sleep">Schlaf</string>
+    <string name="nav_breathe">Atmen</string>
+    <string name="nav_stress">Stress</string>
+    <string name="nav_workouts">Workouts</string>
+    <string name="nav_trends">Trends</string>
+    <string name="nav_coach">Coach</string>
+    <string name="nav_insights_hub">Was dich bewegt</string>
+    <string name="nav_insights">Einblicke</string>
+    <string name="nav_explore">Entdecken</string>
+    <string name="nav_compare">Vergleichen</string>
+    <string name="nav_health">Gesundheit</string>
+    <string name="nav_hydration">Flüssigkeit</string>
+    <string name="nav_vital_signs">Vitalwerte</string>
+    <string name="nav_lab_book">Laborbuch</string>
+    <string name="nav_rhythm">Rhythmus</string>
+    <string name="nav_apple_health">Apple Health</string>
+    <string name="nav_automations">Automationen</string>
+    <string name="nav_alarms">Wecker</string>
+    <string name="nav_devices">Geräte</string>
+    <string name="nav_data_sources">Datenquellen</string>
+    <string name="nav_backup_sync">Backup &amp; Sync</string>
+    <string name="nav_fused_record">Deine Daten, vereint</string>
+    <string name="nav_notifications">Mitteilungen</string>
+    <string name="nav_support">Support</string>
+    <string name="nav_settings">Einstellungen</string>
+    <string name="nav_test_centre">Testcenter</string>
+    <string name="nav_more">Mehr</string>
+
+    <string name="more_group_insights">Einblicke</string>
+    <string name="more_group_body">Körper</string>
+    <string name="more_group_data">Daten</string>
+    <string name="more_group_app">App</string>
+
+    <string name="action_live_hr">Live-HF</string>
+    <string name="action_start_workout">Workout starten</string>
+    <string name="action_log_journal">Journal notieren</string>
+    <string name="action_breathe">Atmen</string>
+
+    <!-- First-run Terms gate (clickwrap). Wording kept identical to the iOS German entries in
+         Localizable.xcstrings (PR #984) so both platforms present the same text. The German gate is
+         a courtesy translation; the binding text stays the English TERMS.md. -->
+    <string name="terms_title">Bevor du NOOP benutzt</string>
+    <string name="terms_subtitle">Bitte lies und akzeptiere die Punkte unten.</string>
+    <string name="terms_point_independent_head">Unabhängig: nicht mit WHOOP verbunden</string>
+    <string name="terms_point_independent_body">NOOP ist ein inoffizielles Projekt: nicht mit WHOOP, Inc. verbunden, nicht von ihr unterstützt oder gesponsert. „WHOOP“ ist deren Marke und wird nur verwendet, um die Hardware zu benennen, mit der NOOP arbeitet.</string>
+    <string name="terms_point_tos_head">Die Nutzung von NOOP kann gegen WHOOPs Nutzungsbedingungen verstoßen</string>
+    <string name="terms_point_tos_body">Nutze es nur mit einem Gerät, das dir gehört, um deine eigenen Daten zu lesen. Ob du es nutzt (und jede Auswirkung auf dein WHOOP-Konto, Abo, Gerät oder deine Garantie), ist deine Entscheidung und allein dein Risiko.</string>
+    <string name="terms_point_experimental_head">Experimentell: auf eigenes Risiko</string>
+    <string name="terms_point_experimental_body">NOOP spricht mit der Firmware deines Straps über ein inoffizielles, unabhängig rekonstruiertes Protokoll. Es bleibt ein Restrisiko für das Gerät, seine Daten und seine Verbindung zu offiziellen Diensten. Dieses Risiko übernimmst du.</string>
+    <string name="terms_point_medical_head">Kein Medizinprodukt, kein medizinischer Rat</string>
+    <string name="terms_point_medical_body">Jede Metrik ist eine nicht validierte Näherung. Nutze NOOP nicht, um zu diagnostizieren, zu behandeln oder Gesundheitsentscheidungen zu treffen. Ziehe immer qualifiziertes Fachpersonal hinzu.</string>
+    <string name="terms_point_warranty_head">Keine Gewährleistung; Haftung begrenzt</string>
+    <string name="terms_point_warranty_body">NOOP ist kostenlos und wird „wie besehen“ bereitgestellt, ohne Gewährleistung. Die Haftung ist im maximal zulässigen Umfang des für dich geltenden Rechts begrenzt, und nichts hier nimmt dir Schutz, den dein lokales Recht uns nicht zu nehmen erlaubt.</string>
+    <string name="terms_footer">Die vollständigen Bedingungen stehen in TERMS.md, das mit NOOP ausgeliefert wird. Das ist keine Rechtsberatung.</string>
+    <string name="terms_checkbox">Ich habe diese Bedingungen gelesen und akzeptiere sie, und ich nutze NOOP mit meinem eigenen Gerät und meinen eigenen Daten, auf eigenes Risiko.</string>
+    <string name="terms_accept">Akzeptieren &amp; fortfahren</string>
+</resources>

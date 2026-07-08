@@ -32,7 +32,7 @@ class PostBondTimeoutLoopDetector(
      * signature is a near-immediate (~1s) drop, but pre-loop links can limp a few seconds before timing
      * out. 8s, matching the Swift `quickTimeoutWindow` of 8 seconds.
      */
-    private val quickTimeoutWindowMs: Long = 8_000L,
+    val quickTimeoutWindowMs: Long = 8_000L,
 ) {
     var consecutiveBondTimeouts = 0
         private set

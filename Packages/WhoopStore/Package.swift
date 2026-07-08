@@ -7,6 +7,7 @@ let package = Package(
     products: [.library(name: "WhoopStore", targets: ["WhoopStore"])],
     dependencies: [
         .package(path: "../WhoopProtocol"),
+        .package(path: "../OuraProtocol"),
         // Supply-chain: pinned EXACT (not `from:`) so a clean resolve can't auto-pull a newer —
         // potentially compromised — upstream release. Must match the same exact version in the
         // other Packages/*/Package.swift and project.yml, or SPM resolution fails. Bump deliberately.
@@ -17,12 +18,13 @@ let package = Package(
             name: "WhoopStore",
             dependencies: [
                 "WhoopProtocol",
+                "OuraProtocol",
                 .product(name: "GRDB", package: "GRDB.swift"),
             ]
         ),
         .testTarget(
             name: "WhoopStoreTests",
-            dependencies: ["WhoopStore"]
+            dependencies: ["WhoopStore", "WhoopProtocol", "OuraProtocol"]
         ),
     ]
 )

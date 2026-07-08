@@ -40,7 +40,7 @@ const val JOURNAL_DEVICE_ID = "noop-journal"
 /** Starter behaviour catalog (mirrors WHOOP's most popular journal questions, full-question
  *  phrasing matching the export style). Question strings are opaque exact-match labels to the
  *  effects engine, so imported question strings always take precedence (mergeJournalCatalog).
- *  They are DATA, not UI literals — stored verbatim in the journal table and never localised.
+ *  They are DATA, not UI literals, stored verbatim in the journal table and never localised.
  *  Mirrors macOS JournalCatalogStore.starterQuestions value-for-value. */
 val STARTER_JOURNAL_QUESTIONS: List<String> = listOf(
     "Did you drink any alcohol?",
@@ -55,16 +55,16 @@ val STARTER_JOURNAL_QUESTIONS: List<String> = listOf(
     "Did you read before bed?",
 )
 
-/** Dedup/identity key for a question. Normalises ALL whitespace — leading/trailing AND internal
- *  runs collapse to a single space — then lowercases. A WHOOP export commonly leaves a trailing
+/** Dedup/identity key for a question. Normalises ALL whitespace, leading/trailing AND internal
+ *  runs collapse to a single space, then lowercases. A WHOOP export commonly leaves a trailing
  *  newline or non-breaking space on a journal cell; folding it here is what keeps an imported
  *  "Did you take magnesium?\n" from sitting beside the starter "Did you take magnesium?" as two
- *  separate rows (#224). The DISPLAYED string stays verbatim — only the match key is normalised —
+ *  separate rows (#224). The DISPLAYED string stays verbatim, only the match key is normalised, 
  *  so the stored behaviour key the effects engine joins on is untouched.
  *  Kept value-for-value in step with macOS `JournalCatalogStore.norm` (JournalCatalog.swift). */
 internal fun normJournalKey(s: String): String =
     // Collapse every run of whitespace to a single space, then trim + lowercase. Uses Kotlin's
-    // `Char.isWhitespace()` (Unicode-aware — it includes non-breaking space U+00A0 etc.) rather than
+    // `Char.isWhitespace()` (Unicode-aware, it includes non-breaking space U+00A0 etc.) rather than
     // a regex: the previous `Regex("(?U)\\s+")` compiled on the desktop JVM but THREW
     // PatternSyntaxException on Android's ICU engine (the `(?U)` inline flag is unsupported there),
     // crashing the Insights screen for anyone with journal entries to merge (#224/#267). Matches the
@@ -157,35 +157,36 @@ internal fun saveHiddenJournalQuestions(context: Context, questions: List<String
 // MARK: - The logging card (hosted at the top of Insights)
 
 /**
- * Yes/no chips for the merged behaviour catalog + a free-text custom-question field. Tri-state:
- * no answer logged → neither chip filled; tapping the selected chip again clears the answer
- * (deletes the native row — imported rows are never touched). Day attribution follows the
- * importer's wake-day convention, with a Tomorrow/Today/Yesterday toggle for logging ahead or late.
+ * Yes/no chips and numeric fields for the merged behaviour catalog, grouped into collapsible blocks,
+ * plus a custom-item field. Tri-state: no answer logged → neither chip filled; tapping the selected
+ * chip again clears the answer (deletes the native row, imported rows are never touched). Numeric
+ * items commit a value; the value writes answeredYes=true too so effects still see the logged day.
+ * Edit mode adds rename / regroup / convert / remove per item. Renaming keeps the stored KEY
+ * (`canonical`) so a WHOOP import still lines up. Mirrors the macOS JournalLogCard.
  */
 @Composable
 fun JournalLogCard(
-    catalog: List<String>,
+    items: List<JournalCatalogItem>,
     answers: Map<String, Boolean>,
+    numericAnswers: Map<String, Double> = emptyMap(),
     dayOffset: Long,
     onDayOffset: (Long) -> Unit,
     onAnswer: (String, Boolean) -> Unit,
+    onNumeric: (String, Double) -> Unit,
     onClear: (String) -> Unit,
-    onAddCustom: (String) -> Unit,
-    customQuestions: List<String> = emptyList(),
-    hidden: List<String> = emptyList(),
+    onAddCustom: (String, JournalKind, JournalGroup) -> Unit,
+    onRename: (String, String) -> Unit = { _, _ -> },
+    onSetGroup: (String, JournalGroup) -> Unit = { _, _ -> },
+    onSetKind: (String, JournalKind) -> Unit = { _, _ -> },
     onRemoveQuestion: (String) -> Unit = {},
     onRestoreQuestion: (String) -> Unit = {},
 ) {
     var editing by remember { mutableStateOf(false) }
-    val customKeys = remember(customQuestions) { customQuestions.map { normJournalKey(it) }.toHashSet() }
-    fun isCustom(q: String) = normJournalKey(q) in customKeys
+    var renaming by remember { mutableStateOf<JournalCatalogItem?>(null) }
 
     Column(verticalArrangement = Arrangement.spacedBy(Metrics.gap)) {
         // Header: title/overline on the left, the Tomorrow/Today/Yesterday toggle (or Edit/Done) on the right.
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            // Inlined (not SectionHeader) so the title stays single-line in this crowded header row:
-            // with Edit + the three day chips on the right, SectionHeader's wrapping title squeezed
-            // "Journal" onto two lines (#443). Same tokens as SectionHeader (Overline + title2).
             Column(modifier = Modifier.weight(1f)) {
                 Overline("Log")
                 Text(
@@ -215,81 +216,287 @@ fun JournalLogCard(
                 Text(
                     when {
                         editing ->
-                            "Remove a question to tidy your list. Custom questions are deleted; the " +
-                                "built-in ones are hidden and can be restored below."
+                            "Rename, regroup, or remove an item to tidy your list. Renaming keeps the " +
+                                "original question behind the scenes, so a WHOOP import still lines up. " +
+                                "Custom items are deleted; built-in ones are hidden and can be restored below."
                         dayOffset == -1L ->
                             "Logging ahead for tomorrow: today's activities inform tomorrow's " +
                                 "recovery, just as yesterday's are reflected in today's. Tomorrow's " +
                                 "answers line up with tomorrow's morning."
                         else ->
-                            "Answers are about the night and day leading into this morning — the " +
+                            "Answers are about the night and day leading into this morning, the " +
                                 "same attribution a WHOOP export uses, so logged and imported days " +
                                 "line up."
                     },
                     style = NoopType.footnote,
                     color = Palette.textTertiary,
                 )
-                catalog.forEach { q ->
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text(
-                            q,   // data, not a UI literal — rendered verbatim
-                            style = NoopType.body,
-                            color = Palette.textPrimary,
-                            modifier = Modifier.weight(1f),
+                // Grouped, collapsible blocks in the fixed display order. Empty groups hide outside edit.
+                JournalGroup.displayOrder.forEach { group ->
+                    val groupItems = items.filter { it.group == group }
+                        .sortedWith(compareBy({ it.sortIndex }, { it.display }))
+                    if (groupItems.isNotEmpty() || editing) {
+                        JournalGroupBlock(
+                            group = group,
+                            items = groupItems,
+                            editing = editing,
+                            answers = answers,
+                            numericAnswers = numericAnswers,
+                            onAnswer = onAnswer,
+                            onNumeric = onNumeric,
+                            onClear = onClear,
+                            onStartRename = { renaming = it },
+                            onSetGroup = onSetGroup,
+                            onSetKind = onSetKind,
+                            onRemoveQuestion = onRemoveQuestion,
+                            onRestoreQuestion = onRestoreQuestion,
                         )
-                        if (editing) {
-                            JournalRemoveButton(isCustom = isCustom(q)) { onRemoveQuestion(q) }
-                        } else {
-                            JournalChip("Yes", selected = answers[q] == true) {
-                                if (answers[q] == true) onClear(q) else onAnswer(q, true)
-                            }
-                            Spacer(Modifier.width(6.dp))
-                            JournalChip("No", selected = answers[q] == false) {
-                                if (answers[q] == false) onClear(q) else onAnswer(q, false)
-                            }
-                        }
-                    }
-                }
-                // Hidden built-in questions — only while editing, each with a restore action.
-                if (editing && hidden.isNotEmpty()) {
-                    JournalDivider()
-                    Text("Hidden", style = NoopType.caption, color = Palette.textTertiary)
-                    hidden.forEach { q ->
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text(q, style = NoopType.body, color = Palette.textTertiary, modifier = Modifier.weight(1f))
-                            JournalChip("Restore", selected = false) { onRestoreQuestion(q) }
-                        }
                     }
                 }
                 JournalDivider()
-                var draft by remember { mutableStateOf("") }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    OutlinedTextField(
-                        value = draft,
-                        onValueChange = { draft = it },
-                        placeholder = {
-                            Text("Add a custom question…", style = NoopType.body, color = Palette.textTertiary)
-                        },
-                        singleLine = true,
-                        textStyle = NoopType.body,
-                        colors = journalFieldColors(),
-                        shape = RoundedCornerShape(14.dp),
+                JournalAddRow(onAddCustom = onAddCustom)
+            }
+        }
+    }
+
+    renaming?.let { item ->
+        JournalRenameDialog(
+            item = item,
+            onDismiss = { renaming = null },
+            onSave = { name -> onRename(item.canonical, name); renaming = null },
+        )
+    }
+}
+
+/** One collapsible group of journal items. Header shows the group title + count + a collapse chevron. */
+@Composable
+private fun JournalGroupBlock(
+    group: JournalGroup,
+    items: List<JournalCatalogItem>,
+    editing: Boolean,
+    answers: Map<String, Boolean>,
+    numericAnswers: Map<String, Double>,
+    onAnswer: (String, Boolean) -> Unit,
+    onNumeric: (String, Double) -> Unit,
+    onClear: (String) -> Unit,
+    onStartRename: (JournalCatalogItem) -> Unit,
+    onSetGroup: (String, JournalGroup) -> Unit,
+    onSetKind: (String, JournalKind) -> Unit,
+    onRemoveQuestion: (String) -> Unit,
+    onRestoreQuestion: (String) -> Unit,
+) {
+    var collapsed by remember(group) { mutableStateOf(false) }
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth().clickable { collapsed = !collapsed },
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(group.title.uppercase(), style = NoopType.overline, color = Palette.textTertiary)
+            Spacer(Modifier.width(6.dp))
+            Text("${items.size}", style = NoopType.caption, color = Palette.textTertiary)
+            Spacer(Modifier.weight(1f))
+            Text(if (collapsed) "▸" else "▾", style = NoopType.caption, color = Palette.textTertiary)
+        }
+        if (!collapsed) {
+            items.forEach { item ->
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        item.display,   // display = rename ?? canonical; data, not a UI literal
+                        style = NoopType.body,
+                        color = if (item.hidden) Palette.textTertiary else Palette.textPrimary,
                         modifier = Modifier.weight(1f),
                     )
-                    Spacer(Modifier.width(8.dp))
-                    JournalChip("Add", selected = draft.isNotBlank()) {
-                        val t = draft.trim()
-                        if (t.isNotEmpty()) {
-                            onAddCustom(t)
-                            draft = ""
+                    when {
+                        item.hidden -> JournalChip("Restore", selected = false) { onRestoreQuestion(item.canonical) }
+                        editing -> JournalItemEditControls(
+                            item = item,
+                            onStartRename = { onStartRename(item) },
+                            onSetGroup = { onSetGroup(item.canonical, it) },
+                            onSetKind = { onSetKind(item.canonical, it) },
+                            onRemove = { onRemoveQuestion(item.canonical) },
+                        )
+                        item.kind.isNumeric -> JournalNumericField(
+                            item = item,
+                            value = numericAnswers[item.canonical],
+                            onCommit = { onNumeric(item.canonical, it) },
+                            onClear = { onClear(item.canonical) },
+                        )
+                        else -> {
+                            JournalChip("Yes", selected = answers[item.canonical] == true) {
+                                if (answers[item.canonical] == true) onClear(item.canonical) else onAnswer(item.canonical, true)
+                            }
+                            Spacer(Modifier.width(6.dp))
+                            JournalChip("No", selected = answers[item.canonical] == false) {
+                                if (answers[item.canonical] == false) onClear(item.canonical) else onAnswer(item.canonical, false)
+                            }
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+/** Compact numeric log field: current value or a placeholder, commits a Double, with -/+ steppers. */
+@Composable
+private fun JournalNumericField(
+    item: JournalCatalogItem,
+    value: Double?,
+    onCommit: (Double) -> Unit,
+    onClear: () -> Unit,
+) {
+    var text by remember(value) { mutableStateOf(value?.let { formatNumeric(it) } ?: "") }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        JournalChip("−", selected = false) { onCommit(((value ?: 0.0) - 1).coerceAtLeast(0.0)) }
+        Spacer(Modifier.width(4.dp))
+        OutlinedTextField(
+            value = text,
+            onValueChange = { new ->
+                text = new
+                new.replace(',', '.').toDoubleOrNull()?.let { onCommit(it) }
+            },
+            placeholder = { Text("—", style = NoopType.body, color = Palette.textTertiary) },
+            singleLine = true,
+            textStyle = NoopType.body,
+            colors = journalFieldColors(),
+            shape = RoundedCornerShape(10.dp),
+            modifier = Modifier.width(72.dp),
+        )
+        item.kind.unitLabel?.takeIf { it.isNotEmpty() }?.let { unit ->
+            Spacer(Modifier.width(4.dp))
+            Text(unit, style = NoopType.footnote, color = Palette.textTertiary)
+        }
+        Spacer(Modifier.width(4.dp))
+        JournalChip("+", selected = false) { onCommit((value ?: 0.0) + 1) }
+        if (value != null) {
+            Spacer(Modifier.width(4.dp))
+            Text("✕", style = NoopType.caption, color = Palette.textTertiary, modifier = Modifier.clickable { onClear() })
+        }
+    }
+}
+
+private fun formatNumeric(v: Double): String =
+    if (v == Math.floor(v) && !v.isInfinite()) v.toInt().toString() else String.format("%.1f", v)
+
+/** Edit-mode per-item controls: rename, change group, convert type, remove. */
+@Composable
+private fun JournalItemEditControls(
+    item: JournalCatalogItem,
+    onStartRename: () -> Unit,
+    onSetGroup: (JournalGroup) -> Unit,
+    onSetKind: (JournalKind) -> Unit,
+    onRemove: () -> Unit,
+) {
+    var menuOpen by remember { mutableStateOf(false) }
+    var groupMenuOpen by remember { mutableStateOf(false) }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Box {
+            Text("⋯", style = NoopType.body, color = Palette.textSecondary,
+                modifier = Modifier.clickable { menuOpen = true }.padding(horizontal = 8.dp))
+            androidx.compose.material3.DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                androidx.compose.material3.DropdownMenuItem(
+                    text = { Text("Rename…") },
+                    onClick = { menuOpen = false; onStartRename() },
+                )
+                androidx.compose.material3.DropdownMenuItem(
+                    text = { Text("Group…") },
+                    onClick = { menuOpen = false; groupMenuOpen = true },
+                )
+                androidx.compose.material3.DropdownMenuItem(
+                    text = { Text(if (item.kind.isNumeric) "Change to Yes/No" else "Change to Number") },
+                    onClick = {
+                        menuOpen = false
+                        onSetKind(if (item.kind.isNumeric) JournalKind.Bool else JournalKind.Numeric(null))
+                    },
+                )
+            }
+            androidx.compose.material3.DropdownMenu(expanded = groupMenuOpen, onDismissRequest = { groupMenuOpen = false }) {
+                JournalGroup.displayOrder.forEach { g ->
+                    androidx.compose.material3.DropdownMenuItem(
+                        text = { Text(g.title) },
+                        onClick = { groupMenuOpen = false; onSetGroup(g) },
+                    )
+                }
+            }
+        }
+        JournalRemoveButton(isCustom = item.custom) { onRemove() }
+    }
+}
+
+/** Rename dialog: display-name field + the honest "history stays under the original question" note. */
+@Composable
+private fun JournalRenameDialog(
+    item: JournalCatalogItem,
+    onDismiss: () -> Unit,
+    onSave: (String) -> Unit,
+) {
+    var draft by remember { mutableStateOf(item.displayName ?: item.canonical) }
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Rename item") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = draft,
+                    onValueChange = { draft = it },
+                    placeholder = { Text("Display name") },
+                    singleLine = true,
+                    colors = journalFieldColors(),
+                )
+                Text(
+                    "History stays under the original question so WHOOP imports still line up.",
+                    style = NoopType.footnote,
+                    color = Palette.textTertiary,
+                )
+            }
+        },
+        confirmButton = { Text("Save", color = Palette.accent, modifier = Modifier.clickable { onSave(draft) }.padding(8.dp)) },
+        dismissButton = { Text("Cancel", color = Palette.textSecondary, modifier = Modifier.clickable { onDismiss() }.padding(8.dp)) },
+    )
+}
+
+/** The add-a-custom-item row: text field + a Yes/No↔Number type toggle + a group picker + Add. */
+@Composable
+private fun JournalAddRow(onAddCustom: (String, JournalKind, JournalGroup) -> Unit) {
+    var draft by remember { mutableStateOf("") }
+    var numeric by remember { mutableStateOf(false) }
+    var group by remember { mutableStateOf(JournalGroup.Other) }
+    var groupMenu by remember { mutableStateOf(false) }
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(
+                value = draft,
+                onValueChange = { draft = it },
+                placeholder = { Text("Add a custom item…", style = NoopType.body, color = Palette.textTertiary) },
+                singleLine = true,
+                textStyle = NoopType.body,
+                colors = journalFieldColors(),
+                shape = RoundedCornerShape(14.dp),
+                modifier = Modifier.weight(1f),
+            )
+            Spacer(Modifier.width(8.dp))
+            JournalChip(if (numeric) "Number" else "Yes/No", selected = numeric) { numeric = !numeric }
+            Spacer(Modifier.width(8.dp))
+            JournalChip("Add", selected = draft.isNotBlank()) {
+                val t = draft.trim()
+                if (t.isNotEmpty()) {
+                    onAddCustom(t, if (numeric) JournalKind.Numeric(null) else JournalKind.Bool, group)
+                    draft = ""
+                }
+            }
+        }
+        Box {
+            Text("Group: ${group.title}", style = NoopType.footnote, color = Palette.textSecondary,
+                modifier = Modifier.clickable { groupMenu = true })
+            androidx.compose.material3.DropdownMenu(expanded = groupMenu, onDismissRequest = { groupMenu = false }) {
+                JournalGroup.displayOrder.forEach { g ->
+                    androidx.compose.material3.DropdownMenuItem(
+                        text = { Text(g.title) },
+                        onClick = { groupMenu = false; group = g },
+                    )
                 }
             }
         }
@@ -307,7 +514,7 @@ private fun JournalDivider() {
     )
 }
 
-/** A pill chip — filled with the accent when selected, hairline-bordered otherwise. Shared by the
+/** A pill chip, filled with the accent when selected, hairline-bordered otherwise. Shared by the
  *  day toggle, the yes/no answers, and the "Add" action so they read identically. */
 @Composable
 private fun JournalChip(label: String, selected: Boolean, onClick: () -> Unit) {

@@ -55,7 +55,9 @@ public final class PuffinCapture {
     /// The stored `hex` is the decoder's canonical `rawHex`, so it always round-trips through parsing.
     @discardableResult
     public func record(frame: [UInt8], char: String, tsMs: Int, hr: Int?) -> PuffinCaptureRecord {
-        let parsed = parseFrame(frame, family: .whoop5)
+        // D#969: rawHex is only built when collectFields is true; PuffinCapture is the one production
+        // consumer that stores it, so opt in here (this diagnostic path is off by default anyway).
+        let parsed = parseFrame(frame, family: .whoop5, collectFields: true)
         let rec = PuffinCaptureRecord(
             hex: parsed.rawHex,
             char: char,

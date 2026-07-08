@@ -164,6 +164,27 @@ class Whoop5HistoricalDecodeTest {
         }
     }
 
+    // #175: the decoded band sleep_state must now survive extractHistoricalStreams as a SleepStateRow (it
+    // was decoded but DROPPED before). On the REAL worn daytime fixture the band reads 0 (wake) — the only
+    // value we have ever captured — carried VERBATIM (0 is a real wake reading, NOT "absent").
+    @Test
+    fun sleepStateReachesStreamOnRealFixture() {
+        val st = extractHistoricalStreams(listOf(bytes(wornV18)), 1780916150, 1780916150, DeviceFamily.WHOOP5)
+        assertEquals(listOf(com.noop.data.SleepStateRow(1780916150L, 0)), st.sleepState)
+    }
+
+    // The non-zero codes come only from an in-memory byte override (we hold NO real sleeping-night capture),
+    // so this proves the PLUMBING carries whatever the band reports. The CRC is re-stamped so the extractor's
+    // CRC gate passes; it does NOT assert the code meanings against real data.
+    @Test
+    fun sleepStateStreamCarriesEachNibble() {
+        for ((raw, expected) in listOf(0x10 to 1, 0x20 to 2, 0x30 to 3)) {
+            val frame = mutateAndReCrc(81, raw)
+            val st = extractHistoricalStreams(listOf(frame), 1780916150, 1780916150, DeviceFamily.WHOOP5)
+            assertEquals(listOf(com.noop.data.SleepStateRow(1780916150L, expected)), st.sleepState)
+        }
+    }
+
     @Test
     fun skinTempTracksWristContact() {
         val worn = decodeHistorical(bytes(wornV18), DeviceFamily.WHOOP5)!!

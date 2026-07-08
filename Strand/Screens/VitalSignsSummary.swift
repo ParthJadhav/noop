@@ -53,8 +53,8 @@ struct BodyVitalReading: Identifiable {
     }
 
     var accessibilityText: String {
-        guard let v = formattedValue else { return "\(label): no data" }
-        return "\(label): \(v), \(stateCaption)"
+        guard let v = formattedValue else { return String(localized: "\(label): no data") }
+        return String(localized: "\(label): \(v), \(stateCaption)")
     }
 
     /// Which yardstick judged the value: your own baseline vs the typical adult range. String(localized:)
@@ -188,7 +188,7 @@ enum BodyVitalSigns {
         return [
             BodyVitalReading(
                 key: "resp",
-                label: "Resp Rate",
+                label: String(localized: "Resp Rate"),
                 unit: "rpm",
                 value: respRow?.value,
                 format: { String(format: "%.1f", $0) },
@@ -206,7 +206,7 @@ enum BodyVitalSigns {
             ),
             BodyVitalReading(
                 key: "spo2",
-                label: "Blood O₂",
+                label: String(localized: "Blood O₂"),
                 unit: "%",
                 value: spo2Row?.value,
                 format: { String(format: "%.0f", $0) },
@@ -226,7 +226,7 @@ enum BodyVitalSigns {
             ),
             BodyVitalReading(
                 key: "rhr",
-                label: "Resting HR",
+                label: String(localized: "Resting HR"),
                 unit: "bpm",
                 value: rhrRow?.value,
                 format: { String(Int($0.rounded())) },
@@ -244,7 +244,7 @@ enum BodyVitalSigns {
             ),
             BodyVitalReading(
                 key: "hrv",
-                label: "HRV",
+                label: String(localized: "HRV"),
                 unit: "ms",
                 value: hrvRow?.value,
                 format: { String(Int($0.rounded())) },
@@ -262,7 +262,7 @@ enum BodyVitalSigns {
             ),
             BodyVitalReading(
                 key: "skin",
-                label: "Skin Temp",
+                label: String(localized: "Skin Temp"),
                 unit: skinUnitLabel,
                 value: skin,
                 format: skinFormat,

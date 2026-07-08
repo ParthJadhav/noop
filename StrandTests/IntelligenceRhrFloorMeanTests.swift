@@ -8,6 +8,7 @@ import XCTest
 /// engine now logs BOTH per scored night so a report carries the proof. `rhrFloorMeanLogLine` is the
 /// pure formatter the loop calls; it's tested directly (no store). Mirrors the Android
 /// `IntelligenceRhrFloorMeanTest` so the two platforms log byte-identical lines.
+@MainActor
 final class IntelligenceRhrFloorMeanTests: XCTestCase {
 
     private typealias IE = IntelligenceEngine

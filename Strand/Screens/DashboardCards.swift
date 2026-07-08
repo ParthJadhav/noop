@@ -6,7 +6,7 @@ import SwiftUI
 // The Today screen's "Your cards" section was a fixed trio (Stress / Fitness age / Vitality). This turns
 // it into a user-customisable dashboard faithful to WHOOP's "My Dashboard": the user chooses WHICH metric
 // cards show and in WHAT order from a registry of the values Today already loads. Persistence is
-// DISPLAY-ONLY — no metric is computed or stored differently; this just decides which already-loaded
+// DISPLAY-ONLY, no metric is computed or stored differently; this just decides which already-loaded
 // values render as WHOOP metric rows and in what sequence.
 //
 // Stored as a JSON-encoded [String] of card ids in @AppStorage (UserDefaults). Unknown ids are dropped on
@@ -14,7 +14,7 @@ import SwiftUI
 // be lost. Mirrors the existing KeyMetric layout mechanism but as its own list so the two sections stay
 // independent (Key Metrics grid vs. the Your-cards dashboard).
 
-/// One available card in the "Your cards" dashboard. The `rawValue` is the stable persisted identifier —
+/// One available card in the "Your cards" dashboard. The `rawValue` is the stable persisted identifier,
 /// keep it byte-identical to the Android `DashboardCard` ids so a backup/restore reads the same dashboard
 /// on either OS.
 enum DashboardCard: String, CaseIterable, Identifiable {
@@ -30,43 +30,52 @@ enum DashboardCard: String, CaseIterable, Identifiable {
     case sleep
     case calories
     case hydration
+    /// Optional, default-OFF (task #43): a tap-through to the Coupled view (the WHOOP-style day read). Unlike
+    /// every other card this carries NO metric value of its own, it is a navigation row that opens the full
+    /// CoupledView screen. It is NOT in `defaultSelection`, so a fresh install never shows it until the user
+    /// adds it via CUSTOMISE, matching the manual-first / default-OFF posture.
+    case coupled
 
     var id: String { rawValue }
 
-    /// The card's display label (the UPPERCASE WHOOP metric-row label is derived from this).
+    /// The card's display label (the UPPERCASE WHOOP metric-row label is derived from this). Localized via
+    /// the String Catalog so the dashboard rows read in the user's language (the `.uppercased()` the row
+    /// applies then uppercases the LOCALIZED word, with the current locale's casing rules).
     var title: String {
         switch self {
-        case .hrv:         return "HRV"
-        case .restingHr:   return "Resting HR"
-        case .respiratory: return "Respiratory"
-        case .steps:       return "Steps"
-        case .stress:      return "Stress"
-        case .fitnessAge:  return "Fitness Age"
-        case .vitality:    return "Vitality"
-        case .bloodOxygen: return "Blood Oxygen"
-        case .skinTemp:    return "Skin Temp"
-        case .sleep:       return "Sleep"
-        case .calories:    return "Calories"
-        case .hydration:   return "Hydration"
+        case .hrv:         return String(localized: "HRV")
+        case .restingHr:   return String(localized: "Resting HR")
+        case .respiratory: return String(localized: "Respiratory")
+        case .steps:       return String(localized: "Steps")
+        case .stress:      return String(localized: "Stress")
+        case .fitnessAge:  return String(localized: "Fitness Age")
+        case .vitality:    return String(localized: "Vitality")
+        case .bloodOxygen: return String(localized: "Blood Oxygen")
+        case .skinTemp:    return String(localized: "Skin Temp")
+        case .sleep:       return String(localized: "Sleep")
+        case .calories:    return String(localized: "Calories")
+        case .hydration:   return String(localized: "Hydration")
+        case .coupled:     return String(localized: "Coupled view")
         }
     }
 
     /// A short grey baseline/caption shown under the row's value (the WHOOP "30-day baseline" line).
-    /// Static descriptive text only — never invented data.
+    /// Static descriptive text only, never invented data. Localized via the String Catalog.
     var subtitle: String {
         switch self {
-        case .hrv:         return "Heart-rate variability"
-        case .restingHr:   return "Resting heart rate"
-        case .respiratory: return "Breaths per minute"
-        case .steps:       return "Today"
-        case .stress:      return "Autonomic load"
-        case .fitnessAge:  return "Updated weekly"
-        case .vitality:    return "Wellness score"
-        case .bloodOxygen: return "Blood oxygen"
-        case .skinTemp:    return "Skin temperature"
-        case .sleep:       return "Last night"
-        case .calories:    return "Active energy"
-        case .hydration:   return "Today's fluid"
+        case .hrv:         return String(localized: "Heart-rate variability")
+        case .restingHr:   return String(localized: "Resting heart rate")
+        case .respiratory: return String(localized: "Breaths per minute")
+        case .steps:       return String(localized: "Today")
+        case .stress:      return String(localized: "Autonomic load")
+        case .fitnessAge:  return String(localized: "Updated weekly")
+        case .vitality:    return String(localized: "Wellness score")
+        case .bloodOxygen: return String(localized: "Blood oxygen")
+        case .skinTemp:    return String(localized: "Skin temperature")
+        case .sleep:       return String(localized: "Last night")
+        case .calories:    return String(localized: "Active energy")
+        case .hydration:   return String(localized: "Today's fluid")
+        case .coupled:     return String(localized: "Recovery, strain and sleep in one glance")
         }
     }
 
@@ -85,6 +94,7 @@ enum DashboardCard: String, CaseIterable, Identifiable {
         case .sleep:       return "bed.double.fill"
         case .calories:    return "flame.fill"
         case .hydration:   return "drop.fill"
+        case .coupled:     return "circle.hexagongrid.fill"
         }
     }
 
@@ -103,6 +113,7 @@ enum DashboardCard: String, CaseIterable, Identifiable {
         case .sleep:       return ""    // value carries the h/m itself
         case .calories:    return "kcal"
         case .hydration:   return ""    // value bakes in "<total> / <goal> L" itself
+        case .coupled:     return ""    // a tap-through row, no value, so no unit
         }
     }
 
@@ -121,7 +132,7 @@ enum DashboardCard: String, CaseIterable, Identifiable {
 /// cards as a JSON-encoded [String] of ids; a card not in the list is hidden. Stored in
 /// @AppStorage("today.dashboardCards").
 enum DashboardCardPrefs {
-    /// UserDefaults key — a JSON array of `DashboardCard` ids in display order.
+    /// UserDefaults key, a JSON array of `DashboardCard` ids in display order.
     static let selectionKey = "today.dashboardCards"
 
     /// Encode an ordered list of enabled cards into the stored JSON string. Falls back to a comma-joined
@@ -137,7 +148,7 @@ enum DashboardCardPrefs {
     /// Decode the stored string into an ordered list of enabled cards. An empty/unset string yields the
     /// default selection (so a fresh install shows the sensible default). Accepts both the JSON-array form
     /// and a legacy comma-joined form. Unknown ids are dropped; duplicates are de-duped; this returns ONLY
-    /// the enabled cards in their saved order — the editor pairs it with the disabled remainder.
+    /// the enabled cards in their saved order, the editor pairs it with the disabled remainder.
     static func decodeEnabled(_ raw: String) -> [DashboardCard] {
         let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return DashboardCard.defaultSelection }
@@ -156,7 +167,7 @@ enum DashboardCardPrefs {
                 result.append(c)
             }
         }
-        // An all-unknown / empty decode shouldn't blank the dashboard — fall back to the default set.
+        // An all-unknown / empty decode shouldn't blank the dashboard, fall back to the default set.
         return result.isEmpty ? DashboardCard.defaultSelection : result
     }
 }

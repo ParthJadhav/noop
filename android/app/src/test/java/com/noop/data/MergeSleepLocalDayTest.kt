@@ -49,6 +49,21 @@ class MergeSleepLocalDayTest {
     }
 
     /**
+     * #715 — two sessions ending the SAME local day (a main night + a nap) must BOTH survive. The old
+     * LinkedHashMap<String, SleepSession> keyed by end-day overwrote on collision and silently dropped
+     * one, in the app and the CSV export. Mirrors the Swift WhoopStore.SleepMerge fix (SleepMergeTests).
+     */
+    @Test
+    fun mergeSleep_twoSessionsSameLocalEndDay_bothSurvive() {
+        val wake = 1_781_389_800L                                          // 2026-06-14 01:30 local (UTC+3)
+        val night = session(startUtc = wake - 6 * 3600L, endUtc = wake)    // ends 01:30 local
+        val nap = session(startUtc = wake + 10 * 3600L, endUtc = wake + 11 * 3600L) // ends ~12:30 same local day
+        val merged = WhoopRepository.mergeSleep(imported = emptyList(), computed = listOf(night, nap))
+        assertEquals("a main night + a nap ending the same local day must both survive", 2, merged.size)
+        assertEquals(listOf(night.startTs, nap.startTs).sorted(), merged.map { it.startTs })
+    }
+
+    /**
      * The local wake-day key for an 01:30-local (UTC+3) wake is the LOCAL date — the date the dashboard's
      * "today" read uses — not the previous UTC date. This is the exact mis-attribution #304 fixed.
      */

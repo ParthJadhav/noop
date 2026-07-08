@@ -6,7 +6,11 @@ import StrandAnalytics
 /// using the WHOOP model shape. Makes the app independent of WHOOP's cloud for live-collected days.
 struct IntelligenceView: View {
     @EnvironmentObject var intelligence: IntelligenceEngine
-    @EnvironmentObject var live: LiveState
+    // NOTE: IntelligenceView deliberately does NOT observe `LiveState`. A connected strap publishes at
+    // ~1 Hz, which would re-evaluate this body (and its lazy By-Day list) on every tick. The only live
+    // dependency — the "Syncing strap history…" note shown over the empty state — owns its OWN
+    // `@EnvironmentObject var live` in the `IntelSyncingNote` leaf below (mirrors the Today/Sleep
+    // leaf-scoping pattern), so a tick refreshes only that note.
 
     @State private var range: IntelRange = .month
 
@@ -19,8 +23,12 @@ struct IntelligenceView: View {
         // imported history, an eager VStack built every card up-front on the main thread and froze
         // the app when ALL was tapped (#345); LazyVStack only materialises what's on screen.
         ScreenScaffold(title: "Intelligence",
-                       subtitle: "NOOP scores your charge, effort and rest itself — on-device, no cloud.",
-                       lazy: true) {
+                       subtitle: "NOOP scores your charge, effort and rest itself: on-device, no cloud.",
+                       lazy: true,
+                       // Liquid finish: the same full-bleed day-of-sky backdrop Today + the other liquid
+                       // tabs carry, so Intelligence sits in one atmosphere. Static + non-interactive; the
+                       // frosted cards below sit on the opaque canvas and stay legible.
+                       topBackground: liquidScaffoldSky()) {
             if let f = forecast { forecastCard(f) }
             explainerCard
             if intelligence.computing {
@@ -41,11 +49,13 @@ struct IntelligenceView: View {
                     }
                 }
             } else if intelligence.results.isEmpty {
-                // While the strap is mid-offload, say so — "no days" reads as final otherwise (#77).
-                if live.backfilling { SyncingHistoryNote(chunks: live.syncChunksThisSession) }
+                // While the strap is mid-offload, say so — "no days" reads as final otherwise (#77). The
+                // note owns the `LiveState` observation in its own leaf so the chunk count ticks without
+                // re-rendering Intelligence (identical output to the prior inline check).
+                IntelSyncingNote()
                 DataPendingNote(
                     title: "Building from your strap",
-                    message: "This builds from the strap as it syncs. Effort and rest appear after you have worn it and slept a night. Charge needs about a week of nights to learn your baseline, or import your WHOOP export to skip the wait.",
+                    message: "This builds from the strap as it syncs. Effort and rest appear after you have worn it and slept a night. Charge needs about four nights of sleep to learn your baseline (you'll see \"Calibrating\" until then), and keeps sharpening over your first couple of weeks. On a WHOOP 5 or MG the strap banks little history, so the night count can climb slowly or sit at 0 of 4 until you have worn it across a few nights. That's its sync limit, not a fault. Import your WHOOP export to skip the wait.",
                     symbol: "brain.head.profile"
                 )
             } else {
@@ -59,7 +69,8 @@ struct IntelligenceView: View {
                     Spacer()
                     SegmentedPillControl(IntelRange.allCases, selection: $range) { $0.label }
                 }
-                Text("\(filtered.count) \(filtered.count == 1 ? "day" : "days")")
+                // Whole-phrase variants per count so translators never see a stitched plural.
+                Text(filtered.count == 1 ? "1 day" : "\(filtered.count) days")
                     .font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 if filtered.isEmpty {
@@ -122,32 +133,38 @@ struct IntelligenceView: View {
                                            plannedSleepHours: plannedHours)
     }
 
-    /// The forecast hero — tomorrow-morning Charge as a clean flat GlowRing on a flat opaque
-    /// surfaceRaised card (the Design Reset look), with the plain-English estimate read-out beneath.
-    /// No scenic backdrop, no bloom gauge — the read-outs sit on an opaque card so they stay crisp,
-    /// the same wash-out fix the Today hero got. The number, ± band and copy are unchanged.
+    /// The forecast hero — tomorrow-morning Charge as the canonical liquid `LiquidVessel` gauge in the
+    /// Charge tint, with the estimate counting up over it (the SAME hero language Sleep + Today use), on a
+    /// frosted Charge-tinted card, with the plain-English estimate read-out beneath. A real forecast number,
+    /// so it earns a liquid gauge. The number, ± band and copy are unchanged.
     private func forecastCard(_ f: RecoveryForecast) -> some View {
         let frac = min(max(f.charge / 100.0, 0), 1)
         return VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("Tomorrow's Charge", overline: "Evening forecast", trailing: "Estimate")
+            SectionHeader("Tomorrow's Charge", overline: "Evening forecast", trailing: String(localized: "Estimate"))
             NoopCard(padding: 20, tint: StrandPalette.chargeColor) {
                 VStack(spacing: 14) {
-                    GlowRing(
-                        fraction: frac,
-                        value: f.charge,
-                        format: { "\(Int($0.rounded()))" },
-                        color: StrandPalette.recoveryColor(f.charge),
-                        diameter: 184,
-                        lineWidth: 18
-                    )
-                    .overlay(alignment: .bottom) {
-                        Text("± \(Int(f.band.rounded())) · \(StrandPalette.recoveryState(f.charge))")
-                            .font(StrandFont.captionNumber)
-                            .foregroundStyle(StrandPalette.textTertiary)
-                            .offset(y: 26)
+                    // The signature liquid gauge: a filling vessel tinted to the forecast Charge, with the
+                    // 0–100 estimate counting up over it and the ± band + state word beneath (Sleep's
+                    // restHero idiom). Live so the fill actually flows on the hero surface.
+                    ZStack {
+                        LiquidVessel(value: frac, tint: StrandPalette.recoveryColor(f.charge), animated: true)
+                            .frame(width: 184, height: 184)
+                        VStack(spacing: 0) {
+                            CountUpText(
+                                value: f.charge,
+                                format: { "\(Int($0.rounded()))" },
+                                font: StrandFont.rounded(52),
+                                color: StrandPalette.textPrimary
+                            )
+                            .shadow(color: .black.opacity(0.5), radius: 6, y: 1)
+                            Text("± \(Int(f.band.rounded())) · \(StrandPalette.recoveryState(f.charge))")
+                                .font(StrandFont.captionNumber)
+                                .foregroundStyle(StrandPalette.textSecondary)
+                        }
+                        .allowsHitTesting(false)   // taps fall through to the vessel → splash
                     }
                     .padding(.top, 4)
-                    .padding(.bottom, 18)
+                    .padding(.bottom, 6)
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel("Tomorrow's Charge estimate \(Int(f.charge.rounded())) plus or minus \(Int(f.band.rounded()))")
                     VStack(alignment: .leading, spacing: 10) {
@@ -155,7 +172,7 @@ struct IntelligenceView: View {
                             .font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                        Text("Estimate from today's effort, your typical sleep and your \(f.nights)-night recovery baseline — not a measurement. Your real Charge is scored from tomorrow's HRV when you wake.")
+                        Text("Estimate from today's effort, your typical sleep and your \(f.nights)-night recovery baseline, not a measurement. Your real Charge is scored from tomorrow's HRV when you wake.")
                             .font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
                             .fixedSize(horizontal: false, vertical: true)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -181,21 +198,21 @@ struct IntelligenceView: View {
                         .accessibilityHidden(true)
                     Text("How this works").font(StrandFont.headline).foregroundStyle(StrandPalette.textPrimary)
                 }
-                Text("Charge weighs your HRV against your personal baseline (~55%), resting heart rate (~20%), rest quality (~15%), respiration (~5%) and skin-temperature deviation (~5%). Effort is a 0–\(UnitFormatter.effortScaleMax(effortScale)) cardiovascular load from time in heart-rate zones. Rest is staged from movement and heart rate. Everything is computed here from the strap's raw data — it works for any day NOOP collected raw streams.")
+                Text("Charge weighs your HRV against your personal baseline (~55%), resting heart rate (~20%), rest quality (~15%), respiration (~5%) and skin-temperature deviation (~5%). Effort is a 0-\(UnitFormatter.effortScaleMax(effortScale)) cardiovascular load from time in heart-rate zones. Rest is staged from movement and heart rate. Everything is computed here from the strap's raw data. It works for any day NOOP collected raw streams.")
                     .font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                 // The Charge model made concrete — the five weighted inputs, each its own metric accent.
                 VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
                     Text("Charge model").strandOverline()
-                    weightRow("Heart-rate variability", "~55%", fraction: 0.55, color: StrandPalette.metricPurple)
-                    weightRow("Resting heart rate", "~20%", fraction: 0.20, color: StrandPalette.metricRose)
-                    weightRow("Rest quality", "~15%", fraction: 0.15, color: StrandPalette.metricCyan)
-                    weightRow("Respiration", "~5%", fraction: 0.05, color: StrandPalette.accent)
-                    weightRow("Skin-temperature deviation", "~5%", fraction: 0.05, color: StrandPalette.metricAmber)
+                    weightRow(String(localized: "Heart-rate variability"), "~55%", fraction: 0.55, color: StrandPalette.metricPurple)
+                    weightRow(String(localized: "Resting heart rate"), "~20%", fraction: 0.20, color: StrandPalette.metricRose)
+                    weightRow(String(localized: "Rest quality"), "~15%", fraction: 0.15, color: StrandPalette.metricCyan)
+                    weightRow(String(localized: "Respiration"), "~5%", fraction: 0.05, color: StrandPalette.accent)
+                    weightRow(String(localized: "Skin-temperature deviation"), "~5%", fraction: 0.05, color: StrandPalette.metricAmber)
                     HStack {
                         Text("Effort").font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
                         Spacer()
-                        Text("0–\(UnitFormatter.effortScaleMax(effortScale)) scale")
+                        Text("0-\(UnitFormatter.effortScaleMax(effortScale)) scale")
                             .font(StrandFont.captionNumber).foregroundStyle(StrandPalette.effortColor)
                     }
                     .padding(.top, 2)
@@ -214,9 +231,10 @@ struct IntelligenceView: View {
                 Spacer()
                 Text(percent).font(StrandFont.captionNumber).foregroundStyle(color)
             }
-            // The NOOP signature segmented bar — counts up on appear, tinted to the input's accent.
-            // The Charge weights span 0…0.55, so the bar reads each input's share of the model.
-            PipBar(value: fraction, range: 0...0.55, segments: 18, tint: color, height: 8)
+            // The horizontal liquid tube — the same vessel Today's Key Metrics + Sleep's stage bars use —
+            // tinted to the input's accent. The Charge weights span 0…0.55, so the tube reads each input's
+            // share of the model. Static (posed): a still fill line, no live canvas per row.
+            LiquidTube(frac: min(1, max(0, fraction / 0.55)), tint: color, height: 8, animated: false)
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(label): \(percent) of Charge")
@@ -226,8 +244,23 @@ struct IntelligenceView: View {
         NoopCard(padding: 18, tint: StrandPalette.chargeColor) {
             VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
                 HStack {
+                    // A small liquid vessel filled to the day's Charge (a real 0–100 metric, so it earns a
+                    // gauge) leads the row — the same leading-gauge idiom Today + Insights use. Static
+                    // (posed) so each day row costs a single cached frame, not a live canvas. Only shown
+                    // once the night has a Charge to fill it; a calibrating night leads with the date alone.
+                    if let r = d.recovery {
+                        LiquidVessel(value: min(1, max(0, r / 100)), tint: StrandPalette.recoveryColor(r), animated: false)
+                            .frame(width: 24, height: 24)
+                            .accessibilityHidden(true)
+                    }
                     Text(d.day).font(StrandFont.headline).foregroundStyle(StrandPalette.textPrimary)
                     Spacer()
+                    // A3: the existing per-day Charge confidence as a small dot + tier tag pill
+                    // (CALIBRATING / EST. / REL.) next to the source badge. Pure presentation of
+                    // `d.confidence` , only shown once there's a Charge to qualify.
+                    if d.recovery != nil {
+                        ConfidenceTierChip(confidence: d.confidence)
+                    }
                     // The REAL source of the day's dashboard headline, not a hard-coded "NOOP-computed".
                     // The By-Day numbers are always NOOP's on-device scores, but when an import covers the
                     // day it WINS the dashboard merge, so the badge says so ("Whoop" / "Apple Health") and
@@ -238,20 +271,32 @@ struct IntelligenceView: View {
                                 tint: d.source == .computed ? StrandPalette.chargeColor : StrandPalette.accent)
                 }
                 HStack(spacing: 0) {
-                    stat("Charge", d.recovery.map { "\(Int($0.rounded()))%" } ?? "—",
+                    stat(String(localized: "Charge"), d.recovery.map { "\(Int($0.rounded()))%" } ?? "—",
                          d.recovery.map { StrandPalette.recoveryColor($0) } ?? StrandPalette.textSecondary)
-                    stat("Effort", d.strain.map { UnitFormatter.effortDisplay($0, scale: effortScale) } ?? "—",
+                    stat(String(localized: "Effort"), d.strain.map { UnitFormatter.effortDisplay($0, scale: effortScale) } ?? "—",
                          d.strain.map { StrandPalette.strainColor($0) } ?? StrandPalette.textSecondary)
-                    stat("Rest", d.sleepMin.map { "\(Int($0 / 60))h \(Int($0.truncatingRemainder(dividingBy: 60)))m" } ?? "—", StrandPalette.restColor)
+                    stat(String(localized: "Rest"), d.sleepMin.map { "\(Int($0 / 60))h \(Int($0.truncatingRemainder(dividingBy: 60)))m" } ?? "—", StrandPalette.restColor)
                     stat("HRV", d.hrv.map { "\(Int($0.rounded()))" } ?? "—", StrandPalette.metricPurple)
                     stat("RHR", d.rhr.map { "\($0)" } ?? "—", StrandPalette.metricRose)
                 }
-                // Effort load meter (0–100) as the NOOP segmented bar — counts up on appear, tinted
-                // along the strain ramp so it reads as at-a-glance cardio load.
+                // Effort load meter (0–100) as a filling LiquidTube — the horizontal liquid vessel Today's
+                // Key Metrics + Sleep's stage bars use — tinted along the strain ramp so it reads as
+                // at-a-glance cardio load. Static (posed) so each day row costs a cached frame, not a live
+                // canvas; a real metric, so it earns a liquid accent.
                 if let s = d.strain {
-                    PipBar(value: s, range: 0...100, segments: 20,
-                           tint: StrandPalette.strainColor(s), height: 8)
+                    LiquidTube(frac: min(1, max(0, s / 100)), tint: StrandPalette.strainColor(s),
+                               height: 8, animated: false)
                         .accessibilityHidden(true)
+                }
+                // A1: "What shaped it" , one row per engine-supplied Charge driver. Gated on a non-empty
+                // list so a cold-start / calibrating night (no real contributions to attribute) shows
+                // nothing here rather than a fake breakdown. A5's relative skin-temp marker rides at the
+                // foot when the night carries one.
+                if !d.drivers.isEmpty {
+                    ChargeBreakdownSection(drivers: d.drivers,
+                                           confidence: d.confidence,
+                                           skinTempRel: d.skinTempRel)
+                        .padding(.top, NoopMetrics.space1)
                 }
             }
         }
@@ -267,6 +312,16 @@ struct IntelligenceView: View {
 
 }
 
+/// The "Syncing strap history…" note, shown only while a historical offload is running (#77). Owns the
+/// `LiveState` observation in its own leaf (scroll-stutter isolation) so the chunk count ticks without
+/// re-rendering IntelligenceView. Renders byte-for-byte what the prior inline `live.backfilling` check did.
+private struct IntelSyncingNote: View {
+    @EnvironmentObject private var live: LiveState
+    var body: some View {
+        if live.backfilling { SyncingHistoryNote(chunks: live.syncChunksThisSession) }
+    }
+}
+
 /// Recent-window options for the By Day list. `days == nil` means show everything.
 private enum IntelRange: Int, CaseIterable, Hashable {
     case week = 7, month = 30, quarter = 90, half = 180, year = 365, all = 0
@@ -276,12 +331,12 @@ private enum IntelRange: Int, CaseIterable, Hashable {
 
     var label: String {
         switch self {
-        case .week: return "W"
-        case .month: return "M"
-        case .quarter: return "3M"
-        case .half: return "6M"
-        case .year: return "1Y"
-        case .all: return "ALL"
+        case .week: return String(localized: "W")
+        case .month: return String(localized: "M")
+        case .quarter: return String(localized: "3M")
+        case .half: return String(localized: "6M")
+        case .year: return String(localized: "1Y")
+        case .all: return String(localized: "ALL")
         }
     }
 }

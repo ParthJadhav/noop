@@ -116,4 +116,47 @@ final class TodayCarryOverTests: XCTestCase {
         XCTAssertNil(carried?.spo2Pct, "a metric the carried night lacks must stay nil, never fabricated")
         XCTAssertEqual(carried?.respRateBpm, 14.2)
     }
+
+    // MARK: recency cap + relabel (#779)
+
+    func testCarryWithinTwoDays_readsLastNight() {
+        // A genuine post-rollover carry (yesterday's score on today) stays "Last night · <date>".
+        XCTAssertFalse(TodayView.isCarryStale(priorDayKey: "2026-06-18", todayKey: "2026-06-19"))
+        XCTAssertEqual(TodayView.carriedCaption(priorDayKey: "2026-06-18", todayKey: "2026-06-19"),
+                       "Last night · " + dMMM("2026-06-18"))
+    }
+
+    func testCarryAtExactlyTwoDays_stillReadsLastNight() {
+        // The cap is inclusive at 2 days, so a strap off for a day still reads as a recent "Last night".
+        XCTAssertFalse(TodayView.isCarryStale(priorDayKey: "2026-06-17", todayKey: "2026-06-19"))
+    }
+
+    func testCarryOlderThanTwoDays_relabelsLatestSleep() {
+        // #779: a weeks-old import (here ~4 weeks) is still carried (not a bare blank) but must NOT be
+        // labelled "Last night"; it relabels to "Latest sleep · <date>".
+        XCTAssertTrue(TodayView.isCarryStale(priorDayKey: "2026-05-22", todayKey: "2026-06-19"))
+        XCTAssertEqual(TodayView.carriedCaption(priorDayKey: "2026-05-22", todayKey: "2026-06-19"),
+                       "Latest sleep · " + dMMM("2026-05-22"))
+    }
+
+    func testCarryJustBeyondCap_relabelsLatestSleep() {
+        // 3 days out is the first day past the cap.
+        XCTAssertTrue(TodayView.isCarryStale(priorDayKey: "2026-06-16", todayKey: "2026-06-19"))
+    }
+
+    func testStaleness_unparseableKeyReadsFresh_neverOverClaims() {
+        // A malformed key must never be reported stale (we'd rather under-claim than wrongly relabel).
+        XCTAssertFalse(TodayView.isCarryStale(priorDayKey: "not-a-date", todayKey: "2026-06-19"))
+    }
+
+    /// Locale-formatted "d MMM" matching the production `lastChargeDateFmt`, so the caption assertions
+    /// stay stable regardless of the test host's locale.
+    private func dMMM(_ key: String) -> String {
+        let parse = DateFormatter(); parse.locale = Locale(identifier: "en_US_POSIX")
+        parse.dateFormat = "yyyy-MM-dd"
+        guard let d = parse.date(from: key) else { return key }
+        let f = DateFormatter(); f.locale = Locale.current
+        f.setLocalizedDateFormatFromTemplate("dMMM")
+        return f.string(from: d)
+    }
 }

@@ -39,7 +39,11 @@ struct InsightsHubView: View {
 
     var body: some View {
         ScreenScaffold(title: "Insights",
-                       subtitle: "Patterns in your own data — association, not cause.") {
+                       subtitle: "Patterns in your own data: association, not cause.",
+                       // PERF (scroll): lazy column — byte-identical layout (LazyVStack == eager VStack
+                       // alignment/spacing/header). The content is one inner eager VStack, so the staggered
+                       // mover reveal is unchanged; this only defers building that stack until it scrolls in.
+                       lazy: true) {
             if !model.loaded {
                 ComingSoon(what: "Reading your journal and outcomes…")
             } else {
@@ -68,9 +72,7 @@ struct InsightsHubView: View {
 
             if model.ranked.isEmpty {
                 NoopCard {
-                    Text("Not enough overlap between your journal answers and "
-                        + "\(outcome.outcomeName.lowercased()) yet. Keep logging — each behaviour "
-                        + "needs days both with and without it before NOOP can read its effect.")
+                    Text(String(localized: "Not enough overlap between your journal answers and \(outcome.outcomeName.lowercased()) yet. Keep logging. Each behaviour needs days both with and without it before NOOP can read its effect."))
                         .font(StrandFont.subhead)
                         .foregroundStyle(StrandPalette.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -158,9 +160,8 @@ struct InsightsHubView: View {
             }
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(r.sentence()
-            + " Cohen's d \(String(format: "%.2f", e.cohensD)). "
-            + Self.scoreState(r.confidence).accessibilityWord)
+        // One whole-string key; the args are complete sentences, never concatenated tails.
+        .accessibilityLabel(String(localized: "\(r.sentence()) Cohen's d \(String(format: "%.2f", e.cohensD)). \(Self.scoreState(r.confidence).accessibilityWord)"))
     }
 
     // MARK: - Alcohol / caffeine dose-response
@@ -170,9 +171,7 @@ struct InsightsHubView: View {
             SectionHeader("Dose-response", overline: "Personal curve · prior-shrunk")
             if model.doseCards.isEmpty {
                 NoopCard {
-                    Text("Log alcohol or late caffeine with an amount and NOOP fits a personal "
-                        + "dose curve — how much each extra unit tends to move your numbers. "
-                        + "Until then it shows typical patterns, clearly labelled as not yet yours.")
+                    Text(String(localized: "Log alcohol or late caffeine with an amount and NOOP fits a personal dose curve: how much each extra unit tends to move your numbers. Until then it shows typical patterns, clearly labelled as not yet yours."))
                         .font(StrandFont.subhead)
                         .foregroundStyle(StrandPalette.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -193,11 +192,7 @@ struct InsightsHubView: View {
         NoopCard {
             VStack(alignment: .leading, spacing: 6) {
                 Text("How to read this").strandOverline()
-                Text("Everything here is a pattern in your own logged days — an association with "
-                    + "an effect size and confidence, never a cause or a diagnosis. Population "
-                    + "patterns are shown as \u{201C}typical\u{201D} and are always overridden by your own "
-                    + "data once you have enough of it. Approximations, not WHOOP\u{2019}s scores; not a "
-                    + "medical device.")
+                Text(String(localized: "Everything here is a pattern in your own logged days: an association with an effect size and confidence, never a cause or a diagnosis. Population patterns are shown as \u{201C}typical\u{201D} and are always overridden by your own data once you have enough of it. Approximations, not WHOOP\u{2019}s scores; not a medical device."))
                     .font(StrandFont.footnote)
                     .foregroundStyle(StrandPalette.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -229,10 +224,10 @@ struct InsightsHubView: View {
     /// Cohen's d → conventional magnitude word.
     static func effectMagnitudeWord(_ d: Double) -> String {
         switch abs(d) {
-        case ..<0.2: return "negligible"
-        case ..<0.5: return "small"
-        case ..<0.8: return "moderate"
-        default:     return "large"
+        case ..<0.2: return String(localized: "negligible")
+        case ..<0.5: return String(localized: "small")
+        case ..<0.8: return String(localized: "moderate")
+        default:     return String(localized: "large")
         }
     }
 }
@@ -241,9 +236,9 @@ private extension ScoreState {
     /// VoiceOver-only certainty phrase for a mover row.
     var accessibilityWord: String {
         switch self {
-        case .solid:       return "Solid signal."
-        case .building:    return "Building — keep logging."
-        case .calibrating: return "Calibrating — too thin to read yet."
+        case .solid:       return String(localized: "Solid signal.")
+        case .building:    return String(localized: "Building. Keep logging.")
+        case .calibrating: return String(localized: "Calibrating. Too thin to read yet.")
         case .live:        return ""
         }
     }
@@ -285,12 +280,10 @@ private struct DoseResponseCardView: View {
                     .accessibilityLabel(curveAccessibilityLabel(r))
 
                 if r.priorDominated {
-                    honestyBanner("Based mostly on typical patterns — not yet yours. "
-                        + "Log a few more \(card.unitLabel.lowercased()) days and this becomes yours.",
+                    honestyBanner(String(localized: "Based mostly on typical patterns, not yet yours. Log a few more \(card.unitLabel.lowercased()) days and this becomes yours."),
                         tone: .neutral)
                 } else if r.contradictsPrior {
-                    honestyBanner("In your data so far, this doesn\u{2019}t move your "
-                        + "\(card.outcomeName) the way it typically does.", tone: .positive)
+                    honestyBanner(String(localized: "In your data so far, this doesn\u{2019}t move your \(card.outcomeName) the way it typically does."), tone: .positive)
                 }
 
                 if card.timingProxy {
@@ -334,7 +327,7 @@ private struct DoseResponseCardView: View {
         let fromDose = 1
         let delta = r.delta(fromDose: fromDose, toDose: previewDose)
         let projected = card.latestOutcome.map { max(0, min(card.outcomeCeiling, $0 + delta)) }
-        let stepLabel = previewDose <= 1 ? "no extra" : "\(previewDose)\(card.dosePlusSuffix(previewDose))"
+        let stepLabel = previewDose <= 1 ? String(localized: "no extra") : card.stepLabel(previewDose)
 
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
             // Overline and the dose stepper each get their own row — sharing one HStack
@@ -354,27 +347,32 @@ private struct DoseResponseCardView: View {
                       alignment: .leading, spacing: NoopMetrics.gap) {
                 StatTile(label: "Per extra \(card.unitNoun)",
                          value: signed(r.perUnit, suffix: card.outcomeSuffix),
-                         caption: r.priorDominated ? "typical" : "your data",
+                         caption: r.priorDominated ? String(localized: "typical") : String(localized: "your data"),
                          accent: r.perUnit < 0 ? StrandPalette.statusCritical : StrandPalette.statusPositive)
                 StatTile(label: "Tomorrow\u{2019}s \(card.outcomeName)",
                          value: projected.map { "\(Int($0.rounded()))\(card.outcomeSuffix)" } ?? "—",
-                         caption: projected != nil ? "projected · \(stepLabel)" : "needs a recent day",
+                         caption: projected != nil ? String(localized: "projected · \(stepLabel)") : String(localized: "needs a recent day"),
                          accent: domain.color)
             }
         }
     }
 
+    /// Whole-phrase variants per direction and basis, so translators never see stitched
+    /// lower/higher or basis fragments.
     private func forecastSentence(delta: Double, projected: Double?, stepLabel: String) -> String {
         if previewDose <= 1 {
-            return "No extra tonight — your \(card.outcomeName.lowercased()) forecast stays where it is."
+            return String(localized: "No extra tonight. Your \(card.outcomeName.lowercased()) forecast stays where it is.")
         }
-        let mag = Int(abs(delta).rounded())
-        let dir = delta <= 0 ? "lower" : "higher"
-        let basis = card.response.priorDominated
-            ? "based on typical patterns"
-            : "based on \(card.response.nUser) of your \(card.unitLabel.lowercased()) days"
-        return "A \(stepLabel) tonight tends to line up with about \(mag)\(card.outcomeSuffix) "
-            + "\(dir) on tomorrow\u{2019}s \(card.outcomeName.lowercased()) for you — \(basis)."
+        let magText = "\(Int(abs(delta).rounded()))\(card.outcomeSuffix)"
+        let lower = delta <= 0
+        if card.response.priorDominated {
+            return lower
+                ? String(localized: "A \(stepLabel) tonight tends to line up with about \(magText) lower on tomorrow\u{2019}s \(card.outcomeName.lowercased()) for you, based on typical patterns.")
+                : String(localized: "A \(stepLabel) tonight tends to line up with about \(magText) higher on tomorrow\u{2019}s \(card.outcomeName.lowercased()) for you, based on typical patterns.")
+        }
+        return lower
+            ? String(localized: "A \(stepLabel) tonight tends to line up with about \(magText) lower on tomorrow\u{2019}s \(card.outcomeName.lowercased()) for you, based on \(card.response.nUser) of your \(card.unitLabel.lowercased()) days.")
+            : String(localized: "A \(stepLabel) tonight tends to line up with about \(magText) higher on tomorrow\u{2019}s \(card.outcomeName.lowercased()) for you, based on \(card.response.nUser) of your \(card.unitLabel.lowercased()) days.")
     }
 
     // MARK: Bits
@@ -403,10 +401,11 @@ private struct DoseResponseCardView: View {
         return "\(sign)\(body)\(suffix)"
     }
 
+    /// Whole-string key per variant (never a concatenated localized tail on an a11y label).
     private func curveAccessibilityLabel(_ r: DoseResponse) -> String {
-        "Dose-response curve. Each extra \(card.unitNoun) lines up with about "
-            + "\(signed(r.perUnit, suffix: card.outcomeSuffix)) on \(card.outcomeName), "
-            + (r.priorDominated ? "typical patterns." : "your own data.")
+        r.priorDominated
+            ? String(localized: "Dose-response curve. Each extra \(card.unitNoun) lines up with about \(signed(r.perUnit, suffix: card.outcomeSuffix)) on \(card.outcomeName), typical patterns.")
+            : String(localized: "Dose-response curve. Each extra \(card.unitNoun) lines up with about \(signed(r.perUnit, suffix: card.outcomeSuffix)) on \(card.outcomeName), your own data.")
     }
 }
 
@@ -497,9 +496,9 @@ final class InsightsHubViewModel: ObservableObject {
         var id: String { rawValue }
         var label: String {
             switch self {
-            case .recovery: return "Charge"
+            case .recovery: return String(localized: "Charge")
             case .hrv:      return "HRV"
-            case .sleep:    return "Rest"
+            case .sleep:    return String(localized: "Rest")
             case .rhr:      return "RHR"
             }
         }
@@ -515,10 +514,10 @@ final class InsightsHubViewModel: ObservableObject {
         /// The engine's outcome label (carried onto each RankedEffect).
         var outcomeName: String {
             switch self {
-            case .recovery: return "Charge"
+            case .recovery: return String(localized: "Charge")
             case .hrv:      return "HRV"
-            case .sleep:    return "Rest"
-            case .rhr:      return "Resting HR"
+            case .sleep:    return String(localized: "Rest")
+            case .rhr:      return String(localized: "Resting HR")
             }
         }
         var higherIsBetter: Bool { self != .rhr }
@@ -676,8 +675,8 @@ final class InsightsHubViewModel: ObservableObject {
 
         var title: String {
             switch behavior {
-            case .alcohol:  return "Alcohol"
-            case .caffeine: return "Caffeine"
+            case .alcohol:  return String(localized: "Alcohol")
+            case .caffeine: return String(localized: "Caffeine")
             }
         }
         var symbol: String {
@@ -689,15 +688,15 @@ final class InsightsHubViewModel: ObservableObject {
         /// The unit shown in copy ("drink" / "later step").
         var unitNoun: String {
             switch behavior {
-            case .alcohol:  return "drink"
-            case .caffeine: return "later step"
+            case .alcohol:  return String(localized: "drink")
+            case .caffeine: return String(localized: "later step")
             }
         }
         /// The plural-ish label used in "N of your X days".
         var unitLabel: String {
             switch behavior {
-            case .alcohol:  return "drink"
-            case .caffeine: return "late-caffeine"
+            case .alcohol:  return String(localized: "drink")
+            case .caffeine: return String(localized: "late-caffeine")
             }
         }
         var timingProxy: Bool { behavior == .caffeine }
@@ -709,8 +708,8 @@ final class InsightsHubViewModel: ObservableObject {
 
         var forecastOverline: String {
             switch behavior {
-            case .alcohol:  return "Tonight\u{2019}s forecast"
-            case .caffeine: return "Timing forecast"
+            case .alcohol:  return String(localized: "Tonight\u{2019}s forecast")
+            case .caffeine: return String(localized: "Timing forecast")
             }
         }
 
@@ -722,16 +721,23 @@ final class InsightsHubViewModel: ObservableObject {
             case .caffeine:
                 // Timing buckets, not counts.
                 switch d {
-                case 0: return "AM"
-                case 1: return "Noon"
-                case 2: return "2pm+"
-                default: return "Eve"
+                case 0: return String(localized: "AM")
+                case 1: return String(localized: "Noon")
+                case 2: return String(localized: "2pm+")
+                default: return String(localized: "Eve")
                 }
             }
         }
-        /// "+" suffix for the top bucket in forecast copy (alcohol only).
-        func dosePlusSuffix(_ d: Int) -> String {
-            behavior == .alcohol ? (d >= DoseResponseEngine.maxCurveDose ? "+ drinks" : " drinks") : ""
+        /// The whole dose phrase for forecast copy (alcohol counts; caffeine keeps the bare bucket
+        /// number). Whole-string keys per variant, never a stitched "+ drinks" suffix.
+        func stepLabel(_ d: Int) -> String {
+            switch behavior {
+            case .alcohol:
+                return d >= DoseResponseEngine.maxCurveDose ? String(localized: "\(d)+ drinks")
+                                                            : String(localized: "\(d) drinks")
+            case .caffeine:
+                return "\(d)"
+            }
         }
     }
 }

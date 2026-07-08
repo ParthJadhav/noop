@@ -16,8 +16,9 @@ import Combine
 @MainActor
 final class NavRouter: ObservableObject {
     /// A top-level destination a screen can ask the shell to open. Deliberately minimal — the Devices
-    /// manager plus the v5 pillar screens the new in-hub rows deep-link to (Insights hub, Lab Book,
-    /// the fused record, the experimental Rhythm visualization).
+    /// manager, the v5 pillar screens the new in-hub rows deep-link to (Insights hub, Lab Book, the
+    /// fused record, the experimental Rhythm visualization), Trends, and the active-workout return route
+    /// the Today indicator card raises.
     enum Destination: String, Equatable, Identifiable {
         case devices
         case insightsHub
@@ -25,6 +26,8 @@ final class NavRouter: ObservableObject {
         case fusedRecord
         case rhythm
         case trends
+        case activeWorkout
+        case liveSession
 
         var id: String { rawValue }
 
@@ -44,6 +47,13 @@ final class NavRouter: ObservableObject {
     /// in the iOS shell). The shell presents it, then resets this to false.
     @Published var quickActionsRequested = false
 
+    /// One-shot: `LiveView` reads this on appear to present the in-exercise screen for an already-running
+    /// workout (routing alone only reaches the Live root), then clears it. A normal Live visit is
+    /// unaffected, since the flag is only raised by `openActiveWorkout()` from the Today indicator card.
+    /// The #238 "a workout just started" transition trigger never fires for a session that is already in
+    /// flight, so this is the one path that re-opens the live workout for an existing session.
+    @Published var presentActiveWorkout = false
+
     /// Ask the shell to open the quick-action sheet (Live HR · workout · journal · breathe).
     func requestQuickActions() { quickActionsRequested = true }
 
@@ -59,4 +69,12 @@ final class NavRouter: ObservableObject {
     func openRhythm() { requestedDestination = .rhythm }
     /// Open the Trends screen (where a "new data" reading deep-links).
     func openTrends() { requestedDestination = .trends }
+    /// Open the active workout: route to the Live surface AND raise the one-shot flag so `LiveView`
+    /// presents the in-exercise screen even when the workout is already running, in one tap from the Today
+    /// indicator card. The flag is consumed (and cleared) by `LiveView.consumeActiveWorkoutRequest()`.
+    func openActiveWorkout() { presentActiveWorkout = true; requestedDestination = .activeWorkout }
+    /// Open a Live Session (silent guardian, beta). The Liquid Today entry presents the session screen
+    /// directly today; this route exists for deep-link parity so a future shell/inbox item can raise it
+    /// the same way as every other destination.
+    func openLiveSession() { requestedDestination = .liveSession }
 }

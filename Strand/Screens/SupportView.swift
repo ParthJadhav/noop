@@ -61,7 +61,7 @@ struct SupportView: View {
             } label: {
                 groupedRow(icon: "envelope.fill", tint: StrandPalette.accent,
                            title: "Get in touch",
-                           detail: "Questions, feedback, bugs — \(ProjectInfo.contactEmail)",
+                           detail: String(localized: "Questions, feedback, bugs: \(ProjectInfo.contactEmail)"),
                            showsChevron: true)
                     .contentShape(Rectangle())
             }
@@ -119,7 +119,7 @@ struct SupportView: View {
                 HStack(alignment: .top, spacing: 10) {
                     Image(systemName: "lock.shield.fill").foregroundStyle(StrandPalette.accent)
                         .font(.system(size: 13)).accessibilityHidden(true)
-                    Text("I keep this project anonymous, so crypto is the only way to chip in — no Patreon, no PayPal, no name attached. Quick, global, and private for both of us.")
+                    Text("I keep this project anonymous, so crypto is the only way to chip in: no Patreon, no PayPal, no name attached. Quick, global, and private for both of us.")
                         .font(StrandFont.footnote).foregroundStyle(StrandPalette.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -166,7 +166,7 @@ struct SupportView: View {
                     }
                 }
 
-                Text("Any amount helps. Thank you — genuinely.")
+                Text("Any amount helps. Thank you, genuinely.")
                     .font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
             }
         }

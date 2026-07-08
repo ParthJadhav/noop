@@ -43,6 +43,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.noop.analytics.CircadianEngine
 import com.noop.analytics.CyclePhaseEngine
+import com.noop.analytics.IllnessDistance
 import com.noop.analytics.IllnessSignalEngine
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -116,6 +117,9 @@ fun CycleAwarenessCard(
     result: CyclePhaseEngine.Result,
     onLogPeriod: (() -> Unit)? = null,
     onOpenDetail: (() -> Unit)? = null,
+    // #801: symmetric off-control. When supplied, the card shows a "Turn off" action so the user can
+    // disable cycle awareness from the SAME place they enabled it (Health), not only from Automations.
+    onTurnOff: (() -> Unit)? = null,
 ) {
     val hue = Palette.restColor
     NoopCard(tint = hue) {
@@ -155,7 +159,7 @@ fun CycleAwarenessCard(
                     Icon(Icons.Filled.CalendarMonth, contentDescription = null, tint = hue, modifier = Modifier.size(16.dp))
                     Text(
                         "A period is likely between ${prettyDay(w.earliestDay)} and " +
-                            "${prettyDay(w.latestDay)} — a window, not a fixed date.",
+                            "${prettyDay(w.latestDay)} (a window, not a fixed date).",
                         style = NoopType.subhead,
                         color = Palette.textSecondary,
                     )
@@ -163,7 +167,7 @@ fun CycleAwarenessCard(
             }
 
             // Actions.
-            if (onLogPeriod != null || onOpenDetail != null) {
+            if (onLogPeriod != null || onOpenDetail != null || onTurnOff != null) {
                 Row(horizontalArrangement = Arrangement.spacedBy(Metrics.gap)) {
                     if (onLogPeriod != null) {
                         OutlinedButton(onClick = onLogPeriod) { Text("Log period start") }
@@ -173,6 +177,10 @@ fun CycleAwarenessCard(
                             onClick = onOpenDetail,
                             colors = ButtonDefaults.outlinedButtonColors(contentColor = Palette.accent),
                         ) { Text("View detail") }
+                    }
+                    // #801: symmetric off-control (turn cycle awareness off where it was turned on).
+                    if (onTurnOff != null) {
+                        OutlinedButton(onClick = onTurnOff) { Text("Turn off") }
                     }
                 }
             }
@@ -199,7 +207,7 @@ fun CycleAwarenessOptInCard(onEnable: () -> Unit) {
                 Text("Cycle awareness", style = NoopType.headline, color = Palette.textPrimary)
             }
             Text(
-                "NOOP can read a coarse menstrual-cycle phase from your nightly skin temperature — " +
+                "NOOP can read a coarse menstrual-cycle phase from your nightly skin temperature, " +
                     "entirely on your device. It is awareness only: not contraception, not a fertility " +
                     "predictor, not a medical service.",
                 style = NoopType.subhead,
@@ -253,7 +261,7 @@ fun BodyClockCard(
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Overline("Plan · ${plan.estimatedDays}-day shift")
                     Text(
-                        "Day 1 — bright light ${clockString(firstDay.brightLightStartHour)}–" +
+                        "Day 1: bright light ${clockString(firstDay.brightLightStartHour)} - " +
                             "${clockString(firstDay.brightLightEndHour)}, lights-out around " +
                             "${clockString(firstDay.targetSleepHour)}.",
                         style = NoopType.subhead,
@@ -281,7 +289,13 @@ fun BodyClockCard(
  * — not a diagnosis. Mirrors the existing amber alert treatment.
  */
 @Composable
-fun HeadsUpCard(result: IllnessSignalEngine.Result) {
+fun HeadsUpCard(
+    result: IllnessSignalEngine.Result,
+    // Optional parallel Mahalanobis distance (IllnessDistance), computed on the SAME z-vector. It does
+    // NOT gate this card (the engine's level already did); when the level is raised and a distance is
+    // present we append a subtle "Confidence" line so the user can gauge how strong the signal is.
+    distance: IllnessDistance.Result? = null,
+) {
     val hue = headsUpHue(result.level)
     NoopCard(padding = 14.dp, tint = hue) {
         Column(verticalArrangement = Arrangement.spacedBy(Metrics.gap)) {
@@ -309,9 +323,45 @@ fun HeadsUpCard(result: IllnessSignalEngine.Result) {
             if (result.suppressedBy.isNotEmpty()) {
                 WhyRow("Explained by", result.suppressedBy, Palette.textTertiary)
             }
+            // Optional confidence read from the parallel Mahalanobis distance, only when the level is
+            // raised. Subtle by design: it augments, never gates (the engine already decided to raise).
+            headsUpConfidenceLine(result.level, distance)?.let { line ->
+                Text(line, style = NoopType.caption, color = Palette.textTertiary)
+            }
         }
     }
 }
+
+/**
+ * A subtle confidence read from the parallel Mahalanobis distance, surfaced ONLY on the RAISED state (and
+ * when a distance is present). null otherwise. The already-unwell state is driven purely by the user's own
+ * log and can have a near-zero distance (0-1 present features), giving a misleading "Confidence: slight
+ * (distance 0.0)", so it's excluded. The raised path always has >= 2 present features, so its distance is
+ * meaningful. The band mirrors iOS exactly. Augment-only, never gates.
+ */
+private fun headsUpConfidenceLine(
+    level: IllnessSignalEngine.Level,
+    distance: IllnessDistance.Result?,
+): String? {
+    if (level != IllnessSignalEngine.Level.RAISED) return null
+    val d = distance ?: return null
+    return "Confidence: ${illnessConfidenceBand(d.distance)} (distance ${illnessConfidenceFormatted(d.distance)})"
+}
+
+/**
+ * Maps the parallel Mahalanobis distance to a plain confidence word. Presentation-only: NEVER decides
+ * whether the Heads-Up card shows (the engine's level already did). Bands: >= 3.5 strong, >= 2.5
+ * moderate, else slight. Identical to the Swift twin (IllnessConfidence.band).
+ */
+private fun illnessConfidenceBand(distance: Double): String = when {
+    distance >= 3.5 -> "strong"
+    distance >= 2.5 -> "moderate"
+    else -> "slight"
+}
+
+/** One-decimal display value for the distance, locale-independent. Mirrors iOS String(format: "%.1f"). */
+private fun illnessConfidenceFormatted(distance: Double): String =
+    String.format(java.util.Locale.US, "%.1f", distance)
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -346,7 +396,7 @@ private fun cyclePhaseTitle(phase: CyclePhaseEngine.Phase): String = when (phase
 private fun cycleDayText(r: CyclePhaseEngine.Result): String? {
     val lo = r.cycleDayLow ?: return null
     val hi = r.cycleDayHigh ?: return null
-    return if (lo == hi) "· ~day $lo" else "· ~day $lo–$hi"
+    return if (lo == hi) "· ~day $lo" else "· ~day $lo - $hi"
 }
 
 private fun cycleConfidenceLabel(c: CyclePhaseEngine.Confidence): String = when (c) {

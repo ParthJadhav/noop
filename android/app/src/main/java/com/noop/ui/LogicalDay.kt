@@ -69,6 +69,43 @@ internal fun resolveTodayRow(days: List<DailyMetric>, logicalKey: String, localK
     return days.lastOrNull { it.day == logicalKey }
 }
 
+/**
+ * #911: the SINGLE anchor the home-screen widget push resolves the row it describes through, from BOTH
+ * producers (the in-app republish in AppViewModel AND the background-service producer in
+ * WhoopConnectionService), so the two can never drift apart. Pure + testable without a live clock.
+ *
+ * It is exactly what the dashboard does: resolve today's row ([resolveTodayRow], which carries the #304
+ * pre-04:00 local-day carve-out and the #144 anti-blank guard), then use that row when it's scored, else
+ * carry over the freshest STRICTLY-PRIOR scored day for the recovery-derived fields. Anchoring on today's
+ * row (not "the newest row with any recovery score") is what fixes the rollover drift: the new logical
+ * day exists but isn't scored yet, so a naive `days.lastOrNull { recovery != null }` kept pointing at
+ * yesterday's scored row while Today had already moved on. The `it.day < anchorKey` bound ([anchorKey] =
+ * today's own key) mirrors [lastScoredRecoveryDay] + its #547 future-day guard, so a stale or stray
+ * future-dated scored row can never re-surface AS today. Mirrors Swift Repository.widgetAnchor.
+ */
+internal fun widgetAnchorRow(days: List<DailyMetric>, logicalKey: String, localKey: String): DailyMetric? {
+    val todayRow = resolveTodayRow(days, logicalKey, localKey)
+    if (todayRow?.recovery != null) return todayRow
+    val anchorKey = todayRow?.day ?: logicalKey
+    return days.lastOrNull { it.recovery != null && it.day < anchorKey }
+}
+
+/**
+ * The freshest STRICTLY-PRIOR row that carries a real overnight VITAL (HRV / resting-HR / respiratory),
+ * regardless of whether that night was recovery-scored. This is the carry-over the overnight-vitals
+ * read-outs use, kept SEPARATE from [widgetAnchorRow] / [lastScoredRecoveryDay] (which are recovery-gated).
+ *
+ * HRV / resting-HR / respiratory exist independently of a recovery score: a post-update re-analysis can
+ * null last night's recovery while PRESERVING its real avgHrv/restingHr. A recovery-gated whole-row carry
+ * then skips that night and surfaces an OLDER scored day's numbers (or "No Data" if the older row lacks
+ * the vital), which is wrong. Selecting the last row with ANY of the three vitals, bounded strictly before
+ * [todayKey], keeps last night's OWN vitals in view. Pure + testable; days is oldest→newest. The
+ * `it.day < todayKey` bound mirrors [widgetAnchorRow]'s future-day guard, so a stray future-dated row (a
+ * bad strap clock) can never surface. Mirrors Swift Repository.lastVitalsDay.
+ */
+internal fun lastVitalsRow(days: List<DailyMetric>, todayKey: String): DailyMetric? =
+    days.lastOrNull { (it.avgHrv != null || it.restingHr != null || it.respRateBpm != null) && it.day < todayKey }
+
 /** 04:00 local — the hour the logical day rolls. Between midnight and this hour, Today stays put. */
 internal const val LOGICAL_DAY_ROLLOVER_HOUR: Int = 4
 

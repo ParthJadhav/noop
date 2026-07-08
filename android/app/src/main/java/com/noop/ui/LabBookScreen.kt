@@ -1,5 +1,7 @@
 package com.noop.ui
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -47,6 +49,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
@@ -55,9 +58,13 @@ import com.noop.analytics.LabBookProjection
 import com.noop.analytics.LabMarkerCategory
 import com.noop.analytics.MarkerCatalog
 import com.noop.analytics.WindowedPair
+import com.noop.data.ImportSummary
 import com.noop.data.LabMarkerRow
 import com.noop.data.WhoopDao
+import com.noop.ingest.LabMarkerCsvImport
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -92,6 +99,7 @@ private const val LAB_FLOOR = 4
 @Composable
 fun LabBookScreen(vm: AppViewModel) {
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
 
     var markers by remember { mutableStateOf<List<LabMarkerRow>>(emptyList()) }
     var loaded by remember { mutableStateOf(false) }
@@ -101,6 +109,11 @@ fun LabBookScreen(vm: AppViewModel) {
     var showEditor by remember { mutableStateOf(false) }
     var showDisclaimer by remember { mutableStateOf(false) }
     var detailKey by remember { mutableStateOf<String?>(null) }
+
+    // Markers CSV import (LabMarkerCsvImport, Phase 2).
+    var csvImporting by remember { mutableStateOf(false) }
+    var csvSummary by remember { mutableStateOf<String?>(null) }
+    var csvFailed by remember { mutableStateOf(false) }
 
     suspend fun reload() {
         val all = mutableListOf<LabMarkerRow>()
@@ -113,11 +126,45 @@ fun LabBookScreen(vm: AppViewModel) {
 
     LaunchedEffect(reloadSeq) { reload() }
 
-    ScreenScaffold(
+    // SAF picker for the markers CSV — the same OpenDocument + "*/*" idiom as the Data
+    // Sources importers (csv mime filtering through SAF is unreliable across providers).
+    val csvImportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        csvImporting = true
+        csvSummary = null
+        csvFailed = false
+        scope.launch {
+            val summary = withContext(Dispatchers.IO) {
+                runCatching { LabMarkerCsvImport.importCsv(context, uri, vm.repo) }
+                    .getOrElse { ImportSummary.failure("Lab Book CSV", it.message ?: "failed") }
+            }
+            // Mirror into the exported strap log (issue #421 parity): counts only on
+            // success, the human reason on failure — never a file name, path or value.
+            if (summary.totalRows > 0) {
+                vm.ble.externalLog("Import ${summary.source}: labMarker=${summary.totalRows}")
+            } else {
+                vm.ble.externalLog("Import ${summary.source} failed: ${summary.message}")
+            }
+            csvSummary = summary.message
+            csvFailed = summary.totalRows == 0
+            csvImporting = false
+            reloadSeq++
+        }
+    }
+
+    // PERF (#707): lazy scaffold — each top-level section is one `item { }` so only on-screen cards
+    // compose + are accessibility-walked on scroll. Order/spacing unchanged (no standalone Spacers; the
+    // LazyColumn reproduces the eager `spacedBy(20.dp)`). The category/marker list stays inside the single
+    // `when {}` item (it's a user-entered, bounded set, not unbounded history), so its appearance is
+    // byte-identical; the sheets below the scaffold are untouched.
+    LazyScreenScaffold(
         title = "Lab Book",
-        subtitle = "Your bloods, BP and body numbers — kept private, on this phone.",
+        subtitle = "Your bloods, BP and body numbers. Kept private, on this phone.",
     ) {
         // Header card: count + scope + add action.
+        item {
         NoopCard(padding = 18.dp, tint = Palette.metricCyan) {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -143,14 +190,14 @@ fun LabBookScreen(vm: AppViewModel) {
                             .size(28.dp)
                             .clip(RoundedCornerShape(8.dp))
                             .clickable { showDisclaimer = true }
-                            .semantics { contentDescription = "What Lab Book is — and isn't" },
+                            .semantics { contentDescription = "What Lab Book is (and isn't)" },
                         contentAlignment = Alignment.Center,
                     ) {
                         Icon(Icons.Filled.Info, contentDescription = null, tint = Palette.textTertiary, modifier = Modifier.size(18.dp))
                     }
                 }
                 Text(
-                    "It's a notebook, not a lab. NOOP lines up the numbers you enter — it doesn't test, " +
+                    "It's a notebook, not a lab. NOOP lines up the numbers you enter. It doesn't test, " +
                         "read, or judge them. Not medical advice.",
                     style = NoopType.subhead,
                     color = Palette.textSecondary,
@@ -158,10 +205,12 @@ fun LabBookScreen(vm: AppViewModel) {
                 PrimaryActionButton("Add a reading", Icons.Filled.Add) { showEditor = true }
             }
         }
+        }
 
-        // Import entry — reuses the Data Sources import-card idiom. A bulk "Markers CSV" import is a
-        // Phase-2 engine; until it lands the card honestly points the user at Data Sources rather
-        // than fabricating a flow.
+        // Import entry — the Phase-2 markers CSV importer (LabMarkerCsvImport): (date, marker,
+        // value, unit) rows with tolerant headers, catalog + custom marker mapping, and
+        // skip-and-count on anything unreadable. Twin of LabBookView's importCard.
+        item {
         NoopCard(padding = 18.dp, tint = Palette.metricAmber) {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -175,18 +224,32 @@ fun LabBookScreen(vm: AppViewModel) {
                         Icon(Icons.Filled.FileUpload, contentDescription = null, tint = Palette.metricAmber, modifier = Modifier.size(16.dp))
                     }
                     Text("Import readings", style = NoopType.headline, color = Palette.textPrimary, modifier = Modifier.weight(1f))
-                    StatePill("Coming soon", tone = StrandTone.Neutral, showsDot = false)
                 }
                 Text(
-                    "A bulk markers CSV import (date, marker, value, unit) lands with the file importers in " +
-                        "Data Sources — same as nutrition and lifting. For now, add readings one at a time " +
-                        "above. Everything you import stays on this phone.",
+                    "Bring in a markers CSV (date, marker, value, unit). Names that match the catalog " +
+                        "fold onto your existing markers; anything else comes in as a custom marker. " +
+                        "Rows that can't be read are skipped and counted, never guessed. Everything " +
+                        "you import stays on this phone.",
                     style = NoopType.subhead,
                     color = Palette.textSecondary,
                 )
+                PrimaryActionButton(
+                    if (csvImporting) "Importing…" else "Choose CSV…",
+                    Icons.Filled.FileUpload,
+                    enabled = !csvImporting,
+                ) { csvImportLauncher.launch(arrayOf("*/*")) }
+                csvSummary?.let { s ->
+                    Text(
+                        s,
+                        style = NoopType.subhead,
+                        color = if (csvFailed) Palette.statusWarning else Palette.statusPositive,
+                    )
+                }
             }
         }
+        }
 
+        item {
         when {
             !loaded -> {
                 Text("Reading your logbook…", style = NoopType.subhead, color = Palette.textTertiary)
@@ -218,12 +281,14 @@ fun LabBookScreen(vm: AppViewModel) {
                 }
             }
         }
+        }
 
         // Always-visible disclaimer footnote + link.
+        item {
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text(
                 "Lab Book is a private notebook, not a medical service. NOOP stores and lines up the numbers " +
-                    "you enter — it doesn't test, read, diagnose, or advise. Your records never leave this phone; " +
+                    "you enter. It doesn't test, read, diagnose, or advise. Your records never leave this phone; " +
                     "there's no account or cloud, so it isn't \"HIPAA-covered.\" Always rely on your doctor or " +
                     "pharmacist to interpret results.",
                 style = NoopType.footnote,
@@ -237,6 +302,7 @@ fun LabBookScreen(vm: AppViewModel) {
                     .clickable { showDisclaimer = true }
                     .semantics { contentDescription = "Read the full Lab Book note" },
             )
+        }
         }
     }
 
@@ -437,7 +503,7 @@ private fun CorrelationResult(
                 "No overlap yet between this marker and ${signal.title.lowercase()}. Log a few more readings " +
                     "(and keep wearing your strap)."
             } else {
-                "$n reading${if (n == 1) "" else "s"} line up so far — not enough to read a trend yet " +
+                "$n reading${if (n == 1) "" else "s"} line up so far, not enough to read a trend yet " +
                     "(NOOP waits for $LAB_FLOOR)."
             },
             style = NoopType.subhead,
@@ -456,7 +522,7 @@ private fun CorrelationResult(
                 Text(insightSentence(markerName, signal.title, r), style = NoopType.subhead, color = Palette.textSecondary)
                 Text(
                     "$n readings used · ${strengthWord(r)} ${directionWord(r)} association. This is your own data " +
-                        "sitting side by side — it's not a medical finding, and it shows association, not cause.",
+                        "sitting side by side. It's not a medical finding, and it shows association, not cause.",
                     style = NoopType.footnote,
                     color = Palette.textTertiary,
                 )
@@ -513,7 +579,7 @@ private fun HistoryRow(markerKey: String, row: LabMarkerRow, onDelete: (String) 
     ) {
         Column(modifier = Modifier.weight(1f)) {
             Text(valueLabel(markerKey, row), style = NoopType.number(16f), color = Palette.textPrimary)
-            Text(labDayLabel(row.takenAt), style = NoopType.footnote, color = Palette.textTertiary)
+            Text(labDayFromKey(row.day), style = NoopType.footnote, color = Palette.textTertiary)
             row.note?.takeIf { it.isNotEmpty() }?.let {
                 Text(it, style = NoopType.footnote, color = Palette.textSecondary)
             }
@@ -540,10 +606,10 @@ private fun LabBookDisclaimerSheet(onDismiss: () -> Unit) {
             Text("About Lab Book", style = NoopType.title2, color = Palette.textPrimary)
             Text("A private notebook, not a medical service.", style = NoopType.subhead, color = Palette.textSecondary)
             DisclaimerBullet("NOOP stores and lines up the numbers you enter yourself. It does not test you, read your results, give medical advice, or diagnose anything.")
-            DisclaimerBullet("Anything you see here — including any side-by-side trend — is your own information shown back to you. It's an association, never a cause, and never a medical finding.")
+            DisclaimerBullet("Anything you see here (including any side-by-side trend) is your own information shown back to you. It's an association, never a cause, and never a medical finding.")
             DisclaimerBullet("NOOP never decides whether a value is \"normal,\" \"high,\" or \"low.\" Any reference range shown is exactly what you typed from your own report.")
-            DisclaimerBullet("Your records never leave this phone. There's no account, no cloud, no NOOP server. Because NOOP is an independent app you run yourself — not a healthcare provider — it isn't \"HIPAA-covered,\" and that protection doesn't apply here; the safety comes from the data being local-only and yours.")
-            DisclaimerBullet("Always rely on your doctor, pharmacist, or a qualified professional to interpret results and make decisions. If a number worries you, talk to them — not to an app.")
+            DisclaimerBullet("Your records never leave this phone. There's no account, no cloud, no NOOP server. Because NOOP is an independent app you run yourself (not a healthcare provider), it isn't \"HIPAA-covered,\" and that protection doesn't apply here; the safety comes from the data being local-only and yours.")
+            DisclaimerBullet("Always rely on your doctor, pharmacist, or a qualified professional to interpret results and make decisions. If a number worries you, talk to them, not to an app.")
             PrimaryActionButton("Got it", Icons.Filled.Check, onClick = onDismiss)
         }
     }
@@ -666,7 +732,7 @@ private fun directionWord(r: Double): String = if (abs(r) < 0.1) "" else if (r >
 
 private fun insightSentence(markerName: String, signalName: String, r: Double): String {
     if (abs(r) < 0.3) {
-        return "Over your readings, $markerName and ${signalName.lowercase()} move largely independently — no clear relationship."
+        return "Over your readings, $markerName and ${signalName.lowercase()} move largely independently. No clear relationship."
     }
     val verb = if (r < 0) "tends to be lower" else "tends to be higher"
     return "When $markerName is higher, ${signalName.lowercase()} $verb."
@@ -709,6 +775,18 @@ private fun pearson(xy: List<Pair<Double, Double>>): LabCorrelation? {
 
 private val labDayFmt = SimpleDateFormat("d MMM yyyy", Locale.US)
 private fun labDayLabel(epochSeconds: Long): String = labDayFmt.format(Date(epochSeconds * 1000L))
+
+/** "yyyy-MM-dd" parser + "d MMM yyyy" render, both pinned to UTC, so a stored day key renders the same
+ *  calendar date regardless of the device zone (the takenAt is UTC noon). Falls back to the raw key if it
+ *  doesn't parse. Mirrors Swift LabBookFormat.dayFromKey. */
+private val labDayKeyParser = SimpleDateFormat("yyyy-MM-dd", Locale.US).apply {
+    timeZone = java.util.TimeZone.getTimeZone("UTC")
+}
+private val labDayKeyFmt = SimpleDateFormat("d MMM yyyy", Locale.US).apply {
+    timeZone = java.util.TimeZone.getTimeZone("UTC")
+}
+private fun labDayFromKey(day: String): String =
+    runCatching { labDayKeyParser.parse(day)?.let { labDayKeyFmt.format(it) } }.getOrNull() ?: day
 
 /** "yyyy-MM-dd" for today offset by [deltaDays], fixed UTC (matches CompareScreen.todayDay). */
 internal fun labDay(deltaDays: Int): String {

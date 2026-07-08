@@ -105,4 +105,59 @@ final class SleepStagerV2Tests: XCTestCase {
         let path = SleepStagerV2.viterbi([["deep": 0.1, "rem": 0.1, "light": 5.0, "awake": 0.1]])
         XCTAssertEqual(path, ["light"])
     }
+
+    // MARK: - #690: the V2 flag drives the NORMAL detected-night staging path
+
+    /// A regular R-R stream at ~1 Hz (steady ~1000 ms beats with a small respiratory sinus oscillation),
+    /// long enough for the V2 recipe to express both early deep and later REM across the night.
+    private func regularRRLong(start: Int, durationS: Int) -> [RRInterval] {
+        (0..<durationS).map { i -> RRInterval in
+            let rsa = Int(40.0 * sin(2.0 * Double.pi * Double(i) / 4.0))  // ~0.25 Hz breathing
+            return RRInterval(ts: start + i, rrMs: 1000 + rsa)
+        }
+    }
+
+    /// #690 (v7 regression): the "Experimental sleep staging (V2)" toggle must affect a NORMAL detected
+    /// night — not only the userEdited self-heal restage. With the flag ON, `detectSleep` stages the
+    /// accepted window with V2 (deep + REM present); with the flag OFF it returns the EXACT V1 result, so
+    /// the byte-identical default (and the frozen-golden tests) is preserved.
+    func testDetectSleepThreadsV2FlagIntoNormalNight() {
+        // A 3 h still overnight window (anchored at 01:00 UTC → center ~02:30, clear of the daytime
+        // guard band at the default tzOffset=0) with sleep-band HR + a regular R-R stream.
+        let start = 1_749_517_200            // 2026-06-10 01:00:00 UTC
+        let dur = 3 * 60 * 60
+        let grav = stillGravity(start: start, durationS: dur)
+        let hr = sleepHR(start: start, durationS: dur)
+        let rr = regularRRLong(start: start, durationS: dur)
+
+        // Flag OFF (the default) — V1 path.
+        let v1Sessions = SleepStager.detectSleep(hr: hr, rr: rr, gravity: grav)
+        XCTAssertEqual(v1Sessions.count, 1, "the still night must be detected")
+        let v1 = v1Sessions[0]
+        // The detected window's stages MUST equal a direct V1 stageSession over the same span (proof the
+        // default path is byte-identical and untouched by the new parameter).
+        let v1Direct = SleepStager.stageSession(start: v1.start, end: v1.end,
+                                                grav: grav, hr: hr, rr: rr, resp: [])
+        XCTAssertEqual(v1.stages.map { [$0.start, $0.end] }, v1Direct.map { [$0.start, $0.end] },
+                       "flag OFF must reproduce the exact V1 hypnogram boundaries")
+        XCTAssertEqual(v1.stages.map { $0.stage }, v1Direct.map { $0.stage },
+                       "flag OFF must reproduce the exact V1 hypnogram labels")
+
+        // Flag ON — the SAME detected window must now be staged by V2.
+        let v2Sessions = SleepStager.detectSleep(hr: hr, rr: rr, gravity: grav, useSleepStagerV2: true)
+        XCTAssertEqual(v2Sessions.count, 1, "detection is unchanged by the staging flag")
+        let v2 = v2Sessions[0]
+        // Same accepted window (detection is identical — only staging differs).
+        XCTAssertEqual(v2.start, v1.start)
+        XCTAssertEqual(v2.end, v1.end)
+        // The hypnogram is V2's: it matches a direct V2 stageSession over the accepted span, and (proof
+        // the flag actually flipped the engine) it expresses both deep and REM.
+        let v2Direct = SleepStagerV2.stageSession(start: v2.start, end: v2.end,
+                                                  grav: grav, hr: hr, rr: rr, resp: [])
+        XCTAssertEqual(v2.stages.map { $0.stage }, v2Direct.map { $0.stage },
+                       "flag ON must produce the V2 hypnogram")
+        let v2Stages = Set(v2.stages.map { $0.stage })
+        XCTAssertTrue(v2Stages.contains("deep"), "V2 night should express deep")
+        XCTAssertTrue(v2Stages.contains("rem"), "V2 night should express REM")
+    }
 }

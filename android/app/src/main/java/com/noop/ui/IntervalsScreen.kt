@@ -198,11 +198,16 @@ fun IntervalsScreen(vm: AppViewModel) {
         }
     }
 
-    ScreenScaffold(
+    // PERF (#707): lazy scaffold — each of the four cards is one `item { }`. The running timer ticks
+    // `remaining` once a second at body scope; in a LazyColumn that tick only recomposes the VISIBLE items
+    // (the heavy per-second BevelGauge hero) and off-screen cards (config) don't recompose or get
+    // semantics-walked. Order/spacing unchanged (LazyColumn reproduces the eager `spacedBy(20.dp)`).
+    LazyScreenScaffold(
         title = "Interval Timer",
-        subtitle = "Silent haptic HIIT — the strap buzzes the transitions",
+        subtitle = "Silent haptic HIIT - the strap buzzes the transitions",
     ) {
         // --- Status row ---
+        item {
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             if (live.bonded) {
                 StatePill("Buzz cues on", tone = StrandTone.Positive)
@@ -216,8 +221,10 @@ fun IntervalsScreen(vm: AppViewModel) {
                 else -> StatePill("Paused", tone = StrandTone.Neutral, showsDot = false)
             }
         }
+        }
 
         // --- Stage hero: the immersive timer face over a scenic Effort backdrop ---
+        item {
         // The running timer is the hero — a layered-ring BevelGauge of the phase progress, glowing
         // in the active phase's world (WORK → effort amber, REST → rest periwinkle), on a frosted
         // Effort-tinted card over a starfield. The countdown is the gauge's centred numeral.
@@ -325,8 +332,10 @@ fun IntervalsScreen(vm: AppViewModel) {
                 }
             }
         }
+        }
 
         // --- Overview card: elapsed / planned ---
+        item {
         NoopCard {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Row(
@@ -379,8 +388,10 @@ fun IntervalsScreen(vm: AppViewModel) {
                 }
             }
         }
+        }
 
         // --- Config card ---
+        item {
         NoopCard {
             Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 Overline("Configure")
@@ -409,6 +420,7 @@ fun IntervalsScreen(vm: AppViewModel) {
                     )
                 }
             }
+        }
         }
     }
 }
@@ -491,7 +503,7 @@ private fun ConfigStepper(
         Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(title, style = NoopType.headline, color = Palette.textPrimary.copy(alpha = dim))
             Text(
-                "${range.first}–${range.last}${unit?.let { " $it" } ?: ""} · step $step",
+                "${range.first} - ${range.last}${unit?.let { " $it" } ?: ""} · step $step",
                 style = NoopType.footnote,
                 color = Palette.textTertiary.copy(alpha = dim),
             )

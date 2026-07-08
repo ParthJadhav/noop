@@ -53,11 +53,20 @@ public enum ManualWorkoutRescore {
         return Scored(avgHr: avg, maxHr: peak, strain: strain, kcal: kcalRaw > 0 ? kcalRaw : nil)
     }
 
-    /// Is `scored` a worthwhile improvement over the stored calories? Strictly more energy (denser HR ⇒
-    /// higher), so a sparse-window recompute that lands ≈ the current value is rejected — keeping the
-    /// pass idempotent and incapable of *lowering* a workout's numbers.
-    public static func improves(_ scored: Scored, over currentKcal: Double?) -> Bool {
-        guard let newK = scored.kcal else { return false }
-        return newK > (currentKcal ?? 0) + improvementMarginKcal
+    /// Is `scored` a worthwhile improvement over the stored row? Two ways to qualify:
+    ///  - Strictly more energy (denser HR ⇒ higher), so a sparse-window recompute that lands ≈ the
+    ///    current value is rejected, keeping the pass idempotent and incapable of *lowering* a workout's
+    ///    numbers. This is the default and the ONLY path for a plain 2-arg call.
+    ///  - A strain-only fill (opt-in via `allowStrainOnlyFill`): the row has NO strain (`currentStrain ==
+    ///    nil`) yet the recompute produced one. This is the merged-row case (#137/merge), a merged
+    ///    workout's kcal is the SUM of its inputs, so it never looks under-scored, yet its strain is nil
+    ///    forever. When strain is the only gain we still persist so Effort renders, without lowering the
+    ///    summed kcal (the caller keeps the existing kcal). Gated so a normal rescore's contract is
+    ///    unchanged: without the flag, only a strict kcal improvement counts.
+    public static func improves(_ scored: Scored, over currentKcal: Double?,
+                                currentStrain: Double? = nil, allowStrainOnlyFill: Bool = false) -> Bool {
+        if let newK = scored.kcal, newK > (currentKcal ?? 0) + improvementMarginKcal { return true }
+        // Strain-only improvement: fill a missing strain even when kcal doesn't beat the stored sum.
+        return allowStrainOnlyFill && currentStrain == nil && scored.strain != nil
     }
 }

@@ -72,13 +72,13 @@ enum BatteryNotifier {
         d.set(result.newFullAlerted, forKey: fullAlertedKey)
         if result.fireLow {
             post(identifier: "battery-low",
-                 title: "Low battery",
-                 body: "Recharge your WHOOP before tonight.")
+                 title: String(localized: "Low battery"),
+                 body: String(localized: "Recharge your WHOOP before tonight."))
         }
         if result.fireFull {
             post(identifier: "battery-full",
-                 title: "Strap fully charged",
-                 body: "Your WHOOP is at 100%.")
+                 title: String(localized: "Strap fully charged"),
+                 body: String(localized: "Your WHOOP is at 100%."))
         }
         // #514: the strap has dropped below 100% — pull the stale "fully charged" note (delivered
         // banner + any still-pending request) so it can't linger after the cell discharges.

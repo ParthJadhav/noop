@@ -94,7 +94,7 @@ public struct DoseResponse: Equatable, Sendable {
         let dir = perUnit <= 0 ? "lower" : "higher"
         if priorDominated {
             return "Each extra unit typically lines up with about \(mag) \(outcome) \(dir) "
-                + "— typical patterns, not yet yours (n=\(nUser))."
+                + " - typical patterns, not yet yours (n=\(nUser))."
         }
         if contradictsPrior {
             return "In your data so far, this doesn't move your \(outcome) the way it typically "

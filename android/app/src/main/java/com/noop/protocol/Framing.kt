@@ -42,7 +42,16 @@ private fun ByteArray.u32(off: Int): Long? {
  * the 0xAA SOF are discarded. Mirrors framing.py / Swift `Reassembler`.
  */
 class Reassembler(private val family: DeviceFamily = DeviceFamily.WHOOP4) {
-    private val buf = ArrayList<Byte>()
+    // The backing store is a plain ByteArray plus a read cursor, not an ArrayList<Byte>. The old form
+    // boxed each incoming byte and drained a completed frame with repeated removeAt(0) calls, every one
+    // of which shifts the whole tail down by one slot. Draining a single frame was therefore O(n^2), and
+    // the historical offload pushes thousands of ~1.9 KB records across a multi-night sync, so that cost
+    // dominated. Here fragments are appended into [data], [head] simply advances past consumed bytes,
+    // and the leftover tail is slid back to the front once per feed(). The emitted frames are identical
+    // in bytes and order; FramingTest's reassembler vectors hold that contract.
+    private var data = ByteArray(0)
+    private var head = 0   // index of the first byte not yet consumed
+    private var tail = 0   // index one past the last valid byte
 
     /**
      * Drop any partial-frame remnant. Called on (re)connect so a stalled or garbage frame from one
@@ -50,51 +59,84 @@ class Reassembler(private val family: DeviceFamily = DeviceFamily.WHOOP4) {
      * reassigning a fresh `Reassembler` on every connect (BLEManager.swift:183).
      */
     fun reset() {
-        buf.clear()
+        head = 0
+        tail = 0
     }
 
     /** Feed one fragment; return zero or more complete frames now available, in order. */
     fun feed(fragment: ByteArray): List<ByteArray> {
-        for (b in fragment) buf.add(b)
+        append(fragment)
         val out = ArrayList<ByteArray>()
         while (true) {
-            val sof = buf.indexOfFirst { it == 0xAA.toByte() }
+            val sof = indexOfSof()
             if (sof < 0) {
-                buf.clear()
+                // No SOF left in the window: nothing here is salvageable, so drop it all.
+                head = 0
+                tail = 0
                 break
             }
-            if (sof > 0) {
-                // drop everything before the SOF
-                repeat(sof) { buf.removeAt(0) }
-            }
-            if (buf.size < 4) break
+            // Skip any leading bytes ahead of the SOF instead of physically removing them.
+            if (sof > head) head = sof
+            val avail = tail - head
+            if (avail < 4) break
             // Frame length is encoded differently per family: WHOOP4 = u16 @[1..3], total = length + 4;
             // WHOOP5/MG ("puffin") = declaredLength u16 @[2..4], total = declaredLength + 8 (it counts
             // the payload + the 4-byte CRC32 trailer, and has 2 extra header bytes). Using the WHOOP4
             // formula on a 5/MG frame decodes a bogus 6 KB length and the live stream never emits.
-            val length: Int
-            val total: Int
-            if (family == DeviceFamily.WHOOP5) {
-                length = (buf[2].toInt() and 0xFF) or ((buf[3].toInt() and 0xFF) shl 8)
-                total = length + 8
+            val total: Int = if (family == DeviceFamily.WHOOP5) {
+                ((data[head + 2].toInt() and 0xFF) or ((data[head + 3].toInt() and 0xFF) shl 8)) + 8
             } else {
-                length = (buf[1].toInt() and 0xFF) or ((buf[2].toInt() and 0xFF) shl 8)
-                total = length + 4
+                ((data[head + 1].toInt() and 0xFF) or ((data[head + 2].toInt() and 0xFF) shl 8)) + 4
             }
             if (total > MAX_FRAME_BYTES) {
                 // A corrupt or misaligned SOF decodes an impossibly large length and we'd wait forever
                 // for bytes that can never arrive over BLE — the live stream would freeze until a
                 // reconnect. The largest real WHOOP frame is ~1920 B, so anything past the 8 KB ceiling
                 // is garbage: drop this 0xAA and resync to the next one.
-                buf.removeAt(0)
+                head += 1
                 continue
             }
-            if (buf.size < total) break
-            val frame = ByteArray(total) { buf[it] }
-            out.add(frame)
-            repeat(total) { buf.removeAt(0) }
+            if (avail < total) break
+            out.add(data.copyOfRange(head, head + total))
+            head += total
         }
+        compact()
         return out
+    }
+
+    /** Index of the first 0xAA at or after [head] in the live window, or -1 if none remain. */
+    private fun indexOfSof(): Int {
+        var i = head
+        while (i < tail) {
+            if (data[i] == 0xAA.toByte()) return i
+            i++
+        }
+        return -1
+    }
+
+    /** Append a fragment, doubling the backing array when it would otherwise overflow. */
+    private fun append(fragment: ByteArray) {
+        if (fragment.isEmpty()) return
+        if (tail + fragment.size > data.size) {
+            var cap = if (data.isEmpty()) 256 else data.size
+            while (cap < tail + fragment.size) cap = cap shl 1
+            data = data.copyOf(cap)
+        }
+        System.arraycopy(fragment, 0, data, tail, fragment.size)
+        tail += fragment.size
+    }
+
+    /**
+     * Slide the unconsumed tail back to offset 0 so [head] can't drift forever and the array stays
+     * small. compact() runs at the end of every feed(), so [head] is always 0 when the next append()
+     * lands. The leftover is at most one in-progress frame (< MAX_FRAME_BYTES), so the move is bounded.
+     */
+    private fun compact() {
+        if (head == 0) return
+        val remaining = tail - head
+        if (remaining > 0) System.arraycopy(data, head, data, 0, remaining)
+        head = 0
+        tail = remaining
     }
 
     private companion object {
@@ -122,12 +164,13 @@ object Framing {
     private fun verifyWhoop4(frame: ByteArray): FrameCheck {
         if (frame.size < 8 || frame[0] != 0xAA.toByte()) return FrameCheck(ok = false)
         val length = (frame[1].toInt() and 0xFF) or ((frame[2].toInt() and 0xFF) shl 8)
-        val headerOk = Crc.crc8(byteArrayOf(frame[1], frame[2])) == (frame[3].toInt() and 0xFF)
+        // Ranged CRC checksums the two length bytes in place, with no per-frame allocation.
+        val headerOk = Crc.crc8(frame, 1, 3) == (frame[3].toInt() and 0xFF)
         var crc32Ok: Boolean? = null
         // length must cover at least the envelope's inner bytes (mirrors framing.py).
         if (length in 7..(frame.size - 4)) {
-            val inner = frame.copyOfRange(4, length)
-            val want = Crc.crc32(inner)
+            // inner record = frame[4 until length], checksummed in place.
+            val want = Crc.crc32(frame, 4, length)
             val got = frame.u32(length) ?: 0L
             crc32Ok = want == got
         }
@@ -146,15 +189,16 @@ object Framing {
         if (declaredLength < 4) return FrameCheck(ok = false, length = declaredLength)
         val total = declaredLength + 8
 
-        val wantHeader = Crc.crc16Modbus(frame.copyOfRange(0, 6))
+        // Ranged CRC over the first 6 header bytes in place, with no copyOfRange.
+        val wantHeader = Crc.crc16Modbus(frame, 0, 6)
         val gotHeader = (frame[6].toInt() and 0xFF) or ((frame[7].toInt() and 0xFF) shl 8)
         val headerOk = wantHeader == gotHeader
 
         var crc32Ok: Boolean? = null
         if (frame.size >= total) {
             val payloadEnd = total - 4
-            val payload = frame.copyOfRange(8, payloadEnd)
-            val want = Crc.crc32(payload)
+            // payload = frame[8 until payloadEnd], checksummed in place.
+            val want = Crc.crc32(frame, 8, payloadEnd)
             val got = frame.u32(payloadEnd) ?: 0L
             crc32Ok = want == got
         }
@@ -288,6 +332,28 @@ object Framing {
         if (CommandNumber.fromRaw(cmd) == CommandNumber.GET_BATTERY_LEVEL) {
             frame.u8(13)?.let { pct -> if (pct <= 100) parsed["battery_pct"] = pct.toDouble() }
         }
+        // GET_HELLO (145): device name + firmware version. Mirrors the Swift Interpreter decode of the
+        // same 50.38.1.0 capture: payload base is frame[11]; the name is printable ASCII at pay[16],
+        // the firmware is 4 bytes at pay[93] gated on pay[93]==50 (the "5.x" generation). The session
+        // token in the same block is deliberately never read. Surfaced on the Devices card.
+        if (cmd == 145) {
+            val payEnd = frame.size - 4 // drop the trailing CRC32
+            if (payEnd > 11) {
+                val pay = frame.copyOfRange(11, payEnd)
+                val name = StringBuilder()
+                var i = 16
+                while (i < pay.size && pay[i].toInt() != 0 &&
+                    (pay[i].toInt() and 0xFF) in 32..126 && name.length < 24
+                ) {
+                    name.append((pay[i].toInt() and 0xFF).toChar()); i++
+                }
+                if (name.length >= 6) parsed["device_name"] = name.toString()
+                if (pay.size >= 97 && (pay[93].toInt() and 0xFF) == 50) {
+                    parsed["fw_version"] = "${pay[93].toInt() and 0xFF}.${pay[94].toInt() and 0xFF}." +
+                        "${pay[95].toInt() and 0xFF}.${pay[96].toInt() and 0xFF}"
+                }
+            }
+        }
     }
 
     /**
@@ -405,6 +471,18 @@ object Framing {
                         ((pay[4].toLong() and 0xFFL) shl 16) or
                         ((pay[5].toLong() and 0xFFL) shl 24)
                     parsed["clock"] = v.toInt()
+                }
+            }
+            CommandNumber.REPORT_VERSION_INFO -> {
+                // WHOOP 4.0 firmware version (the main "Harvard" MCU): four little-endian u32 at
+                // pay[3,7,11,15]. Same base/offsets as the Swift PostHooks fw_harvard decode (pay also
+                // starts at frame[7] there). Surfaced on the Devices card.
+                if (pay.size >= 19) {
+                    fun le32(at: Int): Long = (pay[at].toLong() and 0xFFL) or
+                        ((pay[at + 1].toLong() and 0xFFL) shl 8) or
+                        ((pay[at + 2].toLong() and 0xFFL) shl 16) or
+                        ((pay[at + 3].toLong() and 0xFFL) shl 24)
+                    parsed["fw_harvard"] = "${le32(3)}.${le32(7)}.${le32(11)}.${le32(15)}"
                 }
             }
             else -> Unit

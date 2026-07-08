@@ -150,12 +150,12 @@ private fun WidgetContent(snap: WidgetSnapshot, dark: Boolean) {
         Spacer(modifier = GlanceModifier.height(8.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
-                text = snap.heartRate?.let { "♥ $it" } ?: "♥ —",
+                text = snap.heartRate?.let { "♥ $it" } ?: "♥ - ",
                 style = TextStyle(color = textPrimary, fontSize = 13.sp),
             )
             Spacer(modifier = GlanceModifier.width(10.dp))
             Text(
-                text = snap.batteryPct?.let { "⚡ $it%" } ?: "⚡ —",
+                text = snap.batteryPct?.let { "⚡ $it%" } ?: "⚡ - ",
                 style = TextStyle(color = textPrimary, fontSize = 13.sp),
             )
         }

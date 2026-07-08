@@ -277,6 +277,70 @@ final class SleepStageTotalsTests: XCTestCase {
         XCTAssertEqual(r.sleep.totalSleepMin, 48 + 392, accuracy: 0.001, "no onsets → legacy sum")
     }
 
+    // MARK: - #777/#705 inter-fragment awake (out-of-bed gap between bridged fragments)
+
+    /// The shared definition: sum only the POSITIVE gaps between consecutive (start,end) spans, sorted by
+    /// start. Abutting / overlapping fragments contribute 0; an unsorted input is sorted first.
+    func testInterFragmentAwakeSecondsSumsPositiveGapsOnly() {
+        // One 20-min gap between two fragments (06:00 → 06:20).
+        let f1 = (start: 0, end: 6 * 3600)
+        let f2 = (start: 6 * 3600 + 20 * 60, end: 9 * 3600)
+        XCTAssertEqual(SleepStageTotals.interFragmentAwakeSeconds([f1, f2]), Double(20 * 60), accuracy: 0.001)
+        // Order-independent: passing them reversed yields the SAME gap.
+        XCTAssertEqual(SleepStageTotals.interFragmentAwakeSeconds([f2, f1]), Double(20 * 60), accuracy: 0.001)
+        // Abutting fragments (no gap) → 0; a single fragment → 0.
+        XCTAssertEqual(SleepStageTotals.interFragmentAwakeSeconds([(0, 100), (100, 200)]), 0, accuracy: 0.001)
+        XCTAssertEqual(SleepStageTotals.interFragmentAwakeSeconds([(0, 100)]), 0, accuracy: 0.001)
+        // Two gaps across three fragments sum.
+        let three = [(0, 100), (160, 300), (340, 500)]  // 60s + 40s = 100s
+        XCTAssertEqual(SleepStageTotals.interFragmentAwakeSeconds(three), 100, accuracy: 0.001)
+    }
+
+    /// #777/#705 regression fixture: a main night bridged from two fragments split by a 20-min OUT-OF-BED
+    /// gap must report ~20 min AWAKE on the day's rollup (it read as ~0 before). The seam folds the gap into
+    /// AWAKE via the in-bed denominator - in-bed = asleep + (fragment awake + gap) - with NO double-count.
+    func testHonoringEditsFragmentedNightCountsGapAsAwake() throws {
+        // Two fragments of ONE night, each 0 staged-awake, split by a 20-min gap (< gapBridgeMaxMin → they
+        // bridge into the main-night group). Fragment 1: 23:00–02:00 (180 min asleep). 20-min gap. Fragment
+        // 2: 02:20–06:00 (220 min asleep). Per-fragment stages carry 0 awake, so without the fix the gap
+        // would vanish.
+        let f1Start = ts525("2026-06-14T23:00")
+        let f2Start = ts525("2026-06-15T02:20")  // 20-min gap after f1's 02:00 end
+        let f1Stages = #"{"awake":0,"light":120,"deep":30,"rem":30}"#   // 180 min asleep, 180 in-bed
+        let f2Stages = #"{"awake":0,"light":140,"deep":40,"rem":40}"#   // 220 min asleep, 220 in-bed
+
+        let r = try XCTUnwrap(SleepStageTotals.dailyAggregateHonoringEdits(
+            detected: [(startTs: f1Start, stagesJSON: f1Stages),
+                       (startTs: f2Start, stagesJSON: f2Stages)],
+            edited: [:],
+            onsetByStart: [f1Start: f1Start, f2Start: f2Start],
+            offsetSec: 0))
+        XCTAssertFalse(r.editApplied)
+        // Asleep is the SUM of the two fragments (180 + 220 = 400 min); the gap is awake, not sleep.
+        XCTAssertEqual(r.sleep.totalSleepMin, 400, accuracy: 0.001, "asleep is the sum of both fragments")
+        // In-bed = 180 + 220 + 20 (gap) = 420 min. Awake = in-bed − asleep = 20 min (the gap), NOT ~0.
+        let awakeMin = r.sleep.totalSleepMin / r.sleep.efficiency - r.sleep.totalSleepMin
+        XCTAssertEqual(awakeMin, 20, accuracy: 0.01, "the 20-min out-of-bed gap reads as ~20 min awake (#777)")
+        XCTAssertEqual(r.sleep.efficiency, 400.0 / 420.0, accuracy: 0.0001, "efficiency reflects the gap")
+    }
+
+    /// The seam definition and the standalone aggregate agree to the minute (no double-count): feeding the
+    /// SAME gap to `dailyAggregate(_:interFragmentAwakeSeconds:)` yields the identical in-bed/awake the seam
+    /// reports, proving the two paths share one definition (the PR #787 seam bug this fix avoids).
+    func testInterFragmentAwakeFoldsConsistentlyNoDoubleCount() throws {
+        let f1Stages = #"{"awake":0,"light":120,"deep":30,"rem":30}"#   // 180 asleep
+        let f2Stages = #"{"awake":0,"light":140,"deep":40,"rem":40}"#   // 220 asleep
+        let agg = try XCTUnwrap(SleepStageTotals.dailyAggregate([f1Stages, f2Stages],
+                                                                interFragmentAwakeSeconds: Double(20 * 60)))
+        XCTAssertEqual(agg.totalSleepMin, 400, accuracy: 0.001)
+        XCTAssertEqual(agg.efficiency, 400.0 / 420.0, accuracy: 0.0001)
+        // A zero gap reproduces the legacy behaviour exactly (backward-compat).
+        let legacy = try XCTUnwrap(SleepStageTotals.dailyAggregate([f1Stages, f2Stages]))
+        let folded0 = try XCTUnwrap(SleepStageTotals.dailyAggregate([f1Stages, f2Stages],
+                                                                    interFragmentAwakeSeconds: 0))
+        XCTAssertEqual(legacy.efficiency, folded0.efficiency, accuracy: 1e-12)
+    }
+
     // MARK: - #547 learned-timing scored selector (the gate is gone)
 
     /// Local time-of-day "HH:mm" → seconds, for habitual-midsleep expectations.
@@ -1024,6 +1088,65 @@ final class SleepStageTotalsTests: XCTestCase {
         ]
         let group = try XCTUnwrap(SleepStageTotals.mainNightGroupIndices(blocks, offsetSec: 0))
         XCTAssertEqual(group.sorted(), [0, 2], "the bridged biphasic night wins, returning BOTH its fragments")
+    }
+
+    // MARK: - #861 a real overnight night split by a 60–90 min wake is ONE sleep, not nap + sleep
+
+    /// The reported pattern (#861): one overnight sleep the detector left split into two fragments by a real
+    /// mid-night wake of ~70 min, longer than the old 60-min `gapBridgeMaxMin`, so the later fragment lost the
+    /// main-night pick and was LABELLED A NAP. The wider overnight night-tail bridge (≤ `nightTailBridgeMaxMin`,
+    /// onset still in the overnight band) now folds both fragments into ONE main-night group, so neither part is
+    /// a nap. Honest-data invariant: no stage is invented; the 70-min gap is later folded into AWAKE by the
+    /// aggregate, not relabelled sleep.
+    func testOvernightNightSplitBySeventyMinuteWakeMergesIntoOneSleepNotNap() throws {
+        let a = ts525("2026-06-14T23:30")               // overnight onset
+        let aEnd = a + 3 * 3600                          // 23:30 → 02:30
+        let b = aEnd + 70 * 60                           // 03:40 onset (70-min wake gap; 60 ≤ gap < 90)
+        let bEnd = b + 4 * 3600                          // 03:40 → 07:40 (the longer tail)
+        let blocks = [
+            SleepStageTotals.NightBlock(start: a, end: aEnd),
+            SleepStageTotals.NightBlock(start: b, end: bEnd),
+        ]
+        // Before the fix a 70-min gap was NOT bridged, the 4h tail won, and the 3h head became a "nap".
+        let group = try XCTUnwrap(SleepStageTotals.mainNightGroupIndices(blocks, offsetSec: 0))
+        XCTAssertEqual(group.sorted(), [0, 1],
+                       "a 60–90 min mid-night wake bridges both overnight fragments into one sleep (no nap)")
+        // The wider bridge must NOT touch the bare `bridgeAdjacent` (its <60-min contract is unchanged): a
+        // 70-min gap still leaves it two blocks, so the golden detector-side bridge tests stay byte-identical.
+        XCTAssertEqual(SleepStageTotals.bridgeAdjacent(blocks).count, 2,
+                       "the band-aware widening lives only in mainNightGroupIndices, not bridgeAdjacent")
+    }
+
+    /// The daytime guard the widening must NOT breach: a genuine afternoon nap with the SAME 70-min gap from the
+    /// night's end stays its OWN block, because its onset is in the daytime band (not the overnight band the
+    /// wider bridge requires). So a real nap is never folded into the night by the #861 fix.
+    func testDaytimeNapWithSeventyMinuteGapStillStaysItsOwnBlock() throws {
+        let night = ts525("2026-06-15T00:00")           // overnight
+        let nightEnd = night + 6 * 3600                  // 00:00 → 06:00 (the main night)
+        // A 70-min gap from the night's end lands the nap onset at 07:10, still inside the broad overnight
+        // band [20:00, 11:00). To prove the DAYTIME guard, place the nap at a true daytime onset (13:00) and
+        // confirm it is not bridged regardless of being the same day.
+        let nap = ts525("2026-06-15T13:00")             // daytime onset → never a night-tail
+        let blocks = [
+            SleepStageTotals.NightBlock(start: night, end: nightEnd),
+            SleepStageTotals.NightBlock(start: nap,   end: nap + 90 * 60),  // 1.5h afternoon nap
+        ]
+        let group = try XCTUnwrap(SleepStageTotals.mainNightGroupIndices(blocks, offsetSec: 0))
+        XCTAssertEqual(group, [0], "a daytime-onset nap is never folded into the night by the wider bridge")
+    }
+
+    /// The upper guard: a wake gap at/over `nightTailBridgeMaxMin` (90 min) is NOT a mid-night wake, so it stays
+    /// two blocks even for an overnight-band onset, so a genuinely separate early-morning sleep is not swallowed.
+    func testOvernightGapAtOrAboveNinetyMinutesDoesNotBridge() throws {
+        let a = ts525("2026-06-14T23:00")
+        let aEnd = a + 3 * 3600                          // 23:00 → 02:00
+        let b = aEnd + 95 * 60                           // 03:35 onset (95-min gap ≥ nightTailBridgeMaxMin)
+        let blocks = [
+            SleepStageTotals.NightBlock(start: a, end: aEnd),
+            SleepStageTotals.NightBlock(start: b, end: b + 4 * 3600),
+        ]
+        let group = try XCTUnwrap(SleepStageTotals.mainNightGroupIndices(blocks, offsetSec: 0))
+        XCTAssertEqual(group, [1], "a ≥90-min wake is not a night-tail; the blocks stay separate")
     }
 
     // MARK: - #561 stages-path seam sums the bridged group (analyzeDay parity)

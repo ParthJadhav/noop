@@ -10,6 +10,13 @@ import StrandDesign
 /// evening reminder — and we say plainly why there's no wake alarm, rather than promising one we
 /// can't keep.
 struct SmartAlarmView: View {
+    // #766: this is now the ONE alarm surface. The strap's silent firmware wake-alarm used to live in a
+    // separate card over in Automations, which let users conflate it with the wind-down reminder; it's
+    // moved here so every wake/wind-down control sits together. Needs the model (to arm/disarm the strap
+    // alarm over BLE) and the behavior store (the alarm's persisted on/time/weekdays).
+    @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var behavior: BehaviorStore
+
     @State private var windDownOn = WindDownNudge.isEnabled
     /// Earliest wake time the nudge is derived from (minutes since midnight). Seeded from the store.
     @State private var wakeMinutes = WindDownNudge.wakeMinutes
@@ -23,10 +30,13 @@ struct SmartAlarmView: View {
     private static let weekdayOrder = [2, 3, 4, 5, 6, 7, 1]
 
     var body: some View {
-        ScreenScaffold(title: "Smart alarm",
-                       subtitle: "A gentle evening wind-down nudge to help you reach your wake time rested.") {
+        // #766: retitled to "Alarms" because it now holds BOTH the strap's silent wake-alarm and the
+        // evening wind-down reminder, so naming it "Wind-Down" undersold it. One surface, clearly labelled.
+        ScreenScaffold(title: "Alarms",
+                       subtitle: "Your strap wake-alarm and the evening wind-down reminder, in one place.") {
             VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
                 windowHero
+                strapAlarmCard
                 honestyCard
                 windDownCard
             }
@@ -76,7 +86,9 @@ struct SmartAlarmView: View {
         }
     }
 
-    // The up-front, honest explanation of why iOS gets a nudge and not a wake alarm.
+    // The up-front, honest note about the difference between the strap's silent buzz (above) and a loud
+    // phone wake. The strap alarm is real, but it's a gentle wrist buzz, not a sound, so we say plainly
+    // to keep a backup, and that the louder smart wake lives on Android.
     private var honestyCard: some View {
         StrandCard(padding: 20) {
             HStack(alignment: .top, spacing: 12) {
@@ -84,15 +96,99 @@ struct SmartAlarmView: View {
                     .foregroundStyle(StrandPalette.statusWarning)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 6) {
-                    Text("No wake alarm on this device")
+                    Text("The strap alarm is a silent buzz, not a sound")
                         .font(StrandFont.headline)
                         .foregroundStyle(StrandPalette.textPrimary)
-                    Text("A sideloaded app can't sound a reliable wake alarm in the background on iOS — that needs a critical-alert permission this build doesn't have. Use your phone's built-in Clock alarm to wake. NOOP's smart wake (light-sleep detection) is available on the Android app.")
+                    Text("The wake-alarm above buzzes your wrist from the strap's own firmware. It can't sound a loud alarm. We also schedule a backup notification at your wake time, but a sideloaded app can't sound a guaranteed wake on this device (that needs a critical-alert permission this build doesn't have), so Focus or silent mode can still mute it. Keep your phone's built-in Clock alarm as your real backup. NOOP's phone-based smart wake (light-sleep detection) is available on the Android app.")
                         .font(StrandFont.footnote)
                         .foregroundStyle(StrandPalette.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
+        }
+    }
+
+    // MARK: - Strap silent wake-alarm (#766, moved here from Automations)
+
+    // The strap's own firmware alarm: a silent wrist buzz at the chosen time, armed over BLE so it fires
+    // even if the phone is asleep or NOOP is closed. Lifted verbatim (behaviour intact) out of
+    // AutomationsView.alarmCard so users stop conflating it with the wind-down reminder below.
+    private var strapAlarmCard: some View {
+        StrandCard(padding: 20, tint: behavior.smartAlarmEnabled ? StrandPalette.accent : nil) {
+            VStack(alignment: .leading, spacing: 16) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Morning").strandOverline()
+                    HStack(spacing: 10) {
+                        Image(systemName: "alarm.fill")
+                            .foregroundStyle(StrandPalette.accent)
+                            .accessibilityHidden(true)
+                        Text("Strap wake-alarm")
+                            .font(StrandFont.title2)
+                            .foregroundStyle(StrandPalette.textPrimary)
+                    }
+                }
+
+                HStack(alignment: .center, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Wake me with a strap buzz")
+                            .font(StrandFont.body)
+                            .foregroundStyle(StrandPalette.textPrimary)
+                        Text("Arms the strap to buzz at your wake time, even if NOOP is closed. Sends the exact alarm command the official app sends, confirmed buzzing on a real WHOOP 4.0 (community wire capture + on-device test, #535). Keep a backup alarm for anything you truly can't miss.")
+                            .font(StrandFont.footnote)
+                            .foregroundStyle(StrandPalette.textTertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer()
+                    Toggle("", isOn: $behavior.smartAlarmEnabled)
+                        .labelsHidden().toggleStyle(.switch).tint(StrandPalette.accent)
+                        .accessibilityLabel("Wake me with a strap buzz")
+                }
+                .frame(minHeight: 42)
+
+                if behavior.smartAlarmEnabled {
+                    Divider().overlay(StrandPalette.hairline)
+                    HStack {
+                        Text("Wake at").font(StrandFont.body).foregroundStyle(StrandPalette.textPrimary)
+                        Spacer()
+                        DatePicker("", selection: alarmTimeBinding, displayedComponents: .hourAndMinute)
+                            .labelsHidden().datePickerStyle(.compact)
+                            .accessibilityLabel("Wake time")
+                    }
+                    .frame(minHeight: 42)
+                    Divider().overlay(StrandPalette.hairline)
+                    alarmWeekdayPicker
+                    // #864: a WHOOP 5/MG only arms its firmware alarm when Experimental is on (see
+                    // BLEManager.armStrapAlarm, which logs "not armed" and returns otherwise). Without this
+                    // branch the card claimed "Armed on the strap itself" to a 5/MG owner whose strap was
+                    // NOT armed, an honest-data violation (reporter: 5/MG, Experimental off, never buzzed).
+                    // Mirrors the Android SmartAlarmScreen StrapAlarmCard wording exactly. The else copy
+                    // was truth-synced once a real 4.0 wake was confirmed (PR #535: official-app wire
+                    // capture + on-device buzz by the capture author); 5/MG remains unconfirmed, so this
+                    // gated branch keeps its honesty wording.
+                    if model.whoop5Detected && !PuffinExperiment.isEnabled {
+                        Text("Your WHOOP 5/MG won't arm this until Experimental mode is on (Settings, Experimental). Right now your wake time is saved but the strap is NOT armed. Even with Experimental on, a 5/MG strap-driven wake is still unconfirmed on our side, so keep a backup alarm.")
+                            .font(StrandFont.footnote)
+                            .foregroundStyle(StrandPalette.statusWarning)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    } else if model.whoop5Detected {
+                        // 5/MG with Experimental ON: the strap IS armed (the rev-4 puffin payload), but a
+                        // strap-driven wake has NEVER been captured on 5/MG - so the "confirmed on 4.0" copy
+                        // must NOT show here (#864 honesty). Keep the 5/MG-unconfirmed caveat.
+                        Text("Armed on the strap itself with the experimental 5/MG command. A strap-driven wake is still unconfirmed on 5/MG on our side (confirmed only on WHOOP 4.0), so keep a backup alarm for anything you truly can't miss.")
+                            .font(StrandFont.footnote)
+                            .foregroundStyle(StrandPalette.textTertiary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        Text("Armed on the strap itself, so it can buzz at your wake time even if your phone is asleep or NOOP is closed. Sends the exact alarm command the official app sends, confirmed buzzing on a real WHOOP 4.0 (community wire capture + on-device test, #535). Keep a backup alarm for anything you truly can't miss.")
+                            .font(StrandFont.footnote)
+                            .foregroundStyle(StrandPalette.textTertiary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }
+            .onChangeCompat(of: behavior.smartAlarmEnabled) { _ in model.applySmartAlarm() }
+            .onChangeCompat(of: behavior.smartAlarmMinutes) { _ in model.applySmartAlarm() }
+            .onChangeCompat(of: behavior.smartAlarmWeekdays) { _ in model.applySmartAlarm() }
         }
     }
 
@@ -166,7 +262,7 @@ struct SmartAlarmView: View {
                 Text("Different wake time per day")
                     .font(StrandFont.body)
                     .foregroundStyle(StrandPalette.textPrimary)
-                Text("Set a wake time for specific days — a lie-in at the weekend, say. Days you leave alone use the time above.")
+                Text("Set a wake time for specific days (a lie-in at the weekend, say). Days you leave alone use the time above.")
                     .font(StrandFont.footnote)
                     .foregroundStyle(StrandPalette.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -249,8 +345,10 @@ struct SmartAlarmView: View {
 
     /// Full weekday name for a Calendar weekday number (1=Sun…7=Sat).
     private static func weekdayName(_ dow: Int) -> String {
-        let names = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
-        return (1...7).contains(dow) ? names[dow - 1] : "Day \(dow)"
+        let names = [String(localized: "Sunday"), String(localized: "Monday"), String(localized: "Tuesday"),
+                     String(localized: "Wednesday"), String(localized: "Thursday"), String(localized: "Friday"),
+                     String(localized: "Saturday")]
+        return (1...7).contains(dow) ? names[dow - 1] : String(localized: "Day \(dow)")
     }
 
     // Bridges the minutes-since-midnight store to a DatePicker's Date, persisting + rescheduling.
@@ -273,5 +371,100 @@ struct SmartAlarmView: View {
 
     private func timeLabel(_ minutes: Int) -> String {
         String(format: "%02d:%02d", minutes / 60, minutes % 60)
+    }
+
+    // MARK: - Strap alarm weekday picker (#766, moved here from Automations, behaviour intact)
+
+    private var alarmWeekdayPicker: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 6) {
+                ForEach(Self.weekdayOrder, id: \.self) { dow in
+                    let selected = Self.alarmWeekdayIsSelected(dow, in: behavior.smartAlarmWeekdays)
+                    Text(Self.alarmWeekdayInitial(dow))
+                        .font(StrandFont.caption)
+                        .foregroundStyle(selected ? StrandPalette.surfaceBase : StrandPalette.textSecondary)
+                        .frame(width: 30, height: 30)
+                        .background(selected ? StrandPalette.accent : StrandPalette.surfaceInset, in: Circle())
+                        .contentShape(Circle())
+                        .onTapGesture { behavior.smartAlarmWeekdays = Self.alarmToggledWeekday(dow, in: behavior.smartAlarmWeekdays) }
+                        .accessibilityLabel(Self.weekdayName(dow))
+                        .accessibilityAddTraits(selected ? .isSelected : [])
+                }
+            }
+            Text(Self.alarmWeekdaySummary(behavior.smartAlarmWeekdays))
+                .font(StrandFont.caption)
+                .foregroundStyle(StrandPalette.textTertiary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Bridges the strap alarm's minutes-since-midnight store to a DatePicker's Date.
+    private var alarmTimeBinding: Binding<Date> {
+        Binding(
+            get: {
+                var c = DateComponents()
+                c.hour = behavior.smartAlarmMinutes / 60
+                c.minute = behavior.smartAlarmMinutes % 60
+                return Calendar.current.date(from: c) ?? Date()
+            },
+            set: { date in
+                let c = Calendar.current.dateComponents([.hour, .minute], from: date)
+                behavior.smartAlarmMinutes = (c.hour ?? 7) * 60 + (c.minute ?? 0)
+            }
+        )
+    }
+
+    // The strap-alarm weekday rules: pure + nonisolated so they stay unit-testable. Kept byte-identical
+    // to the originals in AutomationsView (only renamed with an `alarm` prefix to avoid colliding with
+    // this view's full-name `weekdayName`).
+
+    /// A day reads as "on" when the set is empty (= every day) or explicitly contains it.
+    nonisolated static func alarmWeekdayIsSelected(_ dow: Int, in days: Set<Int>) -> Bool {
+        days.isEmpty || days.contains(dow)
+    }
+
+    /// Toggle one weekday, normalising "every day" at both ends so the empty set always means every day.
+    nonisolated static func alarmToggledWeekday(_ dow: Int, in days: Set<Int>) -> Set<Int> {
+        var next: Set<Int>
+        if days.isEmpty {
+            next = Set(1...7)
+            next.remove(dow)
+        } else if days.contains(dow) {
+            next = days
+            next.remove(dow)
+        } else {
+            next = days
+            next.insert(dow)
+        }
+        return next.count == 7 ? [] : next
+    }
+
+    /// Human-readable summary of the selection.
+    nonisolated static func alarmWeekdaySummary(_ days: Set<Int>) -> String {
+        if days.isEmpty || days.count == 7 { return String(localized: "Every day") }
+        if days == Set(2...6) { return String(localized: "Weekdays") }
+        if days == Set([1, 7]) { return String(localized: "Weekends") }
+        return weekdayOrder.filter { days.contains($0) }.map { alarmWeekdayShort($0) }.joined(separator: ", ")
+    }
+
+    /// One-letter day chip. Derived from the localized short name so the initials follow the
+    /// language (and Tue/Thu or Sat/Sun never share a single collision-prone key). English output
+    /// is byte-identical to the old hardcoded initials.
+    private static func alarmWeekdayInitial(_ dow: Int) -> String {
+        let short = alarmWeekdayShort(dow)
+        return short == "?" ? "?" : String(short.prefix(1))
+    }
+
+    nonisolated private static func alarmWeekdayShort(_ dow: Int) -> String {
+        switch dow {
+        case 1: return String(localized: "Sun")
+        case 2: return String(localized: "Mon")
+        case 3: return String(localized: "Tue")
+        case 4: return String(localized: "Wed")
+        case 5: return String(localized: "Thu")
+        case 6: return String(localized: "Fri")
+        case 7: return String(localized: "Sat")
+        default: return "?"
+        }
     }
 }

@@ -129,7 +129,7 @@
             {"off": 64, "len": 4, "dtype": "f32", "name": "gravity2_z", "cat": "accel", "note": "2nd accel/gravity triplet (g)"},
             {"off": 68, "len": 2, "dtype": "u16", "name": "spo2_red", "cat": "spo2", "note": "raw ADC; SpO2 % computed server-side"},
             {"off": 70, "len": 2, "dtype": "u16", "name": "spo2_ir", "cat": "spo2", "note": "raw ADC; SpO2 % computed server-side"},
-            {"off": 72, "len": 2, "dtype": "u16", "name": "skin_temp_raw", "cat": "temp", "note": "raw ADC; degC computed server-side"},
+            {"off": 72, "len": 2, "dtype": "u16", "name": "skin_temp_raw", "cat": "temp", "note": "raw ADC; NOT centidegrees (that is the 5/MG v18 @73 scale). Convert family-aware via skinTempCelsius(raw:.whoop4) (#938); worn ~826, no-contact floor ~510"},
             {"off": 74, "len": 2, "dtype": "u16", "name": "ambient", "cat": "optical", "note": "ambient light ADC"},
             {"off": 76, "len": 2, "dtype": "u16", "name": "led_drive_1", "cat": "optical"},
             {"off": 78, "len": 2, "dtype": "u16", "name": "led_drive_2", "cat": "optical"},

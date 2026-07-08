@@ -49,6 +49,29 @@ class ManualWorkoutRescoreTest {
         assertFalse(ManualWorkoutRescore.improves(none, 1.0))    // no recompute ⇒ never replace
     }
 
+    /** The merged-row case: a merged workout's kcal is the SUM of its inputs, so it never looks
+     *  under-scored, yet WorkoutMerge leaves its strain null. A recompute that produces a strain must be
+     *  accepted as a STRAIN-ONLY improvement even when its kcal does NOT beat the summed value, otherwise
+     *  Effort stays blank forever. And once strain exists, a re-run is a no-op (idempotent). */
+    @Test fun strainOnlyImprovementFillsMergedRow() {
+        val recomputed = ManualWorkoutRescore.Scored(avgHr = 130, maxHr = 150, strain = 9.0, kcal = 120.0)
+        val summedKcal = 300.0   // merged: SUM of inputs, well past the under-scored gate
+
+        // Strain missing on the stored row → accept (fill Effort), even though kcal < summed sum.
+        assertTrue(ManualWorkoutRescore.improves(recomputed, summedKcal, currentStrain = null, allowStrainOnlyFill = true))
+        // Strain already present → no churn (kcal doesn't beat the sum, strain isn't missing).
+        assertFalse(ManualWorkoutRescore.improves(recomputed, summedKcal, currentStrain = 9.0, allowStrainOnlyFill = true))
+
+        // A recompute with NO strain can't fill anything → still no-op.
+        val noStrain = ManualWorkoutRescore.Scored(avgHr = 0, maxHr = 0, strain = null, kcal = 120.0)
+        assertFalse(ManualWorkoutRescore.improves(noStrain, summedKcal, currentStrain = null, allowStrainOnlyFill = true))
+
+        // The strain-only path is OPT-IN: without the flag the contract is unchanged (kcal-only), so a
+        // missing-strain row does NOT qualify on a 2-arg call, and the existing rescore path is untouched.
+        assertFalse(ManualWorkoutRescore.improves(recomputed, summedKcal))
+        assertFalse(ManualWorkoutRescore.improves(recomputed, summedKcal, currentStrain = null))
+    }
+
     @Test fun underScoredWorkoutGetsRescoredAndIsIdempotent() {
         val stored = 1.0
         assertTrue(ManualWorkoutRescore.looksUnderScored(stored))

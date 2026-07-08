@@ -1,3 +1,6 @@
+#if !os(watchOS)
+// The watch never draws the hypnogram (uses .onContinuousHover + ChartHover helpers, unavailable
+// on watchOS); excluded there, iOS/macOS unchanged.
 import SwiftUI
 
 // MARK: - Hypnogram (§9.4 Sleep)
@@ -11,10 +14,15 @@ import SwiftUI
 
 /// A single stage interval. `start`/`end` are seconds from the start of the night.
 public struct SleepInterval: Identifiable, Sendable {
-    public let id = UUID()
     public var stage: SleepStage
     public var start: TimeInterval
     public var end: TimeInterval
+
+    /// Stable, CONTENT-derived identity (stage + start + end) rather than a random `UUID()`.
+    /// A fresh UUID per value defeated SwiftUI's `ForEach` diffing — every body eval re-identified
+    /// all bands as brand-new, so the whole hypnogram rebuilt on each hover/diff. Intervals are
+    /// non-overlapping with distinct starts within a night, so this composite is unique and stable.
+    public var id: String { "\(stage.rawValue)|\(start)|\(end)" }
 
     public init(stage: SleepStage, start: TimeInterval, end: TimeInterval) {
         self.stage = stage
@@ -87,6 +95,37 @@ public struct Hypnogram: View {
     }
     private var origin: TimeInterval { intervals.first?.start ?? 0 }
 
+    /// ONE spoken summary of the whole night for VoiceOver: total time in each stage. Replaces the old
+    /// per-band accessibility layer (which emitted one element PER interval — O(intervals), a heavy
+    /// semantics subtree the Compose/AppKit accessibility walk re-copied on every scroll, a contributor
+    /// to the #707 OOM). Collapsing to one node keeps a clear screen-reader read-out at O(1) node cost.
+    /// e.g. "Sleep stages, 2 hours deep, 1 hour 30 minutes REM, 3 hours light, 20 minutes awake".
+    private var axSummary: String {
+        guard !intervals.isEmpty else { return String(localized: "Sleep stages, no data", bundle: .module) }
+        // Sum duration per stage in the natural read order (deep · REM · light · awake), naming only the
+        // stages that actually occur so a night with no awake time doesn't read "0 minutes awake".
+        var parts: [String] = []
+        for stage in [SleepStage.deep, .rem, .light, .awake] {
+            let total = intervals.filter { $0.stage == stage }.reduce(0.0) { $0 + $1.duration }
+            if total > 0 { parts.append("\(Hypnogram.durationPhrase(total)) \(stage.label.lowercased())") }
+        }
+        return parts.isEmpty ? String(localized: "Sleep stages, no data", bundle: .module)
+                             : String(localized: "Sleep stages, \(parts.joined(separator: ", "))", bundle: .module)
+    }
+
+    /// A spoken duration phrase ("2 hours 5 minutes", "45 minutes", "1 hour") for a seconds interval.
+    private static func durationPhrase(_ seconds: TimeInterval) -> String {
+        let total = Int((seconds / 60).rounded())   // whole minutes
+        let h = total / 60
+        let m = total % 60
+        // Whole-phrase per unit (no "s"-suffix stitching) so each key can carry its own plural rule.
+        func hours(_ n: Int) -> String { n == 1 ? String(localized: "1 hour", bundle: .module) : String(localized: "\(n) hours", bundle: .module) }
+        func minutes(_ n: Int) -> String { n == 1 ? String(localized: "1 minute", bundle: .module) : String(localized: "\(n) minutes", bundle: .module) }
+        if h > 0 && m > 0 { return "\(hours(h)) \(minutes(m))" }
+        if h > 0 { return hours(h) }
+        return minutes(max(m, 1))
+    }
+
     // 4 stage rows; awake = rank 0 (top), deep = rank 3 (bottom).
     private let rowCount = 4
 
@@ -96,49 +135,58 @@ public struct Hypnogram: View {
             VStack(spacing: 6) {
                 GeometryReader { geo in
                     ZStack {
-                        // faint baselines per stage row
-                        ForEach(0..<rowCount, id: \.self) { rank in
-                            let y = rowY(rank, in: geo.size.height)
-                            Path { p in
-                                p.move(to: CGPoint(x: 0, y: y))
-                                p.addLine(to: CGPoint(x: geo.size.width, y: y))
-                            }
-                            .stroke(StrandPalette.hairline.opacity(0.4), lineWidth: 1)
-                        }
-
-                        // time-axis vertical hairlines: onset · midpoint · wake
-                        if showsTimeAxis, nightStart != nil {
-                            ForEach([0.0, 0.5, 1.0], id: \.self) { frac in
-                                let x = geo.size.width * frac
+                        // STATIC LAYER: baselines + time-axis hairlines + risers + the stage bands.
+                        // These rebuild only when intervals/size/hover change, so flatten them into ONE
+                        // cached GPU raster via .drawingGroup() — the bands are flat solid pills (no
+                        // blur), so the raster is pixel-identical. The hover crosshair/ring/tooltip stay
+                        // OUTSIDE this group (below). drawingGroup() strips child accessibility elements,
+                        // and VoiceOver is served by ONE collapsed element on the plot (see `axSummary`
+                        // applied below) — so the bands raster cheaply AND the accessibility walk never
+                        // copies a per-band subtree (the old O(intervals) layer was a #707 contributor).
+                        ZStack {
+                            // faint baselines per stage row
+                            ForEach(0..<rowCount, id: \.self) { rank in
+                                let y = rowY(rank, in: geo.size.height)
                                 Path { p in
-                                    p.move(to: CGPoint(x: x, y: 0))
-                                    p.addLine(to: CGPoint(x: x, y: geo.size.height))
+                                    p.move(to: CGPoint(x: 0, y: y))
+                                    p.addLine(to: CGPoint(x: geo.size.width, y: y))
                                 }
                                 .stroke(StrandPalette.hairline.opacity(0.4), lineWidth: 1)
                             }
-                        }
 
-                        // connecting risers
-                        risers(in: geo.size)
-                            .accessibilityHidden(true)
+                            // time-axis vertical hairlines: onset · midpoint · wake
+                            if showsTimeAxis, nightStart != nil {
+                                ForEach([0.0, 0.5, 1.0], id: \.self) { frac in
+                                    let x = geo.size.width * frac
+                                    Path { p in
+                                        p.move(to: CGPoint(x: x, y: 0))
+                                        p.addLine(to: CGPoint(x: x, y: geo.size.height))
+                                    }
+                                    .stroke(StrandPalette.hairline.opacity(0.4), lineWidth: 1)
+                                }
+                            }
 
-                        // stage bands
-                        ForEach(Array(intervals.enumerated()), id: \.element.id) { idx, interval in
-                            let rect = bandRect(for: interval, in: geo.size)
-                            let color = StrandPalette.sleepStageColor(interval.stage)
-                            let dimmed = hoverIndex != nil && hoverIndex != idx
-                            // Design Reset (WHOOP): NO REM bloom — every stage band is a flat, crisp
-                            // solid pill; fill-contrast (not a glow) separates the four stages.
-                            RoundedRectangle(cornerRadius: rect.height / 2)
-                                .fill(color)
-                                .frame(width: rect.width, height: rect.height)
-                                .opacity(dimmed ? 0.45 : 1.0)
-                                .position(x: rect.midX, y: rect.midY)
-                                // Per-band detail for VoiceOver (the parent card footer only
-                                // voices aggregate stage totals; hover is dead on touch).
-                                .accessibilityElement()
-                                .accessibilityLabel(Text("\(interval.stage.label), \(timeLabel(interval.start)) to \(timeLabel(interval.end)), \(Int((interval.duration / 60).rounded())) minutes"))
+                            // connecting risers
+                            risers(in: geo.size)
+
+                            // stage bands (visual only — a11y is the single collapsed plot summary below)
+                            ForEach(Array(intervals.enumerated()), id: \.element.id) { idx, interval in
+                                let rect = bandRect(for: interval, in: geo.size)
+                                let color = StrandPalette.sleepStageColor(interval.stage)
+                                let dimmed = hoverIndex != nil && hoverIndex != idx
+                                // Design Reset (WHOOP): NO REM bloom — every stage band is a flat, crisp
+                                // solid pill; fill-contrast (not a glow) separates the four stages.
+                                RoundedRectangle(cornerRadius: rect.height / 2)
+                                    .fill(color)
+                                    .frame(width: rect.width, height: rect.height)
+                                    .opacity(dimmed ? 0.45 : 1.0)
+                                    .position(x: rect.midX, y: rect.midY)
+                            }
                         }
+                        // NO .drawingGroup() — flat solid pills are cheap to draw inline; the per-instance
+                        // offscreen flatten was part of the v7.0.2 lag regression. The #707 accessibility
+                        // collapse is served by `.accessibilityHidden(true)` below + the single plot summary.
+                        .accessibilityHidden(true)
 
                         // Hover affordance: crosshair, band highlight ring, tooltip.
                         if showsHover, let idx = hoverIndex, idx < intervals.count {
@@ -157,7 +205,7 @@ public struct Hypnogram: View {
                                 container: geo.size,
                                 tooltip: ChartTooltip(
                                     value: interval.stage.label,
-                                    label: "\(timeLabel(interval.start))–\(timeLabel(interval.end)) · \(Int((interval.duration / 60).rounded()))m",
+                                    label: "\(timeLabel(interval.start))-\(timeLabel(interval.end)) · \(Int((interval.duration / 60).rounded()))m",
                                     accent: color
                                 )
                             )
@@ -174,6 +222,12 @@ public struct Hypnogram: View {
                             hoverIndex = nil
                         }
                     }
+                    // ONE collapsed VoiceOver element for the whole hypnogram (per-stage totals), instead
+                    // of the old O(intervals) per-band layer the accessibility walk re-copied each scroll
+                    // frame (#707). The visual bands already live in a `.drawingGroup()` marked
+                    // `accessibilityHidden`, so this single summary is the only node the chart contributes.
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(Text(axSummary))
                 }
                 .frame(height: height)
 
@@ -303,4 +357,5 @@ private func sampleNight() -> [SleepInterval] {
     .background(StrandPalette.surfaceBase)
     .preferredColorScheme(.dark)
 }
+#endif
 #endif

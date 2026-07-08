@@ -24,7 +24,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import com.noop.R
 
 /**
  * Current Terms of Use version. Bump on a MATERIAL change (risk / liability / medical / affiliation
@@ -34,18 +36,19 @@ import androidx.compose.ui.unit.dp
 object Terms {
     const val CURRENT_VERSION = "1.1"
 
-    /** Plain-English summary of TERMS.md §1–§6 — kept identical to the macOS `Terms.points`. */
-    val points: List<Pair<String, String>> = listOf(
-        "Independent — not affiliated with WHOOP" to
-            "NOOP is an unofficial project — not affiliated with, endorsed by, or sponsored by WHOOP, Inc. \"WHOOP\" is their trademark, used only to name the hardware NOOP works with.",
-        "Using NOOP may breach WHOOP's Terms of Service" to
-            "Use it only with a device you own, to read your own data. Whether to use it — and any effect on your WHOOP account, subscription, device, or warranty — is your decision, and your risk alone.",
-        "Experimental — at your own risk" to
-            "NOOP talks to your strap's firmware over an unofficial, independently-mapped protocol. There is a residual risk to the device, its data, and its connection to official services. You assume that risk.",
-        "Not a medical device, not medical advice" to
-            "Every metric is an unvalidated approximation. Don't use NOOP to diagnose, treat, or make any health decision. Always consult a qualified professional.",
-        "No warranty; liability limited" to
-            "NOOP is free and provided \"as is\", with no warranty. Liability is limited to the maximum extent the law that applies to you allows — and nothing here removes protections your local law won't let us remove.",
+    /**
+     * Plain-English summary of TERMS.md §1–§6 — kept identical to the macOS `Terms.points`. Each is
+     * a (headline, body) pair of string-resource ids so the gate is localized like the rest of the
+     * app (PR #984); the English source wording lives in values/strings.xml, byte-identical to what
+     * used to be hardcoded here. The binding text stays TERMS.md — a translation is a courtesy, not
+     * the agreement.
+     */
+    val points: List<Pair<Int, Int>> = listOf(
+        R.string.terms_point_independent_head to R.string.terms_point_independent_body,
+        R.string.terms_point_tos_head to R.string.terms_point_tos_body,
+        R.string.terms_point_experimental_head to R.string.terms_point_experimental_body,
+        R.string.terms_point_medical_head to R.string.terms_point_medical_body,
+        R.string.terms_point_warranty_head to R.string.terms_point_warranty_body,
     )
 }
 
@@ -61,10 +64,10 @@ fun TermsGateScreen(onAccept: () -> Unit) {
     Surface(modifier = Modifier.fillMaxSize(), color = Palette.surfaceBase) {
         Column(modifier = Modifier.fillMaxSize().padding(horizontal = 24.dp)) {
             Spacer(Modifier.height(40.dp))
-            Text("Before you use NOOP", style = NoopType.title1, color = Palette.textPrimary)
+            Text(stringResource(R.string.terms_title), style = NoopType.title1, color = Palette.textPrimary)
             Spacer(Modifier.height(4.dp))
             Text(
-                "Please read and accept the points below.",
+                stringResource(R.string.terms_subtitle),
                 style = NoopType.subhead, color = Palette.textSecondary,
             )
             Spacer(Modifier.height(20.dp))
@@ -75,12 +78,12 @@ fun TermsGateScreen(onAccept: () -> Unit) {
             ) {
                 Terms.points.forEach { (head, body) ->
                     Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                        Text(head, style = NoopType.headline, color = Palette.textPrimary)
-                        Text(body, style = NoopType.footnote, color = Palette.textSecondary)
+                        Text(stringResource(head), style = NoopType.headline, color = Palette.textPrimary)
+                        Text(stringResource(body), style = NoopType.footnote, color = Palette.textSecondary)
                     }
                 }
                 Text(
-                    "The full terms are in TERMS.md, shipped with NOOP. This is not legal advice.",
+                    stringResource(R.string.terms_footer),
                     style = NoopType.footnote, color = Palette.textTertiary,
                 )
             }
@@ -94,7 +97,7 @@ fun TermsGateScreen(onAccept: () -> Unit) {
                 )
                 Spacer(Modifier.width(8.dp))
                 Text(
-                    "I have read and accept these terms, and I'm using NOOP with my own device and my own data, at my own risk.",
+                    stringResource(R.string.terms_checkbox),
                     style = NoopType.footnote, color = Palette.textPrimary,
                     modifier = Modifier.padding(top = 14.dp),
                 )
@@ -106,7 +109,7 @@ fun TermsGateScreen(onAccept: () -> Unit) {
                 modifier = Modifier.fillMaxWidth().padding(bottom = 24.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = Palette.accent),
             ) {
-                Text("Accept & Continue", style = NoopType.headline)
+                Text(stringResource(R.string.terms_accept), style = NoopType.headline)
             }
         }
     }

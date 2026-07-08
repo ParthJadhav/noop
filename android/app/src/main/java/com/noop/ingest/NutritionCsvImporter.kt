@@ -82,7 +82,7 @@ object NutritionCsvImporter {
         if (resolveColumns(table.normalizedHeaders) == null) {
             return ImportSummary.failure(
                 SOURCE_LABEL,
-                "Couldn't recognise the columns — expected a date column plus any of " +
+                "Couldn't recognise the columns - expected a date column plus any of " +
                     "calories / protein / carbs / fat / weight.",
             )
         }

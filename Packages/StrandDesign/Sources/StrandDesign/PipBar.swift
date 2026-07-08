@@ -79,10 +79,17 @@ public struct PipBar: View {
         let gap: CGFloat = max(2, height * 0.28)
         let corner: CGFloat = 2.5
 
+        // Precompute the three constant colours ONCE per body eval rather than re-deriving them inside
+        // every one of the (default 24) segment closures: the inset track, the plain tint, and the
+        // brightened lead-edge tint (which itself runs an interpolate → Color(hex:) allocation). Combined
+        // with the Palette memoization this removes the per-segment colour allocations across the bar.
+        let track = StrandPalette.surfaceInset
+        let leadBase = brighten(tint)
+
         HStack(spacing: gap) {
             ForEach(0..<pipCount, id: \.self) { index in
                 RoundedRectangle(cornerRadius: corner, style: .continuous)
-                    .fill(fillStyle(for: index))
+                    .fill(fillStyle(for: index, track: track, leadBase: leadBase))
             }
         }
         .frame(height: height)
@@ -104,7 +111,7 @@ public struct PipBar: View {
     /// these edges left→right, so segments fill in sequence. Within a pip the fill ramps over its own
     /// span (so the *leading* pip fades in smoothly rather than snapping), then we add a small brightness
     /// lift to whichever pip currently holds the lead edge — the "last filled segment is a touch brighter".
-    private func fillStyle(for index: Int) -> Color {
+    private func fillStyle(for index: Int, track: Color, leadBase: Color) -> Color {
         let n = Double(pipCount)
         let segStart = Double(index) / n
         let segEnd = Double(index + 1) / n
@@ -122,22 +129,25 @@ public struct PipBar: View {
 
         // Track colour for unlit pips: surfaceInset is the canonical well; fall back to a faint hairline
         // feel by mixing toward the track for partially-lit pips so the cascade edge reads cleanly.
-        let track = StrandPalette.surfaceInset
         if local <= 0 { return track }
 
         // Lit pips use the tint; the segment holding the live lead edge (target fraction sits inside it)
-        // is nudged a touch brighter for a crisp leading highlight. Flat — no glow.
+        // is nudged a touch brighter for a crisp leading highlight. Flat — no glow. (`leadBase` is the
+        // brightened tint, precomputed once in `body`.)
         let isLeadEdge = targetFraction > segStart && targetFraction <= segEnd
-        let base = isLeadEdge ? brighten(tint) : tint
+        let base = isLeadEdge ? leadBase : tint
 
         // Partially-covered pip (the moving front of the cascade): blend track → fill by coverage so the
         // sweep edge is smooth, not stepped. Fully covered pips are the solid fill.
         return local >= 1 ? base : StrandPalette.interpolate(track, base, local)
     }
 
+    /// Pure white, built once (not a fresh `Color(hex:)` per `brighten` call).
+    private static let white = Color(hex: "#FFFFFF")
+
     /// A small, glow-free brightness lift for the lead-edge segment — blend the tint toward white.
     private func brighten(_ color: Color) -> Color {
-        StrandPalette.interpolate(color, Color(hex: "#FFFFFF"), 0.22)
+        StrandPalette.interpolate(color, Self.white, 0.22)
     }
 
     private var axValue: String {

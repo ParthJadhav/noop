@@ -243,6 +243,16 @@ public enum SleepStager {
     public static let stageWakeMoveFrac: Double = 0.15
     public static let stageStillMoveFrac: Double = 0.10
 
+    /// Fraction of sleep-period epochs that must carry a MISSING per-epoch RMSSD (sparse R-R) for the
+    /// session's cardiac signal to count as PPG-DERIVED / sparse-cardiac. On a WHOOP 5/MG the PPG-derived
+    /// HR feeds a noisier per-epoch HR-variance, which inflates `hrVar` on otherwise still, low-HR sleep
+    /// epochs and was tripping the Stage-2 WAKE rule (which keys on the `hrvarHigh` percentile) — so a
+    /// whole night over-reported WAKE. We already trust `!rmssd.isFinite` as a PPG/sparse tell for the
+    /// pro-deep RMSSD handling (#127/#129); at this share across the night it also down-weights the
+    /// HR-variance half of the WAKE rule. ~50% keeps a real worn 4.0 night (dense R-R) on the strict
+    /// path and only relaxes nights whose cardiac signal is genuinely sparse/derived. (#705)
+    public static let cardiacSparseEpochFrac: Double = 0.5
+
     public static let smoothEpochs: Int = 5
     public static let noREMAfterOnsetMin: Double = 15.0
     public static let deepFirstFraction: Double = 1.0 / 3.0
@@ -665,13 +675,77 @@ public enum SleepStager {
     /// re-onset (#531): a daytime block the strap itself scored predominantly "asleep" is KEPT even on a
     /// borderline HR dip. Default empty keeps pure-function callers/tests free of it; IntelligenceEngine
     /// passes the night window's persisted band state. It can only RESCUE a real-sleep block, never fabricate.
+    /// `useSleepStagerV2` (V7 / #690): when true, each accepted night is staged by the experimental
+    /// cardiorespiratory recipe `SleepStagerV2.stageSession` instead of V1's `stageSession`. DETECTION is
+    /// unchanged (same accepted windows); only the per-epoch hypnogram differs. Default false keeps V1 the
+    /// byte-identical default (the frozen-golden tests stay green). The live call site threads
+    /// `PuffinExperiment.experimentalSleepV2Enabled` so the Settings toggle now affects normal detected
+    /// nights, not just the self-heal restage path.
     public static func detectSleep(hr: [HRSample] = [],
                                    rr: [RRInterval] = [],
                                    resp: [RespSample] = [],
                                    gravity: [GravitySample],
                                    tzOffsetSeconds: Int = 0,
                                    wristOff: [(start: Int, end: Int)] = [],
-                                   bandSleepState: [(ts: Int, state: Int)] = []) -> [SleepSession] {
+                                   bandSleepState: [(ts: Int, state: Int)] = [],
+                                   useSleepStagerV2: Bool = false,
+                                   traceSink: ((String) -> Void)? = nil) -> [SleepSession] {
+        // Sleep & Rest test mode only: when a trace is requested we MUST run the live ladder, not a
+        // memoized result, so each gate verdict is emitted for THIS night. The trace is side-effect-
+        // only and never changes the sessions, so a traced and an untraced call return the identical
+        // array. With no sink (the default, every existing call site) the path below is byte-identical
+        // to before: same memo key, same compute.
+        if let traceSink {
+            return detectSleepUncached(hr: hr, rr: rr, resp: resp, gravity: gravity,
+                                       tzOffsetSeconds: tzOffsetSeconds, wristOff: wristOff,
+                                       bandSleepState: bandSleepState, useSleepStagerV2: useSleepStagerV2,
+                                       traceSink: traceSink)
+        }
+        // v7.0.2 perf (#707): the single heaviest analytics call — it sorts the dense full-day gravity
+        // stream (~tens of thousands of samples for a worn day), builds the gravity-delta/still spine, and
+        // stages every accepted run. The post-sync scoring loop calls it once PER DAY across the window, and
+        // a re-run with the SAME raw (an idempotent re-pass, or a later sync that didn't touch this day's
+        // streams) re-does all of it for an identical `[SleepSession]`. Memoize on a FULL key: every input
+        // that steers detection or staging — the four streams, the tz offset (daytime-guard + onset band),
+        // the off-wrist intervals (#500 backstop), the persisted band state (#531 H8), and the V2 toggle (an
+        // edit to any re-keys to a fresh compute). Result-only + bounded; the raw arrays are never retained.
+        let key = DetectKey(
+            grav: StreamFingerprint.of(gravity, ts: { $0.ts }, quant: { Int(($0.x + $0.y + $0.z) * 1024) }),
+            hr: StreamFingerprint.of(hr, ts: { $0.ts }, quant: { Int($0.bpm) }),
+            rr: StreamFingerprint.of(rr, ts: { $0.ts }, quant: { Int($0.rrMs) }),
+            resp: StreamFingerprint.of(resp, ts: { $0.ts }, quant: { $0.raw }),
+            tz: tzOffsetSeconds,
+            wristOff: StreamFingerprint.of(wristOff, ts: { $0.start }, quant: { $0.end }),
+            band: StreamFingerprint.of(bandSleepState, ts: { $0.ts }, quant: { $0.state }),
+            v2: useSleepStagerV2)
+        return detectSleepCache.value(key) {
+            detectSleepUncached(hr: hr, rr: rr, resp: resp, gravity: gravity,
+                                tzOffsetSeconds: tzOffsetSeconds, wristOff: wristOff,
+                                bandSleepState: bandSleepState, useSleepStagerV2: useSleepStagerV2,
+                                traceSink: nil)
+        }
+    }
+
+    private struct DetectKey: Hashable {
+        let grav: StreamFingerprint; let hr: StreamFingerprint
+        let rr: StreamFingerprint; let resp: StreamFingerprint
+        let tz: Int
+        let wristOff: StreamFingerprint; let band: StreamFingerprint
+        let v2: Bool
+    }
+    /// ≈ the number of distinct days in a scoring window; FIFO-evicted, holds only small session arrays.
+    private static let detectSleepCache = AnalyticsMemoCache<DetectKey, [SleepSession]>(capacity: 40)
+
+    /// The unchanged detection+staging pipeline; split out verbatim so the public entry memoizes in front.
+    private static func detectSleepUncached(hr: [HRSample],
+                                            rr: [RRInterval],
+                                            resp: [RespSample],
+                                            gravity: [GravitySample],
+                                            tzOffsetSeconds: Int,
+                                            wristOff: [(start: Int, end: Int)],
+                                            bandSleepState: [(ts: Int, state: Int)],
+                                            useSleepStagerV2: Bool,
+                                            traceSink: ((String) -> Void)? = nil) -> [SleepSession] {
         let grav = gravity.sorted { $0.ts < $1.ts }
         if grav.count < 2 { return [] }
 
@@ -691,7 +765,17 @@ public enum SleepStager {
         var runs = buildRuns(grav, flags, sparse: sparse, hr: hrS, baseline: baseline)
         runs = mergePeriods(runs)
         // Re-stitch sleep runs fragmented by pure gravity dropouts (sparse only) before minSleepMin.
+        let runsBeforeBridge = traceSink == nil ? 0 : runs.filter { $0.stage == "sleep" }.count
         runs = bridgeSparseSleep(runs, sparse: sparse, hr: hrS, baseline: baseline)
+        // Sleep & Rest test mode (E3): record the sparse-gravity bridge result, so a sparse 5.0 night
+        // rescued from fragmentation is visible. Only emitted when gravity is sparse (the only case the
+        // bridge can act) and only when tracing. Side-effect-only.
+        if let traceSink, sparse {
+            let runsAfterBridge = runs.filter { $0.stage == "sleep" }.count
+            traceSink(GateTrace.runLine(index: -1, startTs: 0, endTs: 0,
+                verdict: runsAfterBridge < runsBeforeBridge ? .kept : .dropped, gate: "sparseBridge",
+                detail: "sparse=true gapMin=\(sparseBridgeGapMin) runsBefore=\(runsBeforeBridge) runsAfter=\(runsAfterBridge)"))
+        }
 
         let minSleepS = minSleepMin * 60
 
@@ -706,16 +790,38 @@ public enum SleepStager {
         let continuationGapS = nightContinuationGapMin * 60
         var chainPrevEnd: Int? = nil       // end of the last accepted sleep run
         var chainFromOvernight = false     // did the current contiguous chain begin overnight?
+        // Sleep & Rest test mode (E2): each candidate sleep run emits ONE verdict line naming the gate
+        // that kept or dropped it. The decisions below are byte-identical to the untraced path; the
+        // `traceSink?(...)` calls are the only addition and never alter `sessions`. `runIndex` counts
+        // only sleep-stage runs so the trace numbers match the candidate ordinal.
+        var runIndex = -1
         for p in runs {
             if p.stage != "sleep" { continue }
-            if (p.end - p.start) <= minSleepS { continue }
+            runIndex += 1
+            let spanMin = (p.end - p.start) / 60
+            if (p.end - p.start) <= minSleepS {
+                traceSink?(GateTrace.runLine(index: runIndex, startTs: p.start, endTs: p.end,
+                    verdict: .dropped, gate: "minSleepMin",
+                    detail: "spanMin=\(spanMin) minSleepMin=\(minSleepMin)"))
+                continue
+            }
             // H4 physiological in-bed span cap (#547/#531/#509 tail): a single assembled main-sleep run
             // longer than ~16 h is a bad-clock artefact (a frozen still stretch banked under a stale/wrong
             // clock), not a real night. Drop it rather than report (or truncate to) a 12 h+ "sleep" — an
             // over-long block can't be trusted to assert a span at all, and truncating would fabricate a
             // wake time. Checked before staging so the artefact never reaches the aggregate.
-            if (p.end - p.start) > maxMainSleepSpanS { continue }
-            if !confirmSleepWithHR(p, hr: hrS, baseline: baseline) { continue }
+            if (p.end - p.start) > maxMainSleepSpanS {
+                traceSink?(GateTrace.runLine(index: runIndex, startTs: p.start, endTs: p.end,
+                    verdict: .dropped, gate: "maxMainSleepSpanS",
+                    detail: "spanMin=\(spanMin) maxMainSleepSpanMin=\(maxMainSleepSpanS / 60)"))
+                continue
+            }
+            if !confirmSleepWithHR(p, hr: hrS, baseline: baseline) {
+                traceSink?(GateTrace.runLine(index: runIndex, startTs: p.start, endTs: p.end,
+                    verdict: .dropped, gate: "hrConfirm",
+                    detail: "hrSleepBaselineMult=\(hrSleepBaselineMult) baseline=\(baseline.map { Int($0) } ?? -1)"))
+                continue
+            }
             // Off-wrist backstop (#500), FRACTIONAL rule (design credited to j0b-dev's #504 analysis):
             // a wrist-OFF stretch is still gravity with no HR, so it slips past both the gravity spine
             // and the daytime guard's "missing data" path. Measure off-wrist COVERAGE — the union of the
@@ -726,7 +832,13 @@ public enum SleepStager {
             // (≈100% gap) is still dropped. Checked BEFORE the night-tail exemption: off-wrist time is
             // off-wrist day or night and must NOT ride a continuation chain. It does NOT re-anchor the
             // chain (the run is simply skipped).
-            if offWristFraction(p, hr: hrS, wristOff: wristOff) >= maxOffWristSleepFraction { continue }
+            let offFrac = offWristFraction(p, hr: hrS, wristOff: wristOff)
+            if offFrac >= maxOffWristSleepFraction {
+                traceSink?(GateTrace.runLine(index: runIndex, startTs: p.start, endTs: p.end,
+                    verdict: .dropped, gate: "offWrist",
+                    detail: "offWristFrac=\(round2(offFrac)) max=\(maxOffWristSleepFraction)"))
+                continue
+            }
             // Daytime false-sleep guard (#90): a window centered in the local daytime band
             // must clear a stricter bar (≥daytimeMinSleepMin AND a real resting-HR dip).
             // Overnight windows skip this entirely. restingHR is computed here (reused below).
@@ -738,17 +850,34 @@ public enum SleepStager {
             // clear the STRONGER re-onset bar — killing the 9 am phantom nap of residual post-wake stillness
             // while keeping a genuine second sleep. Outside the window the guard is the ordinary daytime bar.
             let morningWakeEnd = chainFromOvernight ? chainPrevEnd : nil
-            if isDaytimeCenter(p, tzOffsetSeconds: tzOffsetSeconds),
-               !passesMorningStillnessGuard(p, restingHR: resting, baseline: baseline,
-                                            morningWakeEnd: morningWakeEnd,
-                                            bandSleepState: bandSleepState),
-               !isNightTail { continue }
-            let stages = stageSession(start: p.start, end: p.end, grav: grav,
-                                      hr: hrS, rr: rrS, resp: respS)
+            let isDaytime = isDaytimeCenter(p, tzOffsetSeconds: tzOffsetSeconds)
+            // Evaluate the morning-stillness guard ONLY when the run is daytime-centered, preserving the
+            // original short-circuit (overnight runs never call it). The boolean used to `continue` below
+            // is identical to the original combined condition.
+            let passesMorning = isDaytime
+                ? passesMorningStillnessGuard(p, restingHR: resting, baseline: baseline,
+                                              morningWakeEnd: morningWakeEnd,
+                                              bandSleepState: bandSleepState)
+                : true
+            if isDaytime, !passesMorning, !isNightTail {
+                let gateName = (morningWakeEnd != nil) ? "morningStillness" : "daytimeGuard"
+                traceSink?(GateTrace.runLine(index: runIndex, startTs: p.start, endTs: p.end,
+                    verdict: .dropped, gate: gateName,
+                    detail: "daytime=true restingHR=\(resting ?? -1) baseline=\(baseline.map { Int($0) } ?? -1) nightTail=false"))
+                continue
+            }
+            let stages = useSleepStagerV2
+                ? SleepStagerV2.stageSession(start: p.start, end: p.end, grav: grav,
+                                             hr: hrS, rr: rrS, resp: respS)
+                : stageSession(start: p.start, end: p.end, grav: grav,
+                               hr: hrS, rr: rrS, resp: respS)
             let eff = efficiency(start: p.start, end: p.end, stages: stages)
             let avgHrv = sessionAvgHRV(start: p.start, end: p.end, rr: rrS)
             sessions.append(SleepSession(start: p.start, end: p.end, efficiency: eff,
                                          stages: stages, restingHR: resting, avgHRV: avgHrv))
+            traceSink?(GateTrace.runLine(index: runIndex, startTs: p.start, endTs: p.end,
+                verdict: .kept, gate: "accepted",
+                detail: "spanMin=\(spanMin) eff=\(round2(eff)) restingHR=\(resting ?? -1) daytime=\(isDaytime)"))
             // A run that does NOT continue the chain re-anchors it on this run's onset.
             if !continuesChain { chainFromOvernight = isOvernightOnset(p.start, tzOffsetSeconds: tzOffsetSeconds) }
             chainPrevEnd = p.end
@@ -793,6 +922,33 @@ public enum SleepStager {
     /// stages from the sensor data instead of a fabricated "awake" block. (#318)
     public static func stageSession(start: Int, end: Int, grav: [GravitySample],
                                     hr: [HRSample], rr: [RRInterval], resp: [RespSample]) -> [StageSegment] {
+        // v7.0.2 perf (#707): stage each window AT MOST ONCE per (window, input-fingerprint). Both
+        // `detectSleep` (per accepted run) and the sleep-edit restage call this with byte-identical streams
+        // across post-sync passes / `body` re-evaluations; each call builds a fresh 30 s epoch grid +
+        // per-epoch feature arrays before collapsing to a few `StageSegment`s. The key folds in the window
+        // (an edit re-keys) and a strided fingerprint of every stream the V1 recipe READS (grav/hr/rr/resp —
+        // resp IS consumed here via the epoch grid, unlike V2). Result-only, bounded, no raw arrays retained.
+        let key = V1StageKey(
+            start: start, end: end,
+            grav: StreamFingerprint.of(grav, ts: { $0.ts }, quant: { Int(($0.x + $0.y + $0.z) * 1024) }),
+            hr: StreamFingerprint.of(hr, ts: { $0.ts }, quant: { Int($0.bpm) }),
+            rr: StreamFingerprint.of(rr, ts: { $0.ts }, quant: { Int($0.rrMs) }),
+            resp: StreamFingerprint.of(resp, ts: { $0.ts }, quant: { $0.raw }))
+        return stageSessionCache.value(key) {
+            stageSessionUncached(start: start, end: end, grav: grav, hr: hr, rr: rr, resp: resp)
+        }
+    }
+
+    private struct V1StageKey: Hashable {
+        let start: Int; let end: Int
+        let grav: StreamFingerprint; let hr: StreamFingerprint
+        let rr: StreamFingerprint; let resp: StreamFingerprint
+    }
+    private static let stageSessionCache = AnalyticsMemoCache<V1StageKey, [StageSegment]>(capacity: 32)
+
+    /// Unchanged V1 staging recipe; split verbatim so the public entry memoizes in front of it.
+    private static func stageSessionUncached(start: Int, end: Int, grav: [GravitySample],
+                                             hr: [HRSample], rr: [RRInterval], resp: [RespSample]) -> [StageSegment] {
         let gSeg = rowsBetween(grav, start: start, end: end) { $0.ts }
         if gSeg.count < 2 { return [StageSegment(start: start, end: end, stage: "light")] }
 
@@ -862,6 +1018,35 @@ public enum SleepStager {
                                   gravTimes: gTimes, gravDeltas: gDeltas,
                                   hr: [], rr: [], resp: [])
         return grid.counts
+    }
+
+    /// #175: the strap's OWN band sleep_state (0 wake/1 still/2 asleep/3 up) gridded onto the SAME 30 s
+    /// epoch grid `stagesJSON` / `sessionEpochMotion` use, so the caller can persist it via
+    /// `WhoopStore.persistSessionSleepState` and the H7 re-onset CONFIRM guard can read it back as timestamped
+    /// `(startTs + i*epochS, state)` samples. Returns EMPTY when the session carries no band-state samples
+    /// (a WHOOP 4.0, or an unbanded window) — an absent signal stays absent, never a fabricated array. When
+    /// present, each epoch takes the band's LAST reported state within its `[start+i·30, start+(i+1)·30)`
+    /// window; an epoch with no sample of its own CARRIES FORWARD the previous epoch's state (band state is a
+    /// step function). Leading epochs before the first sample take the first sample's state. The band code is
+    /// carried VERBATIM — this never converts an unproven code into a derived stage; consumers decide meaning.
+    public static func sessionEpochSleepState(start: Int, end: Int,
+                                              sleepState: [(ts: Int, state: Int)]) -> [Int] {
+        let seg = rowsBetween(sleepState, start: start, end: end) { $0.ts }.sorted { $0.ts < $1.ts }
+        guard !seg.isEmpty, end > start else { return [] }
+        let nEpochs = max(1, Int(ceil(Double(end - start) / epochS)))
+        var out = [Int](repeating: seg[0].state, count: nEpochs)   // lead-in = first sample's state
+        var last = seg[0].state
+        var si = 0
+        for i in 0..<nEpochs {
+            let epochEnd = start + Int(Double(i + 1) * epochS)
+            // Advance through every sample that falls in/at-or-before this epoch's window; the LAST one wins.
+            while si < seg.count && seg[si].ts < epochEnd {
+                last = seg[si].state
+                si += 1
+            }
+            out[i] = last   // carry-forward when the epoch had no sample of its own
+        }
+        return out
     }
 
     // MARK: - Epoch grid
@@ -1307,15 +1492,29 @@ public enum SleepStager {
         let hrvarHi = percentile(sleepFeats.map { $0.hrVar }, stageHRVarHighPct)
         let rrvHi = percentile(sleepFeats.map { $0.rrv }, stageRRVHighPct)
         let rrvLo = percentile(sleepFeats.map { $0.rrv }, stageRRVLowPct)
+        let cardiacSparse = isCardiacSparse(sleepFeats)
 
         return features.map {
             classifyOne($0, hrLo: hrLo, hrHi: hrHi, rmssdHi: rmssdHi,
-                        hrvarHi: hrvarHi, rrvHi: rrvHi, rrvLo: rrvLo)
+                        hrvarHi: hrvarHi, rrvHi: rrvHi, rrvLo: rrvLo,
+                        cardiacSparse: cardiacSparse)
         }
     }
 
+    /// Session-level PPG-derived / sparse-cardiac tell: most sleep-period epochs carry NO finite
+    /// per-epoch RMSSD (sparse R-R). On those nights the HR is PPG-derived and its windowed variance
+    /// (`hrVar`) is noisier, so the percentile `hrvarHigh` bar fires on genuinely still, low-HR sleep —
+    /// which the WAKE rule must NOT treat as cardiac activation. Same `!rmssd.isFinite` signal already
+    /// trusted for the pro-deep RMSSD handling (#127/#129), aggregated across the night. (#705)
+    static func isCardiacSparse(_ sleepFeats: [EpochFeatures]) -> Bool {
+        if sleepFeats.isEmpty { return false }
+        let sparse = sleepFeats.reduce(0) { $0 + (($1.rmssd.isFinite) ? 0 : 1) }
+        return Double(sparse) >= cardiacSparseEpochFrac * Double(sleepFeats.count)
+    }
+
     static func classifyOne(_ f: EpochFeatures, hrLo: Double?, hrHi: Double?,
-                            rmssdHi: Double?, hrvarHi: Double?, rrvHi: Double?, rrvLo: Double?) -> String {
+                            rmssdHi: Double?, hrvarHi: Double?, rrvHi: Double?, rrvLo: Double?,
+                            cardiacSparse: Bool = false) -> String {
         let hasHR = f.hr.isFinite
         let hrLow = hasHR && hrLo != nil && f.hr <= hrLo!
         let hrHigh = hasHR && hrHi != nil && f.hr >= hrHi!
@@ -1331,6 +1530,13 @@ public enum SleepStager {
         let hrvarHigh = f.hrVar.isFinite && hrvarHi != nil && f.hrVar >= hrvarHi!
         let cardiacActivated = hrHigh || hrvarHigh
 
+        // WAKE-specific cardiac vetting. On a PPG-derived / sparse-cardiac night the per-epoch HR-variance
+        // is noisy, so `hrvarHigh` fires on still, low-HR sleep and used to flip those epochs to WAKE. When
+        // the session is sparse we DOWN-WEIGHT hrVar for the wake promotion and require a real elevated HR
+        // (`hrHigh`) — the down-weighting mirrors how sparse R-R is trusted for the pro-deep RMSSD handling.
+        // Dense 4.0 nights keep the full `hrHigh || hrvarHigh` signal, so their behaviour is unchanged. (#705)
+        let cardiacActivatedForWake = cardiacSparse ? hrHigh : cardiacActivated
+
         let rrvIrregular = f.rrv.isFinite && rrvHi != nil && f.rrv >= rrvHi!
         // Missing respiration (NaN RRV) treated as "regular" (pro-deep bias).
         let rrvRegular = (!f.rrv.isFinite) || (rrvLo != nil && f.rrv <= rrvLo!)
@@ -1338,8 +1544,10 @@ public enum SleepStager {
         let still = f.moveFrac <= stageStillMoveFrac
         let moving = f.moveFrac >= stageWakeMoveFrac
 
-        // WAKE: sustained motion + activated cardiac (or no HR to vet motion).
-        if moving && (cardiacActivated || !hasHR) { return "wake" }
+        // WAKE: sustained motion + activated cardiac (or no HR to vet motion). On a sparse/PPG night the
+        // cardiac half is vetted by HR only (see `cardiacActivatedForWake`), so noisy hrVar no longer
+        // over-promotes still sleep to wake. (#705)
+        if moving && (cardiacActivatedForWake || !hasHR) { return "wake" }
         // DEEP: still + low HR + regular respiration, with high parasympathetic tone when measurable.
         if still && parasympOK && hrLow && rrvRegular { return "deep" }
         // REM: still body + activated cardiac + irregular respiration.
@@ -1467,7 +1675,8 @@ public enum SleepStager {
     /// using the exact predicates and precedence of `classifyOne` so the diagnostic can never diverge
     /// from the real classifier. Read-only. (#688)
     static func remRejectReason(_ f: EpochFeatures, hrLo: Double?, hrHi: Double?,
-                                rmssdHi: Double?, hrvarHi: Double?, rrvHi: Double?, rrvLo: Double?) -> REMRejectReason {
+                                rmssdHi: Double?, hrvarHi: Double?, rrvHi: Double?, rrvLo: Double?,
+                                cardiacSparse: Bool = false) -> REMRejectReason {
         // Mirror classifyOne's derived predicates exactly.
         let hasHR = f.hr.isFinite
         let hrLow = hasHR && hrLo != nil && f.hr <= hrLo!
@@ -1475,6 +1684,7 @@ public enum SleepStager {
         let parasympOK = (!f.rmssd.isFinite) || (rmssdHi != nil && f.rmssd >= rmssdHi!)
         let hrvarHigh = f.hrVar.isFinite && hrvarHi != nil && f.hrVar >= hrvarHi!
         let cardiacActivated = hrHigh || hrvarHigh
+        let cardiacActivatedForWake = cardiacSparse ? hrHigh : cardiacActivated
         let rrvIrregular = f.rrv.isFinite && rrvHi != nil && f.rrv >= rrvHi!
         let rrvRegular = (!f.rrv.isFinite) || (rrvLo != nil && f.rrv <= rrvLo!)
         let still = f.moveFrac <= stageStillMoveFrac
@@ -1482,7 +1692,7 @@ public enum SleepStager {
 
         // classifyOne precedence: WAKE, then DEEP, then REM (then REM fallback), else LIGHT.
         // An epoch that wins WAKE or DEEP was never a REM candidate.
-        if moving && (cardiacActivated || !hasHR) { return .wonOtherStage }     // → wake
+        if moving && (cardiacActivatedForWake || !hasHR) { return .wonOtherStage }     // → wake
         if still && parasympOK && hrLow && rrvRegular { return .wonOtherStage } // → deep
         // From here the epoch did NOT win wake/deep; it is either REM or falls through to LIGHT.
         if still && cardiacActivated && rrvIrregular { return .remEligible }
@@ -1531,6 +1741,7 @@ public enum SleepStager {
         let hrvarHi = percentile(sleepFeats.map { $0.hrVar }, stageHRVarHighPct)
         let rrvHi = percentile(sleepFeats.map { $0.rrv }, stageRRVHighPct)
         let rrvLo = percentile(sleepFeats.map { $0.rrv }, stageRRVLowPct)
+        let cardiacSparse = isCardiacSparse(sleepFeats)
 
         // Classify + post-process exactly as stageSession does, so we explain the SAME hypnogram.
         let labels = classifyEpochs(feats)
@@ -1550,7 +1761,8 @@ public enum SleepStager {
             if f.rrv.isFinite { respChannelPresent = true }
             // Per-epoch REM reason at the raw classifier seam (pre-smoothing) — the funnel's mouth.
             switch remRejectReason(f, hrLo: hrLo, hrHi: hrHi, rmssdHi: rmssdHi,
-                                   hrvarHi: hrvarHi, rrvHi: rrvHi, rrvLo: rrvLo) {
+                                   hrvarHi: hrvarHi, rrvHi: rrvHi, rrvLo: rrvLo,
+                                   cardiacSparse: cardiacSparse) {
             case .remEligible:           remAtClassify += 1
             case .wonOtherStage:         wonOtherStage += 1
             case .notStill:              blockedNotStill += 1

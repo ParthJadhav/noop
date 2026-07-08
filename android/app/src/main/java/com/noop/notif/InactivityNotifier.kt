@@ -33,7 +33,7 @@ object InactivityNotifier {
         val body = if (minutes > 0) {
             "You've been seated for about $minutes min. Time to move."
         } else {
-            "Time to move — you've been seated a while."
+            "Time to move. You've been seated a while."
         }
         // Defensive: never let a notify() throw (revoked POST_NOTIFICATIONS, OEM quirk) crash the offload.
         runCatching {

@@ -69,7 +69,7 @@ struct FusedRecordView: View {
     let record: FusedRecord
     /// The day label shown in the header subtitle ("Today", or a formatted date). Defaulted so the
     /// preview/caller can omit it.
-    var dayLabel: String = "Today"
+    var dayLabel: String = String(localized: "Today")
 
     /// The metric currently open in the conflict-compare sheet (nil = closed).
     @State private var comparing: FusedRow?
@@ -89,7 +89,7 @@ struct FusedRecordView: View {
                 if record.rows.isEmpty {
                     DataPendingNote(
                         title: "Nothing to fuse yet",
-                        message: "Import a WHOOP export, Apple Health or a second band and your best-sourced record builds here — on this device.",
+                        message: "Import a WHOOP export, Apple Health or a second band and your best-sourced record builds here, on this device.",
                         symbol: "square.stack.3d.up"
                     )
                 } else {
@@ -137,9 +137,9 @@ struct FusedRecordView: View {
     /// minimal — the helper lives in the main target, not the design package).
     private var deviceNoun: String {
         #if os(macOS)
-        return "this Mac"
+        return String(localized: "this Mac")
         #else
-        return "this device"
+        return String(localized: "this device")
         #endif
     }
 
@@ -156,7 +156,7 @@ struct FusedRecordView: View {
                     .font(StrandFont.footnote)
                     .foregroundStyle(StrandPalette.textSecondary)
             } else {
-                Text("Scores still calibrating — no single day-owner yet")
+                Text("Scores still calibrating, no single day-owner yet")
                     .font(StrandFont.footnote)
                     .foregroundStyle(StrandPalette.textTertiary)
             }
@@ -172,7 +172,7 @@ struct FusedRecordView: View {
                 .font(StrandFont.footnote)
                 .foregroundStyle(StrandPalette.textTertiary)
                 .accessibilityHidden(true)
-            Text("Fused on \(deviceNoun). Nothing leaves it — no account, no cloud.")
+            Text("Fused on \(deviceNoun). Nothing leaves it: no account, no cloud.")
                 .font(StrandFont.footnote)
                 .foregroundStyle(StrandPalette.textTertiary)
             Spacer(minLength: 0)
@@ -184,7 +184,7 @@ struct FusedRecordView: View {
 
     /// The pillar's standing non-clinical line (umbrella §4.1). Kept inline + plain — wellness only.
     private var disclaimerNote: some View {
-        Text("NOOP picks the best-sourced number and shows you where each came from. It's for wellness and curiosity — it doesn't diagnose or replace medical advice.")
+        Text("NOOP picks the best-sourced number and shows you where each came from. It's for wellness and curiosity. It doesn't diagnose or replace medical advice.")
             .font(StrandFont.footnote)
             .foregroundStyle(StrandPalette.textTertiary)
             .fixedSize(horizontal: false, vertical: true)
@@ -225,9 +225,10 @@ private struct FusedMetricRowView: View {
             }
 
             if showProvenance {
-                // Provenance line: a source badge + the published one-line reason.
+                // Provenance line: a source badge + the published one-line reason. The literal goes to
+                // SourceBadge's LocalizedStringKey directly so the "from %@" key is catalogued.
                 HStack(spacing: 8) {
-                    SourceBadge(LocalizedStringKey("from \(point.winningSource.displayName)"),
+                    SourceBadge("from \(point.winningSource.displayName)",
                                 tint: StrandPalette.accent)
                     if let reason = winnerReason {
                         Text(reason)
@@ -302,10 +303,10 @@ private struct FusedMetricRowView: View {
         }
     }
 
-    /// "Apple Health says 6h 40m — tap to compare" style line for a conflict.
+    /// "Apple Health says 6h 40m. Tap to compare" style line for a conflict.
     private var conflictSummary: String {
-        guard let other = point.contributors.dropFirst().first else { return "Tap to compare" }
-        return "\(other.source.displayName) says \(FusionFormat.value(other.value, metricKey: point.metric)) — tap to compare"
+        guard let other = point.contributors.dropFirst().first else { return String(localized: "Tap to compare") }
+        return String(localized: "\(other.source.displayName) says \(FusionFormat.value(other.value, metricKey: point.metric)). Tap to compare")
     }
 }
 
@@ -345,7 +346,7 @@ private struct ConflictCompareSheet: View {
                             .font(StrandFont.subhead)
                             .foregroundStyle(StrandPalette.accent)
                             .accessibilityHidden(true)
-                        Text("NOOP shows the \(winner.source.displayName) reading because it \(winner.reason) for this metric — a higher-trust source here, not a verdict that the others are wrong.")
+                        Text("NOOP shows the \(winner.source.displayName) reading because it \(winner.reason) for this metric: a higher-trust source here, not a verdict that the others are wrong.")
                             .font(StrandFont.subhead)
                             .foregroundStyle(StrandPalette.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -391,7 +392,10 @@ private struct ContributorRow: View {
         }
         .padding(.vertical, 12)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(contrib.source.displayName), \(FusionFormat.value(contrib.value, metricKey: metricKey))\(isWinner ? ", in use" : "")")
+        // Whole-string key per variant (never a concatenated localized tail on an a11y label).
+        .accessibilityLabel(isWinner
+            ? "\(contrib.source.displayName), \(FusionFormat.value(contrib.value, metricKey: metricKey)), in use"
+            : "\(contrib.source.displayName), \(FusionFormat.value(contrib.value, metricKey: metricKey))")
     }
 }
 

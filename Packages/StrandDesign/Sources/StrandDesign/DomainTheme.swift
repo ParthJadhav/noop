@@ -109,7 +109,7 @@ public struct ScenicHeroBackground: View {
                 endRadius: 520
             )
 
-            // Design Reset (Aaron 2026-06-22): the domain bloom + starfield are removed for the flat
+            // Design Reset (2026-06-22): the domain bloom + starfield are removed for the flat
             // WHOOP look. The hero is now a clean blue-grey radial — no glow, no stars. `domain` and
             // `starCount` stay on the type for API stability but no longer paint.
 

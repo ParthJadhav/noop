@@ -196,9 +196,19 @@ object WhoopCsvExporter {
         return sb.toString()
     }
 
-    /** sleeps.csv. Stage durations from the tolerant decoder; in-bed derived from the span. */
+    /**
+     * sleeps.csv. Stage durations from the tolerant decoder; in-bed derived from the span.
+     *
+     * [cycleStart] returns the "Cycle start time" for a session — the LOCAL day-midnight of the cycle the
+     * sleep belongs to (the caller passes `AnalyticsEngine.dayString(endTs, offset) + " 00:00:00"`, the same
+     * end-day key analyze/mergeSleep use). It MUST match the corresponding physiological_cycles row's
+     * "Cycle start time" so the two CSVs reconcile by cycle; the previous `utc(startTs)` put a non-UTC user's
+     * night on a different date than its cycle (#715). Onset/Wake stay the real UTC session times, so the
+     * NOOP→NOOP round-trip is unchanged (the importer keys on sleep_onset, not Cycle start time).
+     */
     internal fun sleepsCsv(
         sessions: List<SleepSession>,
+        cycleStart: (SleepSession) -> String,
         sourceBySession: (SleepSession) -> String = { "" },
     ): String {
         val sb = StringBuilder()
@@ -212,7 +222,7 @@ object WhoopCsvExporter {
             val inBedMin = if (s.endTs > s.startTs) (s.endTs - s.startTs) / 60.0 else null
             sb.append(
                 listOf(
-                    utc(s.startTs), utc(s.startTs), utc(s.endTs), "UTC+00:00",
+                    cycleStart(s), utc(s.startTs), utc(s.endTs), "UTC+00:00",
                     // NOOP never stores a nap flag — everything exports as a main sleep so the
                     // importer keeps it (it drops nap rows).
                     "false", "", "",
@@ -310,6 +320,11 @@ object WhoopCsvExporter {
     ): String {
         val computedId = repo.computedDeviceId(deviceId)
         val hi = System.currentTimeMillis() / 1000 + 86_400
+        // physiological_cycles keys each row by the LOCAL calendar day (analyze, #277); the sleeps
+        // "Cycle start time" must use the SAME local end-day so the two CSVs reconcile by cycle — else a
+        // non-UTC user's night lands on a different date in each file (#715). Current device offset,
+        // matching how analyze bucketed the stored days.
+        val tzOffsetSec = java.time.ZoneId.systemDefault().rules.getOffset(java.time.Instant.now()).totalSeconds.toLong()
 
         // Daily: the same imported-wins merge the dashboards show; a day present under the imported
         // source is "import", otherwise it came from the on-device computed source.
@@ -360,7 +375,10 @@ object WhoopCsvExporter {
         val zip = zipBytes(
             linkedMapOf(
                 "physiological_cycles.csv" to cyclesCsv(daily, seriesByDay, sourceByDay).toByteArray(),
-                "sleeps.csv" to sleepsCsv(sleeps) { s ->
+                "sleeps.csv" to sleepsCsv(
+                    sleeps,
+                    cycleStart = { com.noop.analytics.AnalyticsEngine.dayString(it.endTs, tzOffsetSec) + " 00:00:00" },
+                ) { s ->
                     if (s.deviceId.endsWith("-noop")) "noop (APPROXIMATE)" else "import"
                 }.toByteArray(),
                 "workouts.csv" to workoutsCsv(workouts, ::workoutSource).toByteArray(),

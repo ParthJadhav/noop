@@ -17,8 +17,8 @@ public enum ChartStyle: String, CaseIterable, Identifiable, Sendable {
 
     public var label: String {
         switch self {
-        case .titanium: return "Default"
-        case .classic:  return "Classic"
+        case .titanium: return String(localized: "Default", bundle: .module)
+        case .classic:  return String(localized: "Classic", bundle: .module)
         }
     }
 
@@ -56,9 +56,9 @@ public enum AppearanceMode: String, CaseIterable, Identifiable, Sendable {
     /// Human label for the Settings control.
     public var label: String {
         switch self {
-        case .system: return "System"
-        case .light:  return "Light"
-        case .dark:   return "Dark"
+        case .system: return String(localized: "System", bundle: .module)
+        case .light:  return String(localized: "Light", bundle: .module)
+        case .dark:   return String(localized: "Dark", bundle: .module)
         }
     }
 
@@ -84,6 +84,17 @@ public enum AppearanceMode: String, CaseIterable, Identifiable, Sendable {
     public static func resolve(_ raw: String) -> AppearanceMode {
         AppearanceMode(rawValue: raw) ?? .system
     }
+}
+
+/// The day-cycle scene backdrop behind the Today screen (sunrise / day / dusk / night). Default ON —
+/// the scene is the v7 atmosphere. Some people find it distracting and want a plain dark canvas (#698),
+/// so this gates whether Today passes a `SceneScreenBackground` into its scaffold. When OFF, Today drops
+/// the scene and falls back to the opaque `surfaceBase`; the cards already sit on an opaque canvas, so
+/// they stay perfectly readable. Read in `TodayView` via `@AppStorage(SceneBackgroundPrefs.enabledKey)`
+/// and toggled from Settings → Appearance. Mirror in Kotlin via `NoopPrefs.showDayCycleBackground`.
+public enum SceneBackgroundPrefs {
+    /// The @AppStorage key shared by TodayView and the Settings toggle. Default value is `true`.
+    public static let enabledKey = "noop.showDayCycleBackground"
 }
 
 // MARK: - Light-idiom helpers

@@ -294,4 +294,38 @@ final class WhoopExportImporterTests: XCTestCase {
         XCTAssertEqual(rows[0].dayStrain, 12.5)
         XCTAssertEqual(rows[0].cycleStart, Fixtures.utc(2024, 3, 1, 6, 0, 0))
     }
+
+    // MARK: - Localized (Brazilian Portuguese) column headers (issue #692)
+
+    func testPortugueseHeaderNormalizationAliases() {
+        // Diacritic-folded pt-BR headers land on the canonical English keys.
+        XCTAssertEqual(HeaderNorm.normalize("Pontuação de recuperação %"), "recovery_score_pct")
+        XCTAssertEqual(HeaderNorm.normalize("Frequência cardíaca em repouso (bpm)"), "resting_heart_rate_bpm")
+        XCTAssertEqual(HeaderNorm.normalize("Variabilidade da frequência cardíaca (ms)"), "heart_rate_variability_ms")
+        // The leading "%" in "% de oxigênio no sangue" becomes "pct" at the front, then folds.
+        XCTAssertEqual(HeaderNorm.normalize("% de oxigênio no sangue"), "blood_oxygen_pct")
+        XCTAssertEqual(HeaderNorm.normalize("Duração profundo (Sono) (min)"), "deep_sws_duration_min")
+        XCTAssertEqual(HeaderNorm.normalize("Consistência do sono %"), "sleep_consistency_pct")
+        XCTAssertEqual(HeaderNorm.normalize("Nome da atividade"), "activity_name")
+        XCTAssertEqual(HeaderNorm.normalize("Zona 3 de FC %"), "hr_zone_3_pct")
+        XCTAssertEqual(HeaderNorm.normalize("Sesta"), "nap")
+        // "FC máx." shares the French alias and must still resolve (it is not duplicated for pt-BR).
+        XCTAssertEqual(HeaderNorm.normalize("FC máx. (bpm)"), "max_hr_bpm")
+        XCTAssertEqual(HeaderNorm.normalize("FC média (bpm)"), "average_hr_bpm")
+    }
+
+    func testPortugueseCyclesValuesParse() throws {
+        // The exact ciclos_fisiológicos.csv header from a real pt-BR export + one data row.
+        let csv = """
+        Hora de início do ciclo,Hora de fim do ciclo,Fuso horário do ciclo,Pontuação de recuperação %,Frequência cardíaca em repouso (bpm),Variabilidade da frequência cardíaca (ms),Temp. da pele (celsius),% de oxigênio no sangue,Esforço diário,Energia queimada (cal),FC máx. (bpm),FC média (bpm),Início do sono,Início da vigília,Desempenho do sono %,Frequência respiratória (rpm),Duração do sono (min),Duração na cama (min),Duração do sono leve (min),Duração profundo (Sono) (min),Duração REM (min),Duração de vigília (min),Necessidade de sono (min),Débito de sono (min),Eficácia do sono %,Consistência do sono %
+        2024-03-01 06:00:00,2024-03-02 06:00:00,UTC+00:00,80,52,95,33.5,96,12.5,2000,150,61,2024-03-01 23:00:00,2024-03-02 06:30:00,90,14,420,450,200,120,100,30,480,60,93,85
+        """
+        let rows = WhoopExportImporter().parseCycles(CSVTable(text: csv))
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows[0].recoveryScore, 80)
+        XCTAssertEqual(rows[0].restingHeartRate, 52)
+        XCTAssertEqual(rows[0].hrvMs, 95)
+        XCTAssertEqual(rows[0].dayStrain, 12.5)
+        XCTAssertEqual(rows[0].cycleStart, Fixtures.utc(2024, 3, 1, 6, 0, 0))
+    }
 }

@@ -122,7 +122,7 @@ object CircadianEngine {
         if (daysObserved < minDaysForFit || relativeAmplitude < minRelativeAmplitude) {
             val tmin = observedTempMinHour ?: wrap24(fit.acrophaseHours - acrophaseAfterCbtMinHours)
             return PhaseEstimate(tmin, fit.acrophaseHours, 0.0, PhaseConfidence.UNREADABLE,
-                "Your rhythm is hard to read right now — keep wearing it for a clearer picture.")
+                "Your rhythm is hard to read right now - keep wearing it for a clearer picture.")
         }
 
         val derivedTempMin = wrap24(fit.acrophaseHours - acrophaseAfterCbtMinHours)
@@ -177,7 +177,7 @@ object CircadianEngine {
         val magnitude = abs(shiftHours)
         if (magnitude < 0.5) {
             return JetLagPlan(ShiftDirection.NONE, 0.0, 0, emptyList(),
-                "No meaningful body-clock shift needed — you're about aligned.")
+                "No meaningful body-clock shift needed - you're about aligned.")
         }
 
         val advancing = shiftHours > 0
@@ -202,13 +202,13 @@ object CircadianEngine {
                 brightStart = wake
                 brightEnd = wrap24(wake + 2.0)
                 dimFrom = wrap24(sleep - 2.0)
-                guidance = "Get bright light early after waking and keep the evening dim — this nudges your " +
+                guidance = "Get bright light early after waking and keep the evening dim - this nudges your " +
                     "clock earlier. Aim for lights-out around ${clock(sleep)}."
             } else {
                 brightStart = wrap24(sleep - 3.0)
                 brightEnd = wrap24(sleep - 1.0)
                 dimFrom = wrap24(wake)
-                guidance = "Get bright light in the evening and go easy on bright morning light — this nudges " +
+                guidance = "Get bright light in the evening and go easy on bright morning light - this nudges " +
                     "your clock later. Aim for lights-out around ${clock(sleep)}."
             }
             plan.add(DayPlan(i, brightStart, brightEnd, dimFrom, sleep, wake, guidance))

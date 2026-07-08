@@ -47,7 +47,7 @@ enum AppleDemoSeeder {
     /// `.paired` (not `.active`) keeps the WHOOP active, so the SourceCoordinator stays dormant and the
     /// existing WHOOP path is untouched. No-op once a second device already exists.
     private static func seedDemoDeviceIfNeeded(into store: WhoopStore) {
-        let registry = DeviceRegistryStore(dbQueue: store.registryQueue)
+        let registry = DeviceRegistryStore(dbQueue: store.registryWriter)
         guard let devices = try? registry.all() else { return }
         guard devices.allSatisfy({ $0.id == whoop }) else { return }  // only the seeded WHOOP present
         let now = Int(Date().timeIntervalSince1970)

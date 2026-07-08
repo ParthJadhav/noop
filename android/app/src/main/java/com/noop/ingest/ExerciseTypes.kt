@@ -33,7 +33,18 @@ object ExerciseTypes {
         EX.EXERCISE_TYPE_BADMINTON to "Badminton",
         EX.EXERCISE_TYPE_TENNIS to "Tennis",
         EX.EXERCISE_TYPE_SQUASH to "Squash",
+        EX.EXERCISE_TYPE_RACQUETBALL to "Racquetball",
         EX.EXERCISE_TYPE_TABLE_TENNIS to "Table tennis",
+        EX.EXERCISE_TYPE_VOLLEYBALL to "Volleyball",
+        // Martial arts covers the user-requested Jiu-Jitsu plus karate/judo/MMA etc. (#768).
+        EX.EXERCISE_TYPE_MARTIAL_ARTS to "Martial arts",
+        EX.EXERCISE_TYPE_DANCING to "Dancing",
+        EX.EXERCISE_TYPE_GOLF to "Golf",
+        EX.EXERCISE_TYPE_ROCK_CLIMBING to "Climbing",
+        EX.EXERCISE_TYPE_STRETCHING to "Stretching",
+        // Snow sports have a route, so they default GPS on (see DISTANCE_TYPES). (#768)
+        EX.EXERCISE_TYPE_SKIING to "Skiing",
+        EX.EXERCISE_TYPE_SNOWBOARDING to "Snowboarding",
         EX.EXERCISE_TYPE_OTHER_WORKOUT to "Other",
     )
 
@@ -47,6 +58,19 @@ object ExerciseTypes {
      */
     val EXTRA: List<Pair<String, Int>> = listOf(
         "Padel" to EX.EXERCISE_TYPE_OTHER_WORKOUT,
+        // Pickleball (#768): a fast-growing racquet sport HC has no type for → writes as "Other",
+        // stays "Pickleball" on our own rows. No route → GPS off.
+        "Pickleball" to EX.EXERCISE_TYPE_OTHER_WORKOUT,
+        // Bowling (D#850): HC has no type for it → writes as "Other", stays "Bowling" on our own
+        // rows. No route → GPS off.
+        "Bowling" to EX.EXERCISE_TYPE_OTHER_WORKOUT,
+        // #714 indoor treadmill walk. HC has a treadmill-RUN type but no treadmill-WALK type, so this
+        // rides on plain WALKING for writeback while keeping its own "Treadmill walk" label. Kept OUT of
+        // DISTANCE_TYPES so GPS defaults off (an indoor session has no route).
+        "Treadmill walk" to EX.EXERCISE_TYPE_WALKING,
+        // #714 bodybuilding. No dedicated HC type, so it rides on STRENGTH_TRAINING for writeback and
+        // keeps "Bodybuilding" on our own rows. No route → GPS off.
+        "Bodybuilding" to EX.EXERCISE_TYPE_STRENGTH_TRAINING,
     )
 
     /** Types where a route makes sense -> GPS defaults on. */
@@ -57,6 +81,9 @@ object ExerciseTypes {
         EX.EXERCISE_TYPE_BIKING,
         EX.EXERCISE_TYPE_SWIMMING_OPEN_WATER,
         EX.EXERCISE_TYPE_ROWING,
+        // Snow sports cover ground → a route makes sense, GPS defaults on. (#768)
+        EX.EXERCISE_TYPE_SKIING,
+        EX.EXERCISE_TYPE_SNOWBOARDING,
     )
 
     fun nameFor(type: Int): String = NAMES[type] ?: "Workout"

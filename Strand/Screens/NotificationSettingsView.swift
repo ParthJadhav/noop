@@ -33,8 +33,8 @@ struct NotificationSettingsView: View {
     // MARK: - Master
 
     private var masterCard: some View {
-        AlertSection(icon: "bell.badge.fill", title: "Wrist alerts",
-                     blurb: "When on, NOOP taps your wrist for the apps you pick below — so you can leave the \(Platform.deviceNoun) and still feel what matters.") {
+        AlertSection(icon: "bell.badge.fill", title: String(localized: "Wrist alerts"),
+                     blurb: String(localized: "When on, NOOP taps your wrist for the apps you pick below, so you can leave the \(Platform.deviceNoun) and still feel what matters.")) {
             VStack(alignment: .leading, spacing: NoopMetrics.space4) {
                 Toggle(isOn: $store.masterEnabled) {
                     Text("Enable wrist alerts")
@@ -46,7 +46,7 @@ struct NotificationSettingsView: View {
 
                 HStack(spacing: 10) {
                     StatePill("\(strapPillTitle)", tone: strapPillTone, pulsing: live.connected)
-                    StatePill("\(store.enabledCount) app\(store.enabledCount == 1 ? "" : "s") on",
+                    StatePill(store.enabledCount == 1 ? "1 app on" : "\(store.enabledCount) apps on",
                               tone: store.enabledCount > 0 ? .positive : .neutral,
                               showsDot: false)
                     Spacer(minLength: 0)
@@ -72,7 +72,7 @@ struct NotificationSettingsView: View {
                 .foregroundStyle(StrandPalette.accent)
                 .font(.system(size: 13))
                 .accessibilityHidden(true)
-            Text("Wrist delivery isn't live yet — it needs a small on-device watcher (coming in an update) to read macOS notifications. Everything stays on this Mac. Your choices are saved now and will apply automatically once delivery ships.")
+            Text("Wrist delivery isn't live yet. It needs a small on-device watcher (coming in an update) to read macOS notifications. Everything stays on this Mac. Your choices are saved now and will apply automatically once delivery ships.")
                 .font(StrandFont.footnote)
                 .foregroundStyle(StrandPalette.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -88,9 +88,9 @@ struct NotificationSettingsView: View {
     /// Strap status — mirrors SettingsView's three-state mapping so the pill, its tone and its
     /// pulse always agree (and never reads "connected" while the strap is offline).
     private var strapPillTitle: String {
-        if live.connected { return "Strap connected" }
-        if live.bonded { return "Strap idle" }          // paired but offline — won't deliver
-        return "Strap not connected"
+        if live.connected { return String(localized: "Strap connected") }
+        if live.bonded { return String(localized: "Strap idle") }          // paired but offline — won't deliver
+        return String(localized: "Strap not connected")
     }
     private var strapPillTone: StrandTone {
         if live.connected { return .positive }
@@ -115,8 +115,8 @@ struct NotificationSettingsView: View {
 
     private var emptyAppsCard: some View {
         AlertSection(icon: "bell.slash",
-                     title: "No supported apps found",
-                     blurb: "NOOP looks for known notification apps on \(Platform.deviceNounPhrase) — Mail, Outlook, WhatsApp, Teams, Messages, Slack and similar. Install one and it'll appear here automatically.") {
+                     title: String(localized: "No supported apps found"),
+                     blurb: String(localized: "NOOP looks for known notification apps on \(Platform.deviceNounPhrase): Mail, Outlook, WhatsApp, Teams, Messages, Slack and similar. Install one and it'll appear here automatically.")) {
             EmptyView()
         }
     }
@@ -223,15 +223,15 @@ struct NotificationSettingsView: View {
     // MARK: - Behaviour
 
     private var behaviourCard: some View {
-        AlertSection(icon: "slider.horizontal.3", title: "Behaviour",
-                     blurb: "Fine-tune when alerts reach your wrist.") {
+        AlertSection(icon: "slider.horizontal.3", title: String(localized: "Behaviour"),
+                     blurb: String(localized: "Fine-tune when alerts reach your wrist.")) {
             VStack(spacing: 0) {
-                FormToggleRow(label: "Only buzz when worn",
-                              help: "Skip alerts when the strap is off your wrist.",
+                FormToggleRow(label: String(localized: "Only buzz when worn"),
+                              help: String(localized: "Skip alerts when the strap is off your wrist."),
                               isOn: $store.onlyWhenWorn)
                 rowDivider
-                FormToggleRow(label: "Quiet hours",
-                              help: "Mute wrist alerts overnight.",
+                FormToggleRow(label: String(localized: "Quiet hours"),
+                              help: String(localized: "Mute wrist alerts overnight."),
                               isOn: $store.quietHoursEnabled)
                 if store.quietHoursEnabled {
                     rowDivider
@@ -294,7 +294,7 @@ private struct AlertSection<Content: View>: View {
     let title: String
     var blurb: String? = nil
     /// The section overline ("Alerts" by default). Lets a section group itself in the Bevel idiom.
-    var overline: String = "Alerts"
+    var overline: String = String(localized: "Alerts")
     @ViewBuilder var content: () -> Content
 
     var body: some View {

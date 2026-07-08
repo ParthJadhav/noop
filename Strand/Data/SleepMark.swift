@@ -86,8 +86,10 @@ struct SleepMark: Equatable, Sendable {
     /// Identical copy on both platforms (Kotlin twin: SleepMark.confirmation()).
     var confirmation: String {
         let clock = SleepMark.clockFormatter.string(from: date)
-        let what = type == .bedtime ? "bedtime" : "wake-up"
-        return "Logged \(what) at \(clock)."
+        // Two whole-phrase variants (not a stitched noun) so each localizes naturally.
+        return type == .bedtime
+            ? String(localized: "Logged bedtime at \(clock).")
+            : String(localized: "Logged wake-up at \(clock).")
     }
 
     // MARK: - Constants / formatters

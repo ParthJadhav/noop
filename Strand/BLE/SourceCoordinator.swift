@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import WhoopStore
+import OuraProtocol
 
 /// Runs exactly ONE device's live BLE at a time, driven by `DeviceRegistry.activeDeviceId`.
 ///
@@ -68,7 +69,19 @@ final class SourceCoordinator: ObservableObject {
     /// to a `.huami` device. Like the others it's a non-WHOOP live source sharing the same strap edge —
     /// exactly one of the non-WHOOP sources is ever live at a time.
     private var huamiSource: HuamiHRSource?
-    /// The deviceId the active non-WHOOP source (`standardSource` / `ftmsSource` / `huamiSource`) runs for.
+    /// The lazily-created EXPERIMENTAL Oura source (Oura Ring gen 3/4/5). nil until the first switch to a
+    /// `.oura` device. Like the others it's a non-WHOOP live source sharing the same strap edge: exactly
+    /// one of the non-WHOOP sources is ever live at a time. It owns its OWN `CBCentralManager` and never
+    /// references `BLEManager`/`WhoopBleClient`, so the WHOOP path cannot regress.
+    @Published private(set) var ouraSource: OuraLiveSource?
+    /// The deviceId for which the user has granted explicit adopt consent (the wizard's irreversible gate +
+    /// "Take over this ring?" confirm). The NEXT `startOuraSource` for THIS id builds its live source with
+    /// `adoptIntent == true`, so the dangerous `0x24` key install can run for exactly that adopt session and
+    /// nothing else. Cleared as soon as it is consumed (or when adopt is cancelled), so a later reconnect of
+    /// the same ring is a normal read-only session that never re-installs a key.
+    private var pendingAdoptDeviceId: String?
+    /// The deviceId the active non-WHOOP source (`standardSource` / `ftmsSource` / `huamiSource` /
+    /// `ouraSource`) runs for.
     private var activeStrapId: String?
     /// True once we've transitioned onto a generic strap. While false (the default / WHOOP-active
     /// state), switching to WHOOP is a pure no-op — we never issue a redundant WHOOP (re)scan.
@@ -77,6 +90,11 @@ final class SourceCoordinator: ObservableObject {
     /// every WHOOP→WHOOP re-point. nil until the first WHOOP activation is handled. Lets us tell "same
     /// WHOOP, no change" (no churn) from "a DIFFERENT WHOOP became active" (re-point + reconnect).
     private var activeWhoopId: String?
+    /// The uuid of the strap the WHOOP link is CURRENTLY connected to (from `connectedPeripheralUUID`).
+    /// Lets a WHOOP→WHOOP make-active adopt IN PLACE when the newly-activated row is the same physical
+    /// strap (#74 keep): a stop/start churn there would drop the live link and reconnect via scan. Cleared
+    /// on disconnect (nil uuid).
+    private var connectedWhoopUuid: String?
 
     private var cancellables = Set<AnyCancellable>()
 
@@ -136,16 +154,46 @@ final class SourceCoordinator: ObservableObject {
 
     /// Resolve the device for `id` and reconcile which live source is running. Idempotent and guarded
     /// against redundant churn:
+    ///   • An Apple Watch (`.liveAppleWatch`) → a HealthKit pseudo-device, NOT a BLE peripheral. Hand it
+    ///     to the HealthKit-backed path and DO NOTHING to the BLE world (no scan/connect, and crucially
+    ///     no `stopWhoop()`: the watch must never tear down a live WHOOP link).
     ///   • A WHOOP, same one we're already on (incl. the single-WHOOP first launch) → DO NOTHING new.
     ///   • A DIFFERENT WHOOP → re-point the WHOOP connection (preferred peripheral + deviceId) + reconnect.
     ///   • WHOOP active after a strap → stop the strap source + resume WHOOP.
     ///   • A generic strap → pause WHOOP + (re)start `StandardHRSource` for that strap's id.
     func activeDeviceChanged(to id: String) {
+        // The Apple Watch is a HealthKit source with `peripheralId: nil` (see `AppleWatchDevice`): there is
+        // no BLE peripheral to connect, and the M1 live read happens entirely in `HealthKitBridge`'s
+        // observers + sync, off this BLE coordinator. Short-circuit BEFORE the WHOOP branch so we never
+        // route it through `switchToStrap` (which would `stopWhoop()` and then BLE-scan a peripheral that
+        // doesn't exist, tearing down the real WHOOP for nothing).
+        if sourceKind(for: id) == .liveAppleWatch {
+            switchToAppleWatch(id: id)
+            return
+        }
+
         if isWhoop(id) {
             switchToWhoop(id: id)
         } else {
             switchToStrap(id: id)
         }
+    }
+
+    /// Active device is the Apple Watch (a `.liveAppleWatch` HealthKit pseudo-device). It has no BLE
+    /// peripheral, so this coordinator owns NONE of its data path: `HealthKitBridge` already streams it
+    /// via HealthKit observers + background delivery and persists under the `apple-health` source. The one
+    /// thing we MUST do here is leave the BLE world alone: do NOT `stopWhoop()` (a HealthKit device can't
+    /// be allowed to drop a live WHOOP link) and do NOT start any BLE source. If a non-WHOOP BLE source
+    /// (a strap / FTMS machine / Huami band) was the previously-active live source, tear it down so we're
+    /// not streaming a strap that's no longer the active device, then mark ourselves off-strap so the
+    /// next WHOOP activation resumes cleanly. The WHOOP, if it was active, is deliberately untouched.
+    private func switchToAppleWatch(id: String) {
+        if onStrap {
+            tearDownNonWhoopSource()
+            activeStrapId = nil
+            onStrap = false
+        }
+        // No `stopWhoop()`, no BLE scan/connect: the watch lives entirely in HealthKitBridge.
     }
 
     /// Active device is a WHOOP (`id`). Three sub-cases, all churn-guarded:
@@ -172,6 +220,11 @@ final class SourceCoordinator: ObservableObject {
             // seeded "my-whoop" (peripheralId nil, id "my-whoop") this is setPreferredPeripheral(nil)
             // and NO setActiveDeviceId / NO scan / NO disconnect: byte-for-byte today's behaviour.
             pointWhoop(at: id, peripheralId: peripheralId)
+        } else if let peripheralId, peripheralId.caseInsensitiveCompare(connectedWhoopUuid ?? "") == .orderedSame {
+            // WHOOP → the SAME physical strap (make-active on the row we're already connected to): adopt IN
+            // PLACE. A stop/start churn here would drop the #74-kept live link and force a scan reconnect.
+            // Just re-point the targeting so samples land under this id; the connection is untouched.
+            pointWhoop(at: id, peripheralId: peripheralId)
         } else {
             // WHOOP → a DIFFERENT WHOOP: drop the current link, re-point, and reconnect.
             stopWhoop()
@@ -195,6 +248,14 @@ final class SourceCoordinator: ObservableObject {
     /// Active device is a generic strap. Pause WHOOP (once, on the WHOOP→strap edge) and run the
     /// isolated `StandardHRSource` for this strap's deviceId. Re-running for the SAME id is a no-op.
     private func switchToStrap(id: String) {
+        // Belt-and-braces: the Apple Watch is handled (and returned) in `activeDeviceChanged` before we
+        // ever get here, but guard the case explicitly so a future caller reaching `switchToStrap`
+        // directly can NEVER stop the WHOOP or BLE-scan a non-existent peripheral for a HealthKit device.
+        if sourceKind(for: id) == .liveAppleWatch {
+            switchToAppleWatch(id: id)
+            return
+        }
+
         guard activeStrapId != id else { return }   // already streaming this strap → no churn
 
         // Leaving WHOOP for the first non-WHOOP source: pause WHOOP's BLE via its existing teardown.
@@ -204,11 +265,14 @@ final class SourceCoordinator: ObservableObject {
         tearDownNonWhoopSource()
 
         // Route by sourceKind: an FTMS gym machine runs FTMSSource; an EXPERIMENTAL Huami device
-        // (Amazfit / Zepp / Mi Band) runs the HuamiHRSource; everything else is a generic HR strap on
-        // StandardHRSource. All are non-WHOOP live sources sharing this same strap edge.
+        // (Amazfit / Zepp / Mi Band) runs the HuamiHRSource; an EXPERIMENTAL Oura ring runs the
+        // OuraLiveSource; everything else is a generic HR strap on StandardHRSource. All are non-WHOOP
+        // live sources sharing this same strap edge. (`.liveAppleWatch` never reaches this switch: it's
+        // short-circuited above.)
         switch sourceKind(for: id) {
         case .ftms:  startFTMSSource(id: id)
         case .huami: startHuamiSource(id: id)
+        case .oura:  startOuraSource(id: id)
         default:     startStandardSource(id: id)
         }
         activeStrapId = id
@@ -275,12 +339,55 @@ final class SourceCoordinator: ObservableObject {
         huamiSource = source
     }
 
-    /// Stop whichever non-WHOOP source (standard strap, FTMS machine, or Huami device) is live, and drop
-    /// the reference. Idempotent. Exactly one is ever live, but we stop all defensively.
+    /// Start the EXPERIMENTAL Oura source (Oura Ring gen 3/4/5) for `id`, driven by the clean-room
+    /// `OuraProtocol.OuraDriver`. Decoded raw signals (HR / IBI / HRV / SpO2 / temp / sleep-phase / battery)
+    /// ride the SAME `LiveState` + persist channels as the other sources, so NOOP scores the Oura day with
+    /// its OWN Charge/Rest exactly like a WHOOP day, while Oura's encrypted readiness/sleep scores are never
+    /// read or surfaced. The ring generation is recovered from the registry row's `model` string via
+    /// `OuraRingGen.from(model:)`; the 16-byte install key is read from the Keychain via `OuraKeyStore`
+    /// (nil → the source drives its HONEST `needsPairing` path and streams nothing, never a fake value).
+    private func startOuraSource(id: String) {
+        let ringGen = OuraRingGen.from(model: model(for: id) ?? "")
+        // Adopt consent is consumed for exactly this start: only the session the user explicitly granted may
+        // install a key (s3.2). Clearing it here means a later reconnect of the SAME ring is a normal
+        // read-only session that re-authenticates with the now-stored key and never re-installs.
+        let adoptIntent = (pendingAdoptDeviceId == id)
+        pendingAdoptDeviceId = nil
+        let source = OuraLiveSource(
+            live: live,
+            deviceId: id,
+            ringGen: ringGen,
+            authKey: { OuraKeyStore.read(deviceId: id) },
+            persist: { [storeHandle] streams in
+                Task { if let store = await storeHandle() { _ = try? await store.insert(streams, deviceId: id) } }
+            },
+            log: straplog,
+            onBattery: { [live] pct in live.setBattery(Double(pct)) },
+            adoptIntent: adoptIntent)
+        if adoptIntent { straplog("Oura: adopt consent granted - this session may install NOOP's key") }
+        if let pid = peripheralId(for: id), let uuid = UUID(uuidString: pid) {
+            source.connect(uuid)
+        } else {
+            source.scan()
+        }
+        ouraSource = source
+    }
+
+    /// Grant explicit adopt consent for `deviceId` so the NEXT live Oura session for it (started when it
+    /// becomes the active device) may run the dangerous key install (s3.2). Called by the wizard AFTER its
+    /// irreversible-consent gate + "Take over this ring?" confirm, immediately before the ring is registered
+    /// active. Per OURA_PROTOCOL.md s3.2 the install is a one-time, consent-gated provisioning write.
+    func requestOuraAdopt(deviceId: String) {
+        pendingAdoptDeviceId = deviceId
+    }
+
+    /// Stop whichever non-WHOOP source (standard strap, FTMS machine, Huami device, or Oura ring) is live,
+    /// and drop the reference. Idempotent. Exactly one is ever live, but we stop all defensively.
     private func tearDownNonWhoopSource() {
         standardSource?.stop(); standardSource = nil
         ftmsSource?.stop(); ftmsSource = nil
         huamiSource?.stop(); huamiSource = nil
+        ouraSource?.stop(); ouraSource = nil
     }
 
     // MARK: - Identity adoption
@@ -301,6 +408,10 @@ final class SourceCoordinator: ObservableObject {
     ///       RE-ADOPT the working strap so we stop looping on the strap that won't bond. See #52.
     ///   • it already matches → nothing to write.
     private func connectedPeripheralChanged(to uuid: String?) {
+        // Track the live strap's uuid for the WHOOP->WHOOP adopt-in-place skip (#74). nil is a
+        // disconnect/never-connected republish: clear it so a later make-active can't wrongly match a stale
+        // link, then fall through to the existing ignore.
+        connectedWhoopUuid = uuid
         guard let uuid else { return }
 
         let activeId = registry.activeDeviceId
@@ -339,9 +450,15 @@ final class SourceCoordinator: ObservableObject {
 
     /// The registered `sourceKind` for a device id, or nil if the registry doesn't know it. Routes the
     /// non-WHOOP switch to the right isolated source (`.ftms` → FTMSSource, `.huami` → HuamiHRSource,
-    /// anything else → StandardHRSource).
+    /// `.oura` → OuraLiveSource, anything else → StandardHRSource).
     private func sourceKind(for id: String) -> SourceKind? {
         registry.devices.first(where: { $0.id == id })?.sourceKind
+    }
+
+    /// The stored `model` string for a device id ("Oura Ring 3/4/5"), if the registry knows it. Used to
+    /// recover the Oura ring generation via `OuraRingGen.from(model:)`; nil for an unknown id.
+    private func model(for id: String) -> String? {
+        registry.devices.first(where: { $0.id == id })?.model
     }
 
     /// Classify a device id as WHOOP vs a generic strap. WHOOP if the id is the canonical

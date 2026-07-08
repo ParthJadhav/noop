@@ -31,9 +31,11 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.noop.analytics.AutoWorkoutDetector
+import com.noop.analytics.AutoWorkoutDetectorTrace
 import com.noop.data.DailyMetric
 import kotlinx.coroutines.launch
 import java.time.Instant
+import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
@@ -73,11 +75,30 @@ private val autoNudgeTimeFmt: DateTimeFormatter =
     DateTimeFormatter.ofLocalizedTime(FormatStyle.SHORT)
         .withLocale(Locale.getDefault()).withZone(ZoneId.systemDefault())
 
+private val autoNudgeDateFmt: DateTimeFormatter =
+    // Localized MEDIUM date ("23 Jun 2026") for a bout older than yesterday. Mirrors the iOS card.
+    DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM)
+        .withLocale(Locale.getDefault()).withZone(ZoneId.systemDefault())
+
 private fun hhmm(epochSec: Long): String = autoNudgeTimeFmt.format(Instant.ofEpochSecond(epochSec))
 
-/** "Looks like a workout around 14:05–14:32 (avg HR 148, 27 min). Save it?" — verbatim from iOS. */
+/** A relative LOCAL-day prefix for the prompt (#719): "" when the bout started today, "yesterday " when
+ *  it was yesterday, else "on <date> ". The card showed HH:mm only, so a late-night bout could read as
+ *  today; this anchors it to the local day instead of UTC. Mirrors iOS `AutoWorkoutCard.dayLabel`. */
+private fun dayLabel(epochSec: Long): String {
+    val zone = ZoneId.systemDefault()
+    val day = Instant.ofEpochSecond(epochSec).atZone(zone).toLocalDate()
+    val today = LocalDate.now(zone)
+    return when (day) {
+        today -> ""
+        today.minusDays(1) -> "yesterday "
+        else -> "on ${autoNudgeDateFmt.format(Instant.ofEpochSecond(epochSec))} "
+    }
+}
+
+/** "Looks like a workout [yesterday ]around 14:05–14:32 (avg HR 148, 27 min). Save it?" Mirrors iOS. */
 private fun promptText(w: AutoWorkoutDetector.DetectedWorkout): String =
-    "Looks like a workout around ${hhmm(w.startSec)}–${hhmm(w.endSec)} " +
+    "Looks like a workout ${dayLabel(w.startSec)}around ${hhmm(w.startSec)} - ${hhmm(w.endSec)} " +
         "(avg HR ${w.avgBpm}, ${w.durationMin} min). Save it?"
 
 @Composable
@@ -225,12 +246,30 @@ private suspend fun autoDetectCandidate(
             repo.workouts("lifting", fromSec, nowSec)
         ).map { it.startTs to it.endTs }
 
-    val candidates = AutoWorkoutDetector.detect(
-        hr = hr,
-        restingHR = restingHr,
-        gravity = emptyList(), // HR-only MVP (matches iOS passing motion: nil)
-        savedWorkouts = saved,
-    )
+    // Workouts & GPS test mode (Test Centre): when on, run the diagnostic twin which returns the SAME
+    // candidates detect(...) does (it reuses detect verbatim) plus the inputs / thresholds / per-window why
+    // trace, routed to the .workouts-tagged strap log. Zero-cost when off: one SharedPreferences bool read,
+    // and detectTrace is only called on that branch, so the default path runs the untraced detect.
+    val candidates = if (com.noop.testcentre.TestCentre.from(context)
+            .active(com.noop.testcentre.TestDomain.WORKOUTS)
+    ) {
+        val (results, trace) = AutoWorkoutDetectorTrace.detectTrace(
+            hr = hr,
+            restingHR = restingHr,
+            gravity = emptyList(),
+            savedWorkouts = saved,
+            path = "autoDetect",
+        )
+        for (line in trace) viewModel.ble.externalLog(line, com.noop.testcentre.TestDomain.WORKOUTS)
+        results
+    } else {
+        AutoWorkoutDetector.detect(
+            hr = hr,
+            restingHR = restingHr,
+            gravity = emptyList(), // HR-only MVP (matches iOS passing motion: nil)
+            savedWorkouts = saved,
+        )
+    }
     // Drop anything the user already dismissed, then take the most recent. Mirrors iOS exactly.
     val dismissed = AutoWorkoutPrefs.dismissed(context)
     return candidates

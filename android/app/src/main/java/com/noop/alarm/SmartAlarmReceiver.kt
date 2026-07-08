@@ -59,9 +59,9 @@ class SmartAlarmReceiver : BroadcastReceiver() {
         )
         val title = "Good morning"
         val body = if (smart) {
-            "You're in a lighter sleep phase — time to wake up."
+            "You're in a lighter sleep phase. Time to wake up."
         } else {
-            "Your wake window has ended — time to get up."
+            "Your wake window has ended. Time to get up."
         }
         return NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_stat_heart)

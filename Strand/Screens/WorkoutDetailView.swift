@@ -54,7 +54,17 @@ struct WorkoutDetailView: View {
 
     var body: some View {
         ScreenScaffold(title: "\(WorkoutSource.displaySport(row.sport))",
-                       subtitle: "\(dateLabel(row.startTs))") {
+                       subtitle: "\(dateLabel(row.startTs))",
+                       // PERF: chart/map-heavy column (a MapKit route map, the session HR curve, the
+                       // zone-split chart and the effort card). The LazyVStack path builds the off-screen
+                       // ones on demand — byte-identical layout — so a tall detail doesn't materialise the
+                       // map + both charts before the header is even on screen.
+                       lazy: true,
+                       // The day-of-sky liquid backdrop, matching the Workouts list this detail opens from
+                       // and every other liquid screen. Fixed and full-bleed; it does not scroll. This
+                       // screen is presented in a sheet wrapped in a NavigationStack by WorkoutsView, so it
+                       // needs no extra macOS NavigationStack of its own.
+                       topBackground: liquidScaffoldSky()) {
             headerCard
             statStrip
             routeCard
@@ -149,7 +159,7 @@ struct WorkoutDetailView: View {
                   alignment: .leading, spacing: NoopMetrics.gap) {
             StatTile(label: "Duration",
                      value: durationLabel(row.durationS),
-                     caption: "active",
+                     caption: String(localized: "active"),
                      accent: StrandPalette.effortColor)
             StatTile(label: "Avg HR",
                      value: row.avgHr.map { "\($0)" } ?? "–",
@@ -166,7 +176,7 @@ struct WorkoutDetailView: View {
             if row.distanceM != nil {
                 StatTile(label: "Distance",
                          value: distanceLabel(row.distanceM),
-                         caption: "covered",
+                         caption: String(localized: "covered"),
                          accent: StrandPalette.metricCyan)
             }
         }
@@ -190,10 +200,10 @@ struct WorkoutDetailView: View {
                                                         style: .continuous))
                             .accessibilityLabel(routeAccessibilityLabel)
                         HStack(spacing: 0) {
-                            routeStat("Distance", distanceLabel(row.distanceM),
+                            routeStat(String(localized: "Distance"), distanceLabel(row.distanceM),
                                       tint: StrandPalette.metricCyan)
-                            routeStat("Avg pace", paceLabel, tint: StrandPalette.effortBright)
-                            routeStat("Points", "\(route.count)", tint: StrandPalette.textSecondary)
+                            routeStat(String(localized: "Avg pace"), paceLabel, tint: StrandPalette.effortBright)
+                            routeStat(String(localized: "Points"), "\(route.count)", tint: StrandPalette.textSecondary)
                         }
                         .padding(NoopMetrics.cardPadding)
                     }
@@ -234,7 +244,7 @@ struct WorkoutDetailView: View {
 
     private var routeAccessibilityLabel: String {
         let dist = distanceLabel(row.distanceM)
-        return "Map of your \(WorkoutSource.displaySport(row.sport)) route, \(dist)."
+        return String(localized: "Map of your \(WorkoutSource.displaySport(row.sport)) route, \(dist).")
     }
 
     // MARK: - HR curve
@@ -244,33 +254,54 @@ struct WorkoutDetailView: View {
             let values = hrPoints.map(\.value)
             let lo = max(0, (values.min() ?? 60) - 8)
             let hi = (values.max() ?? 180) + 8
-            ChartCard(
-                title: "HEART RATE",
-                subtitle: "Beats per minute across the session",
-                trailing: row.avgHr.map { "avg \($0)" },
-                tint: StrandPalette.effortColor
-            ) {
-                TrendChart(
-                    points: hrPoints,
-                    gradient: StrandPalette.effortGradient,
-                    valueRange: lo...hi,
-                    showsArea: true,
-                    valueFormat: { "\(Int($0.rounded())) bpm" },
-                    dateFormat: { Self.tooltipTime.string(from: $0) },
-                    accessibilityLabel: "Heart rate during \(WorkoutSource.displaySport(row.sport))"
-                )
-            } footer: {
-                ChartFooter([
-                    ("Avg", row.avgHr.map { "\($0) bpm" } ?? "–"),
-                    ("Peak", row.maxHr.map { "\($0) bpm" } ?? "\(Int((values.max() ?? 0).rounded())) bpm"),
-                    ("Low", "\(Int((values.min() ?? 0).rounded())) bpm"),
-                ])
+            VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+                ChartCard(
+                    title: "HEART RATE",
+                    subtitle: String(localized: "Beats per minute across the session"),
+                    trailing: row.avgHr.map { String(localized: "avg \($0)") },
+                    tint: StrandPalette.effortColor
+                ) {
+                    TrendChart(
+                        points: hrPoints,
+                        gradient: StrandPalette.effortGradient,
+                        valueRange: lo...hi,
+                        showsArea: true,
+                        valueFormat: { String(localized: "\(Int($0.rounded())) bpm") },
+                        dateFormat: { Self.tooltipTime.string(from: $0) },
+                        accessibilityLabel: String(localized: "Heart rate during \(WorkoutSource.displaySport(row.sport))")
+                    )
+                } footer: {
+                    ChartFooter([
+                        ("Avg", row.avgHr.map { String(localized: "\($0) bpm") } ?? "–"),
+                        ("Peak", row.maxHr.map { String(localized: "\($0) bpm") } ?? String(localized: "\(Int((values.max() ?? 0).rounded())) bpm")),
+                        ("Low", String(localized: "\(Int((values.min() ?? 0).rounded())) bpm")),
+                    ])
+                }
+                // #18: the row's Avg HR can be EDITED on the manual sheet while the graph, zones and Effort
+                // stay from the recorded session (preservingCaptured keeps the captured strain/zones). When
+                // the typed average disagrees materially with this trace's own mean AND the row carries that
+                // captured strain/zones, say so plainly. We do NOT re-score from the typed number.
+                if avgHrEditedDisclosure(traceMean: values.reduce(0, +) / Double(values.count)) {
+                    Text("The average above was edited. The graph, zones and Effort stay from the recorded session.")
+                        .font(StrandFont.footnote)
+                        .foregroundStyle(StrandPalette.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         } else if loaded {
             NoopCard {
                 emptyNote("No heart-rate samples were recorded over this session's window.")
             }
         }
+    }
+
+    /// #18: whether the displayed Avg HR was edited away from what this HR trace implies. True only when the
+    /// row carries CAPTURED strain or zones (so the graph/zones/Effort are from a real recording, not the
+    /// typed value) AND the row's avgHr differs from the trace mean by more than a small tolerance. The
+    /// tolerance absorbs ordinary rounding/bucketing drift so an unedited session never trips the note.
+    private func avgHrEditedDisclosure(traceMean: Double) -> Bool {
+        guard let avg = row.avgHr, row.strain != nil || row.zonesJSON != nil else { return false }
+        return abs(Double(avg) - traceMean) > 3
     }
 
     // MARK: - HR zones
@@ -282,7 +313,7 @@ struct WorkoutDetailView: View {
             VStack(alignment: .leading, spacing: NoopMetrics.gap) {
                 SectionHeader("HR Zones",
                               overline: zonesFromImport ? "Whoop import" : "From strap HR",
-                              trailing: "\(Int(total.rounded()))m in zone")
+                              trailing: String(localized: "\(Int(total.rounded()))m in zone"))
                 NoopCard(tint: StrandPalette.effortColor) {
                     VStack(alignment: .leading, spacing: 12) {
                         GeometryReader { geo in
@@ -303,9 +334,7 @@ struct WorkoutDetailView: View {
                         .frame(height: 34)
                         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                         .accessibilityElement(children: .ignore)
-                        .accessibilityLabel("Heart-rate zone split: " + (1...5).map {
-                            "zone \($0) \(Int((z[$0 - 1] / total * 100).rounded())) percent"
-                        }.joined(separator: ", "))
+                        .accessibilityLabel(String(localized: "Heart-rate zone split: \((1...5).map { String(localized: "zone \($0) \(Int((z[$0 - 1] / total * 100).rounded())) percent") }.joined(separator: ", "))"))
                         Divider().overlay(StrandPalette.hairline)
                         HStack(spacing: 0) {
                             ForEach(0..<5, id: \.self) { i in
@@ -314,7 +343,7 @@ struct WorkoutDetailView: View {
                         }
                         Text(zonesFromImport
                              ? "WHOOP's imported per-zone split for this session."
-                             : "Time in each %HRmax zone, derived from the strap's heart rate over this window — approximate.")
+                             : "Time in each %HRmax zone, derived from the strap's heart rate over this window (approximate).")
                             .font(StrandFont.footnote)
                             .foregroundStyle(StrandPalette.textTertiary)
                     }
@@ -344,20 +373,37 @@ struct WorkoutDetailView: View {
     // MARK: - Effort contribution
 
     private func effortCard(strain: Double) -> some View {
-        VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+        // The session's Effort as the signature liquid gauge: a `LiquidVessel` tinted Effort, filled to the
+        // session's contribution on the user's selected scale, with the value counting up over it — the
+        // same hero language as the Workouts list's Typical Effort gauge and the Sleep Rest hero. The
+        // explanatory sentence keeps its place beside the gauge.
+        let displayValue = UnitFormatter.effortValue(strain, scale: effortScale)
+        let scaleMax: Double = effortScale == .whoop ? 21 : 100
+        let fraction = max(0, min(1, displayValue / scaleMax))
+        return VStack(alignment: .leading, spacing: NoopMetrics.gap) {
             SectionHeader("Effort", overline: "This session")
             NoopCard(tint: StrandPalette.effortColor) {
                 HStack(alignment: .center, spacing: 18) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        // The session's Effort contribution ticks up to its value — the NOOP signature.
-                        CountUpText(value: UnitFormatter.effortValue(strain, scale: effortScale),
-                                    format: { String(format: "%.1f", $0) },
-                                    font: StrandFont.number(34),
-                                    color: StrandPalette.effortBright)
-                        Text(effortScale == .whoop ? "strain (0–21)" : "Effort (0–100)")
-                            .font(StrandFont.footnote)
-                            .foregroundStyle(StrandPalette.textTertiary)
+                    ZStack {
+                        // Static (posed) vessel — a compact liquid gauge inside a card, so it costs a single
+                        // cached frame rather than a live canvas (same call as Trends' pip vessels).
+                        LiquidVessel(value: fraction, tint: StrandPalette.effortColor, animated: false)
+                            .frame(width: 88, height: 88)
+                        VStack(spacing: 0) {
+                            // The session's Effort contribution ticks up to its value — the NOOP signature.
+                            CountUpText(value: displayValue,
+                                        format: { String(format: "%.1f", $0) },
+                                        font: StrandFont.rounded(28),
+                                        color: StrandPalette.textPrimary)
+                                .shadow(color: .black.opacity(0.5), radius: 5, y: 1)
+                            Text(effortScale == .whoop ? "of 21" : "of 100")
+                                .font(StrandFont.caption)
+                                .foregroundStyle(StrandPalette.textSecondary)
+                        }
+                        .allowsHitTesting(false)
                     }
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(String(localized: "Effort \(UnitFormatter.effortDisplay(strain, scale: effortScale)) \(effortScale == .whoop ? "of 21" : "of 100")"))
                     Spacer(minLength: 0)
                     Text("This session's contribution to the day's Effort, as captured during the workout.")
                         .font(StrandFont.subhead)
@@ -381,12 +427,12 @@ struct WorkoutDetailView: View {
     private func sourceBadge(_ source: String) -> some View {
         let (label, tint): (String, Color) = {
             switch WorkoutSource.classify(source) {
-            case .whoop:    return ("Whoop", StrandPalette.accent)
-            case .apple:    return ("Apple", StrandPalette.metricCyan)
-            case .detected: return ("Detected", StrandPalette.metricPurple)
-            case .manual:   return ("Manual", StrandPalette.statusWarning)
-            case .lifting:  return ("Lifting", StrandPalette.zone2)
-            case .activityFile: return ("File", StrandPalette.metricAmber)
+            case .whoop:    return (String(localized: "Whoop"), StrandPalette.accent)
+            case .apple:    return (String(localized: "Apple"), StrandPalette.metricCyan)
+            case .detected: return (String(localized: "Detected"), StrandPalette.metricPurple)
+            case .manual:   return (String(localized: "Manual"), StrandPalette.statusWarning)
+            case .lifting:  return (String(localized: "Lifting"), StrandPalette.zone2)
+            case .activityFile: return (String(localized: "File"), StrandPalette.metricAmber)
             }
         }()
         return SourceBadge("\(label)", tint: tint)
@@ -420,14 +466,14 @@ struct WorkoutDetailView: View {
         Self.timeFmt.string(from: Date(timeIntervalSince1970: TimeInterval(ts)))
     }
     private func timeRangeLabel(_ start: Int, _ end: Int) -> String {
-        end > start ? "\(timeLabel(start))–\(timeLabel(end))" : timeLabel(start)
+        end > start ? "\(timeLabel(start))-\(timeLabel(end))" : timeLabel(start)
     }
     private func durationLabel(_ s: Double?) -> String {
         guard let s, s > 0 else { return "–" }
         let total = Int(s.rounded())
         let h = total / 3600, m = (total % 3600) / 60
-        if h > 0 { return "\(h)h \(m)m" }
-        return "\(m)m"
+        if h > 0 { return String(localized: "\(h)h \(m)m") }
+        return String(localized: "\(m)m")
     }
     private func distanceLabel(_ m: Double?) -> String {
         guard let m, m > 0 else { return "–" }
@@ -487,8 +533,8 @@ struct WorkoutRouteMap: RouteMapRepresentable {
         let line = MKPolyline(coordinates: coords, count: coords.count)
         map.addOverlay(line)
 
-        let start = MKPointAnnotation(); start.coordinate = coords.first!; start.title = "Start"
-        let end = MKPointAnnotation(); end.coordinate = coords.last!; end.title = "Finish"
+        let start = MKPointAnnotation(); start.coordinate = coords.first!; start.title = String(localized: "Start")
+        let end = MKPointAnnotation(); end.coordinate = coords.last!; end.title = String(localized: "Finish")
         map.addAnnotations([start, end])
 
         // Frame the whole route with a little padding so the line isn't flush to the edges.

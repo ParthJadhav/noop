@@ -179,18 +179,18 @@ public struct OnboardingWizard: View {
 
     private var ctaTitle: String {
         switch step {
-        case .welcome:    return "Get Started"
-        case .what:       return "Continue"
-        case .expectations: return "I understand"
-        case .bluetooth:  return "Continue"
-        case .wear:       return "I'm wearing it"
-        case .scan:       return "Continue"
-        case .bonded:     return "Continue"
-        case .profile:    return "Save & Continue"
-        case .importData: return "Continue"
-        case .notifications: return "Continue"
-        case .appearance: return "Continue"
-        case .done:       return "Enter NOOP"
+        case .welcome:    return String(localized: "Get Started")
+        case .what:       return String(localized: "Continue")
+        case .expectations: return String(localized: "I understand")
+        case .bluetooth:  return String(localized: "Continue")
+        case .wear:       return String(localized: "I'm wearing it")
+        case .scan:       return String(localized: "Continue")
+        case .bonded:     return String(localized: "Continue")
+        case .profile:    return String(localized: "Save & Continue")
+        case .importData: return String(localized: "Continue")
+        case .notifications: return String(localized: "Continue")
+        case .appearance: return String(localized: "Continue")
+        case .done:       return String(localized: "Enter NOOP")
         }
     }
 
@@ -259,7 +259,7 @@ private struct WelcomeStep: View {
                     .font(StrandFont.title2)
                     .foregroundStyle(StrandPalette.textSecondary)
                     .opacity(appear ? 1 : 0)
-                Text("A private window into your recovery, sleep and strain — read straight from your strap, kept only on \(Platform.deviceNounPhrase).")
+                Text("A private window into your recovery, sleep and strain. Read straight from your strap, kept only on \(Platform.deviceNounPhrase).")
                     .font(StrandFont.body)
                     .foregroundStyle(StrandPalette.textTertiary)
                     .multilineTextAlignment(.center)
@@ -286,20 +286,20 @@ private struct WhatItDoesStep: View {
     private let slides: [Slide] = [
         .init(icon: "circle.dashed.inset.filled",
               tint: StrandPalette.accent,
-              title: "See recovery, beautifully",
-              body: "A signature ring distils HRV, resting heart rate and sleep into one calm read on whether to push or rest."),
+              title: String(localized: "See recovery, beautifully"),
+              body: String(localized: "A signature ring distils HRV, resting heart rate and sleep into one calm read on whether to push or rest.")),
         .init(icon: "waveform.path.ecg",
               tint: StrandPalette.accent,
-              title: "Watch your heart, live",
-              body: "Connect a WHOOP, a heart-rate strap or a gym machine and watch each beat in real time: heart rate, variability and zones as they happen. Already have history elsewhere? Import it from WHOOP, Apple Health, Oura, Fitbit or Garmin."),
+              title: String(localized: "Watch your heart, live"),
+              body: String(localized: "Connect a WHOOP, a heart-rate strap or a gym machine and watch each beat in real time: heart rate, variability and zones as they happen. Already have history elsewhere? Import it from WHOOP, Apple Health, Oura, Fitbit or Garmin.")),
         .init(icon: "lock.shield",
               tint: StrandPalette.statusPositive,
-              title: "Own your data, offline",
-              body: "Everything lives on \(Platform.deviceNounPhrase). No account, no sync, no cloud. Your thread is yours alone."),
+              title: String(localized: "Own your data, offline"),
+              body: String(localized: "Everything lives on \(Platform.deviceNounPhrase). No account, no sync, no cloud. Your thread is yours alone.")),
     ]
 
     var body: some View {
-        StepShell(title: "What NOOP does", subtitle: "Three quiet promises.") {
+        StepShell(title: String(localized: "What NOOP does"), subtitle: String(localized: "Three quiet promises.")) {
             VStack(spacing: 14) {
                 ForEach(Array(slides.enumerated()), id: \.element.id) { index, slide in
                     SlideRow(slide: slide, index: index)
@@ -349,8 +349,8 @@ private struct WhatItDoesStep: View {
 private struct ExpectationsStep: View {
     @State private var shown = false
     var body: some View {
-        StepShell(title: "What to expect",
-                  subtitle: "A few honest words, so nothing's a surprise.") {
+        StepShell(title: String(localized: "What to expect"),
+                  subtitle: String(localized: "A few honest words, so nothing's a surprise.")) {
             VStack(spacing: 12) {
                 ForEach(Array(AppChangelog.expectations.enumerated()), id: \.element.id) { index, e in
                     HStack(alignment: .top, spacing: 14) {
@@ -382,8 +382,8 @@ private struct ExpectationsStep: View {
                 // expectation up front rather than letting it surprise people later (#222 / cert expiry).
                 expectationRow(
                     icon: "iphone.gen3",
-                    title: "Installed outside the App Store",
-                    body: "On iPhone this is a sideloaded build. Re-sign it about every 7 days on a free Apple ID (longer on a paid account). After your phone reboots, unlock it once so NOOP can read and sync its data."
+                    title: String(localized: "Installed outside the App Store"),
+                    body: String(localized: "On iPhone this is a sideloaded build. Re-sign it about every 7 days on a free Apple ID (longer on a paid account). After your phone reboots, unlock it once so NOOP can read and sync its data.")
                 )
                 .opacity(shown ? 1 : 0)
                 .offset(y: shown ? 0 : 8)
@@ -425,8 +425,8 @@ private struct BluetoothStep: View {
     @State private var pulse = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var body: some View {
-        StepShell(title: "A quick word before we connect",
-                  subtitle: "\(Platform.deviceNoun) will ask for Bluetooth in a moment.") {
+        StepShell(title: String(localized: "A quick word before we connect"),
+                  subtitle: String(localized: "\(Platform.deviceNoun) will ask for Bluetooth in a moment.")) {
             VStack(spacing: 24) {
                 ZStack {
                     Circle()
@@ -446,8 +446,8 @@ private struct BluetoothStep: View {
                 InfoCard(
                     icon: "lock.fill",
                     tint: StrandPalette.statusPositive,
-                    title: "Nothing leaves your \(Platform.deviceNoun)",
-                    message: "NOOP talks to your strap directly over Bluetooth Low Energy. There's no server in the middle — the connection is local, and so is every reading it pulls in."
+                    title: String(localized: "Nothing leaves your \(Platform.deviceNoun)"),
+                    message: String(localized: "NOOP talks to your strap directly over Bluetooth Low Energy. There's no server in the middle. The connection is local, and so is every reading it pulls in.")
                 )
 
                 Text("When the system prompt appears, choose Allow so NOOP can find your strap.")
@@ -465,8 +465,8 @@ private struct BluetoothStep: View {
 
 private struct WearStep: View {
     var body: some View {
-        StepShell(title: "Put your strap on",
-                  subtitle: "And make sure it's charged.") {
+        StepShell(title: String(localized: "Put your strap on"),
+                  subtitle: String(localized: "And make sure it's charged.")) {
             VStack(spacing: 22) {
                 ZStack {
                     Circle()
@@ -480,9 +480,9 @@ private struct WearStep: View {
                 .frame(height: 140)
 
                 VStack(spacing: 12) {
-                    Checkline(text: "Wear it snug on your wrist or bicep — sensor against skin.")
-                    Checkline(text: "Give it a few minutes of charge if the battery is low.")
-                    Checkline(text: "Keep it within about a metre of \(Platform.deviceNounPhrase).")
+                    Checkline(text: String(localized: "Wear it snug on your wrist or bicep, sensor against skin."))
+                    Checkline(text: String(localized: "Give it a few minutes of charge if the battery is low."))
+                    Checkline(text: String(localized: "Keep it within about a metre of \(Platform.deviceNounPhrase)."))
                 }
                 .frame(maxWidth: 440)
             }
@@ -505,8 +505,8 @@ private struct ScanStep: View {
     private var selectedModel: WhoopModel { WhoopModel(rawValue: selectedModelRaw) ?? .whoop4 }
 
     var body: some View {
-        StepShell(title: "Find your strap",
-                  subtitle: live.bonded ? "Bonded. You're set." : "Pick your strap below, then tap Scan — NOOP will find it.") {
+        StepShell(title: String(localized: "Find your strap"),
+                  subtitle: live.bonded ? String(localized: "Bonded. You're set.") : String(localized: "Pick your strap below, then tap Scan. NOOP will find it.")) {
             VStack(spacing: 24) {
                 RadarSweep(active: scanning && !live.bonded, bonded: live.bonded)
                     .frame(width: 220, height: 220)
@@ -544,7 +544,7 @@ private struct ScanStep: View {
                     .buttonStyle(SecondaryButtonStyle())
                     .disabled(scanning)
 
-                    DisclosureToggle(open: $showHelp, label: "Don't see it?")
+                    DisclosureToggle(open: $showHelp, label: String(localized: "Don't see it?"))
 
                     if showHelp { reassurance }
 
@@ -610,7 +610,7 @@ private struct ScanStep: View {
                         .foregroundStyle(StrandPalette.textPrimary)
                 }
 
-                Text("WHOOP straps don't appear in your \(Platform.deviceNoun)'s Bluetooth settings. They advertise on a custom profile that only apps like NOOP can find — so there's nothing to pair there, and you shouldn't try.")
+                Text("WHOOP straps don't appear in your \(Platform.deviceNoun)'s Bluetooth settings. They advertise on a custom profile that only apps like NOOP can find, so there's nothing to pair there, and you shouldn't try.")
                     .font(StrandFont.subhead)
                     .foregroundStyle(StrandPalette.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -618,9 +618,9 @@ private struct ScanStep: View {
                 Divider().overlay(StrandPalette.hairline)
 
                 VStack(alignment: .leading, spacing: 10) {
-                    Checkline(text: "It's charged and worn — the sensor needs skin contact to wake.")
-                    Checkline(text: "It isn't held by the WHOOP phone app. Only one host at a time — close the app or turn off its Bluetooth.")
-                    Checkline(text: "It's within about a metre of \(Platform.deviceNounPhrase).")
+                    Checkline(text: String(localized: "It's charged and worn. The sensor needs skin contact to wake."))
+                    Checkline(text: String(localized: "It isn't held by the WHOOP phone app. Only one host at a time: close the app or turn off its Bluetooth."))
+                    Checkline(text: String(localized: "It's within about a metre of \(Platform.deviceNounPhrase)."))
                 }
 
                 Button(action: retry) {
@@ -685,9 +685,9 @@ private struct BondedStep: View {
 
     private var batteryLine: String {
         if let pct = live.batteryPct {
-            return "Your strap is bonded · \(Int(pct))% battery."
+            return String(localized: "Your strap is bonded · \(Int(pct))% battery.")
         }
-        return "Your strap is bonded and ready to stream."
+        return String(localized: "Your strap is bonded and ready to stream.")
     }
 }
 
@@ -702,17 +702,18 @@ private struct ProfileStep: View {
     private var unitSystem: UnitSystem { UnitSystem(rawValue: unitSystemRaw) ?? .metric }
 
     private let sexes: [(String, String)] = [
-        ("male", "Male"), ("female", "Female"), ("nonbinary", "Other")
+        ("male", String(localized: "Male")), ("female", String(localized: "Female")),
+        ("nonbinary", String(localized: "Other"))
     ]
 
     var body: some View {
-        StepShell(title: "About you",
-                  subtitle: "So your zones, calories and baselines are accurate.") {
+        StepShell(title: String(localized: "About you"),
+                  subtitle: String(localized: "So your zones, calories and baselines are accurate.")) {
             VStack(spacing: 16) {
                 StrandCard {
                     VStack(spacing: 18) {
                         Stepper(value: $profile.age, in: 13...100) {
-                            FieldRow(label: "Age", value: "\(profile.age) yrs")
+                            FieldRow(label: String(localized: "Age"), value: String(localized: "\(profile.age) yrs"))
                         }
 
                         Divider().overlay(StrandPalette.hairline)
@@ -730,18 +731,35 @@ private struct ProfileStep: View {
 
                         Divider().overlay(StrandPalette.hairline)
 
+                        // Units control (#781). Without this, onboarding read `unitSystemRaw` for the
+                        // Weight/Height display but had NO way to set it, so US users were locked to
+                        // kg/cm until they later found Settings → Units. Mirror the Sex picker idiom; the
+                        // stored profile stays SI either way, only the displayed labels re-format (lb / ft-in
+                        // via UnitFormatter). Same key (`units.system`) the Settings → Units card writes.
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Units").strandOverline()
+                            Picker("Units", selection: $unitSystemRaw) {
+                                Text("Metric").tag(UnitSystem.metric.rawValue)
+                                Text("Imperial").tag(UnitSystem.imperial.rawValue)
+                            }
+                            .pickerStyle(.segmented)
+                            .labelsHidden()
+                        }
+
+                        Divider().overlay(StrandPalette.hairline)
+
                         // Steppers, not sliders — matches the Age row above and the macOS Settings
                         // profile editor (same ranges/steps), so every numeric profile field is
                         // consistent across onboarding and Settings on both platforms.
                         Stepper(value: $profile.weightKg, in: 30...250, step: 0.5) {
-                            FieldRow(label: "Weight",
+                            FieldRow(label: String(localized: "Weight"),
                                      value: UnitFormatter.massFromKilograms(profile.weightKg, system: unitSystem))
                         }
 
                         Divider().overlay(StrandPalette.hairline)
 
                         Stepper(value: $profile.heightCm, in: 120...230, step: 1) {
-                            FieldRow(label: "Height",
+                            FieldRow(label: String(localized: "Height"),
                                      value: UnitFormatter.heightFromCentimeters(profile.heightCm, system: unitSystem))
                         }
                     }
@@ -767,8 +785,8 @@ private struct ImportStep: View {
     @State private var importTarget: ImportTarget = .whoop
 
     var body: some View {
-        StepShell(title: "Bring your history",
-                  subtitle: "Optional — import now, or continue and return to Data Sources later.") {
+        StepShell(title: String(localized: "Bring your history"),
+                  subtitle: String(localized: "Optional: import now, or continue and return to Data Sources later.")) {
             VStack(spacing: 18) {
                 ZStack {
                     Circle()
@@ -782,21 +800,21 @@ private struct ImportStep: View {
                 InfoCard(
                     icon: "clock.arrow.circlepath",
                     tint: StrandPalette.accent,
-                    title: "History fills the dashboard immediately",
-                    message: "A WHOOP export backfills recovery, strain, sleep and workouts. Apple Health can add HR, HRV, sleep, SpO₂, steps, workouts and weight."
+                    title: String(localized: "History fills the dashboard immediately"),
+                    message: String(localized: "A WHOOP export backfills recovery, strain, sleep and workouts. Apple Health can add HR, HRV, sleep, SpO₂, steps, workouts and weight.")
                 )
 
                 StrandCard {
                     VStack(spacing: 10) {
                         ImportActionButton(
-                            title: model.isImporting(.whoop) ? "Importing…" : "Import WHOOP export",
+                            title: model.isImporting(.whoop) ? String(localized: "Importing…") : String(localized: "Import WHOOP export"),
                             systemImage: "tray.and.arrow.down",
                             disabled: model.hasActiveImport
                         ) {
                             presentImporter(.whoop)
                         }
                         ImportActionButton(
-                            title: model.isImporting(.appleHealth) ? "Working…" : "Import Apple Health export",
+                            title: model.isImporting(.appleHealth) ? String(localized: "Working…") : String(localized: "Import Apple Health export"),
                             systemImage: "heart.fill",
                             disabled: model.hasActiveImport
                         ) {
@@ -895,8 +913,8 @@ private struct NotificationsStep: View {
     @State private var pulse = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     var body: some View {
-        StepShell(title: "Stay in the loop",
-                  subtitle: "NOOP can tap your wrist when your \(Platform.deviceNoun) needs you — no glance at the screen required.") {
+        StepShell(title: String(localized: "Stay in the loop"),
+                  subtitle: String(localized: "NOOP can tap your wrist when your \(Platform.deviceNoun) needs you. No glance at the screen required.")) {
             VStack(spacing: 24) {
                 ZStack {
                     Circle()
@@ -921,26 +939,26 @@ private struct NotificationsStep: View {
                 InfoCard(
                     icon: "applewatch.radiowaves.left.and.right",
                     tint: StrandPalette.statusPositive,
-                    title: "A buzz, not a banner",
-                    message: "NOOP taps your strap so an alert lands on your wrist instead of your screen — no need to reach for it. Everything stays on \(Platform.deviceNounPhrase)."
+                    title: String(localized: "A buzz, not a banner"),
+                    message: String(localized: "NOOP taps your strap so an alert lands on your wrist instead of your screen. No need to reach for it. Everything stays on \(Platform.deviceNounPhrase).")
                 )
 
                 VStack(spacing: 12) {
-                    Checkline(text: "Strain nudges and your smart alarm tap your wrist the moment they fire.")
-                    Checkline(text: "It all stays on your strap and \(Platform.deviceNounPhrase) — no account, no cloud.")
+                    Checkline(text: String(localized: "Strain nudges and your smart alarm tap your wrist the moment they fire."))
+                    Checkline(text: String(localized: "It all stays on your strap and \(Platform.deviceNounPhrase): no account, no cloud."))
                 }
                 .frame(maxWidth: 460)
                 #else
                 InfoCard(
                     icon: "applewatch.radiowaves.left.and.right",
                     tint: StrandPalette.statusPositive,
-                    title: "A buzz, not a banner",
-                    message: "When the \(Platform.deviceNoun) apps you choose send a notification, NOOP taps your strap — Slack, Calendar, Messages, whatever matters. Everything stays on \(Platform.deviceNounPhrase)."
+                    title: String(localized: "A buzz, not a banner"),
+                    message: String(localized: "When the \(Platform.deviceNoun) apps you choose send a notification, NOOP taps your strap: Slack, Calendar, Messages, whatever matters. Everything stays on \(Platform.deviceNounPhrase).")
                 )
 
                 VStack(spacing: 12) {
-                    Checkline(text: "Pick which apps reach your wrist in Settings → Notifications.")
-                    Checkline(text: "Strain nudges and your smart alarm tap your wrist the same way.")
+                    Checkline(text: String(localized: "Pick which apps reach your wrist in Settings → Notifications."))
+                    Checkline(text: String(localized: "Strain nudges and your smart alarm tap your wrist the same way."))
                 }
                 .frame(maxWidth: 460)
                 #endif
@@ -980,7 +998,7 @@ private struct DoneStep: View {
                     Text("Your thread starts here.")
                         .font(StrandFont.title1)
                         .foregroundStyle(StrandPalette.textPrimary)
-                    Text("Every beat, every night, every day — woven into one quiet picture of you. Welcome to NOOP.")
+                    Text("Every beat, every night, every day, woven into one quiet picture of you. Welcome to NOOP.")
                         .font(StrandFont.body)
                         .foregroundStyle(StrandPalette.textSecondary)
                         .multilineTextAlignment(.center)
@@ -1007,8 +1025,8 @@ private struct AppearanceStep: View {
                 set: { appearanceRaw = $0.rawValue })
     }
     var body: some View {
-        StepShell(title: "Make it yours",
-                  subtitle: "Choose how NOOP looks — the whole app updates as you tap. You can change this any time in Settings → Appearance.") {
+        StepShell(title: String(localized: "Make it yours"),
+                  subtitle: String(localized: "Choose how NOOP looks. The whole app updates as you tap. You can change this any time in Settings → Appearance.")) {
             VStack(spacing: 28) {
                 Image(systemName: "circle.lefthalf.filled")
                     .font(.system(size: 56, weight: .light))

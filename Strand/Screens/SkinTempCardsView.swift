@@ -31,7 +31,7 @@ import StrandAnalytics
 /// The standing privacy promise repeated on every sensitive skin-temp surface (the single
 /// biggest competitive wedge vs cloud cycle trackers, and the ethical stance).
 private let skinTempPrivacyLine =
-    "This stays on your device. It is never uploaded, never synced, never shared."
+    String(localized: "This stays on your device. It is never uploaded, never synced, never shared.")
 
 /// A small, footnote-styled privacy row with a lock glyph — dropped at the foot of each
 /// sensitive card so the promise is impossible to miss without shouting.
@@ -67,6 +67,10 @@ struct CycleAwarenessCard: View {
     var onLogPeriod: (() -> Void)? = nil
     /// Called when the user opens the cycle detail screen. nil makes the card non-navigating.
     var onOpenDetail: (() -> Void)? = nil
+    /// Called when the user turns cycle awareness OFF from here (#801). nil hides the off control.
+    /// Provided so the feature can be turned off in-place exactly where it was turned on (the opt-in
+    /// card's "Turn on" lives in the same Health spot), rather than only from Automations.
+    var onTurnOff: (() -> Void)? = nil
 
     // Cycle awareness reads in the calm, NON-VALENCED Rest indigo world (mirroring Mind): a
     // phase is just information, never framed good/bad. No red, ever.
@@ -108,6 +112,15 @@ struct CycleAwarenessCard: View {
                     .foregroundStyle(StrandPalette.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
                 PrivacyNote()
+
+                // In-place off control (#801): the toggle is now symmetric, it can be turned off
+                // right where it was turned on, not only from Automations. A quiet ghost button so it
+                // sits below the awareness/privacy lines without competing with the primary actions.
+                if let onTurnOff {
+                    Button("Turn off cycle awareness", action: onTurnOff)
+                        .buttonStyle(.noopGhost)
+                        .accessibilityHint("Stops reading a cycle phase from your nightly temperature. You can turn it back on here any time.")
+                }
             }
         }
         .accessibilityElement(children: .contain)
@@ -151,7 +164,7 @@ struct CycleAwarenessCard: View {
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(hue)
                 .accessibilityHidden(true)
-            Text("A period is likely between \(prettyDay(window.earliestDay)) and \(prettyDay(window.latestDay)) — a window, not a fixed date.")
+            Text("A period is likely between \(prettyDay(window.earliestDay)) and \(prettyDay(window.latestDay)) (a window, not a fixed date).")
                 .font(StrandFont.subhead)
                 .foregroundStyle(StrandPalette.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -178,18 +191,18 @@ struct CycleAwarenessCard: View {
 
     private var phaseTitle: String {
         switch result.phase {
-        case .follicular:   return "Follicular"
-        case .periOvulatory: return "Mid-cycle shift"
-        case .luteal:       return "Luteal"
-        case .unknown:      return "No clear pattern"
-        case .learning:     return "Learning your pattern"
+        case .follicular:   return String(localized: "Follicular")
+        case .periOvulatory: return String(localized: "Mid-cycle shift")
+        case .luteal:       return String(localized: "Luteal")
+        case .unknown:      return String(localized: "No clear pattern")
+        case .learning:     return String(localized: "Learning your pattern")
         }
     }
 
     /// "~day 18–22" — always a RANGE, never a single point.
     private var cycleDayText: String? {
         guard let lo = result.cycleDayLow, let hi = result.cycleDayHigh else { return nil }
-        return lo == hi ? "· ~day \(lo)" : "· ~day \(lo)–\(hi)"
+        return lo == hi ? String(localized: "· ~day \(lo)") : String(localized: "· ~day \(lo)-\(hi)")
     }
 
     private var statusLine: String { result.note }
@@ -211,11 +224,12 @@ struct CycleAwarenessCard: View {
     }
 
     private var accessibilityHeadline: String {
-        var s = "Cycle phase: \(phaseTitle)."
         if let lo = result.cycleDayLow, let hi = result.cycleDayHigh {
-            s += lo == hi ? " About day \(lo)." : " About day \(lo) to \(hi)."
+            return lo == hi
+                ? String(localized: "Cycle phase: \(phaseTitle). About day \(lo).")
+                : String(localized: "Cycle phase: \(phaseTitle). About day \(lo) to \(hi).")
         }
-        return s
+        return String(localized: "Cycle phase: \(phaseTitle).")
     }
 }
 
@@ -240,7 +254,7 @@ struct CycleAwarenessOptInCard: View {
                         .foregroundStyle(StrandPalette.textPrimary)
                     Spacer()
                 }
-                Text("NOOP can read a coarse menstrual-cycle phase from your nightly skin temperature — entirely on your device. It is awareness only: not contraception, not a fertility predictor, not a medical service.")
+                Text("NOOP can read a coarse menstrual-cycle phase from your nightly skin temperature, entirely on your device. It is awareness only: not contraception, not a fertility predictor, not a medical service.")
                     .font(StrandFont.subhead)
                     .foregroundStyle(StrandPalette.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -336,7 +350,7 @@ struct BodyClockCard: View {
             Text("Plan · \(plan.estimatedDays)-day shift")
                 .strandOverline()
             // Day 1's concrete light + lights-out cue — light + sleep timing only.
-            Text("Day 1 — bright light \(clockString(firstDay.brightLightStartHour))–\(clockString(firstDay.brightLightEndHour)), lights-out around \(clockString(firstDay.targetSleepHour)).")
+            Text("Day 1: bright light \(clockString(firstDay.brightLightStartHour))-\(clockString(firstDay.brightLightEndHour)), lights-out around \(clockString(firstDay.targetSleepHour)).")
                 .font(StrandFont.subhead)
                 .foregroundStyle(StrandPalette.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -354,13 +368,14 @@ struct BodyClockCard: View {
     private var offsetTitle: String {
         let mins = Int(abs(estimate.offsetVsScheduleMinutes).rounded())
         if estimate.confidence == .unreadable {
-            return "Hard to read right now"
+            return String(localized: "Hard to read right now")
         }
         if mins <= 20 {
-            return "About in sync with your schedule"
+            return String(localized: "About in sync with your schedule")
         }
-        let dir = estimate.offsetVsScheduleMinutes > 0 ? "later" : "earlier"
-        return "About \(mins) min \(dir) than your schedule"
+        return estimate.offsetVsScheduleMinutes > 0
+            ? String(localized: "About \(mins) min later than your schedule")
+            : String(localized: "About \(mins) min earlier than your schedule")
     }
 
     private var confidenceLabel: LocalizedStringKey {
@@ -398,6 +413,10 @@ struct BodyClockCard: View {
 struct HeadsUpCard: View {
     /// The decision from `IllnessSignalEngine.evaluate(...)`, computed in the analytics pass.
     let result: IllnessSignalEngine.Result
+    /// Optional parallel Mahalanobis distance (IllnessDistance), computed on the SAME z-vector. It does
+    /// NOT gate this card (the engine's level already did); when the level is raised and a distance is
+    /// present we append a subtle "Confidence" line so the user can gauge how strong the signal is.
+    var distance: IllnessDistance.Result? = nil
 
     var body: some View {
         NoopCard(padding: 14, tint: hue) {
@@ -428,6 +447,13 @@ struct HeadsUpCard: View {
                 // ...and what was ruled out (the differentiating part vs a black-box warning).
                 if !result.suppressedBy.isEmpty {
                     whyRow(label: "Explained by", values: result.suppressedBy, tint: StrandPalette.textTertiary)
+                }
+                // Optional confidence read from the parallel Mahalanobis distance, only when the level is
+                // raised. Subtle by design: it augments, never gates (the engine already decided to raise).
+                if let confidence = confidenceLine {
+                    Text(confidence)
+                        .font(StrandFont.caption)
+                        .foregroundStyle(StrandPalette.textTertiary)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -470,12 +496,39 @@ struct HeadsUpCard: View {
 
     private var title: String {
         switch result.level {
-        case .raised:        return "Heads-up"
-        case .alreadyUnwell: return "Rest up"
-        case .suppressed:    return "Probably not illness"
-        case .mild:          return "A few signals are up"
-        case .quiet:         return "Nothing notable"
+        case .raised:        return String(localized: "Heads-up")
+        case .alreadyUnwell: return String(localized: "Rest up")
+        case .suppressed:    return String(localized: "Probably not illness")
+        case .mild:          return String(localized: "A few signals are up")
+        case .quiet:         return String(localized: "Nothing notable")
         }
+    }
+
+    /// A subtle confidence read from the parallel Mahalanobis distance, surfaced ONLY on the RAISED state
+    /// (and when a distance is present). nil otherwise. The already-unwell state is driven purely by the
+    /// user's own log and can have a near-zero distance (0-1 present features), giving a misleading
+    /// "Confidence: slight (distance 0.0)", so it's excluded. The raised path always has >= 2 present
+    /// features, so its distance is meaningful. The band mirrors Android exactly. (Augment-only, never gates.)
+    private var confidenceLine: String? {
+        guard result.level == .raised,
+              let d = distance else { return nil }
+        return String(localized: "Confidence: \(IllnessConfidence.band(d.distance)) (distance \(IllnessConfidence.formatted(d.distance)))")
+    }
+}
+
+// MARK: - Illness confidence band (shared wording, mirrored byte-for-byte on Android)
+
+/// Maps the parallel Mahalanobis distance to a plain confidence word + a one-decimal display value.
+/// This is presentation-only: it NEVER decides whether the Heads-Up card shows (the engine's level
+/// already did). Bands: >= 3.5 strong, >= 2.5 moderate, else slight. Identical to the Kotlin twin.
+enum IllnessConfidence {
+    static func band(_ distance: Double) -> String {
+        if distance >= 3.5 { return String(localized: "strong") }
+        if distance >= 2.5 { return String(localized: "moderate") }
+        return String(localized: "slight")
+    }
+    static func formatted(_ distance: Double) -> String {
+        String(format: "%.1f", distance)
     }
 }
 
@@ -511,7 +564,10 @@ private struct FlowChips: View {
 private func prettyDay(_ key: String) -> String {
     let parts = key.split(separator: "-")
     guard parts.count == 3, let m = Int(parts[1]), let d = Int(parts[2]), (1...12).contains(m) else { return key }
-    let months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    let months = [String(localized: "Jan"), String(localized: "Feb"), String(localized: "Mar"),
+                  String(localized: "Apr"), String(localized: "May"), String(localized: "Jun"),
+                  String(localized: "Jul"), String(localized: "Aug"), String(localized: "Sep"),
+                  String(localized: "Oct"), String(localized: "Nov"), String(localized: "Dec")]
     return "\(d) \(months[m - 1])"
 }
 

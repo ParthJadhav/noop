@@ -68,24 +68,41 @@ private func hexString(_ bytes: ArraySlice<UInt8>) -> String {
 }
 
 /// Field builder: accumulates annotated fields and a flat parsed dict. Port of Python FB.
+///
+/// `collectFields` (D#742): the annotated `fields` array, and each field's per-field `raw` hex
+/// string, exist for the inspector surfaces (whoop-decode, the fields-asserting tests), not for
+/// the live BLE stream. When false, `add` writes only the flat `parsed` dict and skips both the
+/// `DecodedField` append and the `hexString` call, so the 1Hz+ live path and a 5/MG offload burst
+/// stop allocating metadata nothing reads. `value:`/`note:` are @autoclosure for the same reason
+/// (the gated zero-cost idiom): a formatted envelope value (crc hex strings etc.) is never built
+/// unless a path that keeps it runs. The `parsed` output is byte-identical on both paths.
 final class FieldBuilder {
     let frame: [UInt8]
+    let collectFields: Bool
     var fields: [DecodedField] = []
     var parsed: [String: ParsedValue] = [:]
 
-    init(_ frame: [UInt8]) {
+    init(_ frame: [UInt8], collectFields: Bool = true) {
         self.frame = frame
+        self.collectFields = collectFields
     }
 
     @discardableResult
     func add(_ off: Int, _ length: Int, _ name: String, _ cat: String,
-             value: ParsedValue? = nil, note: String? = nil) -> FieldBuilder {
-        let end = min(off + length, frame.count)
-        let raw = off <= frame.count ? hexString(frame[max(0, off)..<max(off, end)]) : ""
-        fields.append(DecodedField(off: off, len: length, name: name, cat: cat,
-                                   value: value, raw: raw, note: note))
-        if value != nil && cat != "frame" && cat != "unknown" {
-            parsed[name] = value
+             value: @autoclosure () -> ParsedValue? = nil,
+             note: @autoclosure () -> String? = nil) -> FieldBuilder {
+        let keepInParsed = cat != "frame" && cat != "unknown"
+        if collectFields {
+            let end = min(off + length, frame.count)
+            let raw = off <= frame.count ? hexString(frame[max(0, off)..<max(off, end)]) : ""
+            let v = value()
+            fields.append(DecodedField(off: off, len: length, name: name, cat: cat,
+                                       value: v, raw: raw, note: note()))
+            if let v = v, keepInParsed {
+                parsed[name] = v
+            }
+        } else if keepInParsed, let v = value() {
+            parsed[name] = v
         }
         return self
     }
@@ -97,8 +114,20 @@ final class FieldBuilder {
     }
 }
 
-public func parseFrame(_ frame: [UInt8]) -> ParsedFrame {
-    let rawHex = frame.map { String(format: "%02x", $0) }.joined()
+/// Parse one complete WHOOP 4.0 frame.
+///
+/// `collectFields` (D#742) defaults to FALSE, the decode-only fast path: the flat `parsed` dict
+/// (and every other property except `fields`) is byte-identical, but the annotated `fields` array
+/// with its per-field `raw` hex stays empty. The live ingest path (FrameRouter / Collector /
+/// Backfiller / extractStreams) reads only `parsed`, so on a 1Hz+ stream or an offload burst the
+/// per-field metadata was pure allocation waste. Pass `true` on inspector/diagnostic surfaces
+/// (whoop-decode, field-asserting tests) that actually read `fields`.
+public func parseFrame(_ frame: [UInt8], collectFields: Bool = false) -> ParsedFrame {
+    // D#969: only build the whole-frame hex when a consumer will read it. The live ingest fast path
+    // (collectFields:false) never reads `rawHex` — only inspector/diagnostic surfaces (whoop-decode,
+    // PuffinCapture, field-asserting tests) do — so on a 1Hz stream or an offload burst this skips a
+    // per-byte `String(format:)` allocation pass whose result was discarded.
+    let rawHex = collectFields ? frame.map { String(format: "%02x", $0) }.joined() : ""
     if frame.count < 8 || frame[0] != 0xAA {
         return ParsedFrame(ok: false, typeName: "INVALID/FRAGMENT", seq: nil, cmdName: nil,
                            crcOK: nil, lenBytes: frame.count, rawHex: rawHex,
@@ -114,7 +143,7 @@ public func parseFrame(_ frame: [UInt8]) -> ParsedFrame {
     let typeName = schema.typeName(t)
     let seq = Int(frame[5])
 
-    let fb = FieldBuilder(frame)
+    let fb = FieldBuilder(frame, collectFields: collectFields)
     // envelope
     fb.add(0, 1, "SOF", "frame", value: .string("0xAA"))
     fb.add(1, 2, "length", "frame", value: length.map { .int($0) })
@@ -168,17 +197,21 @@ public func parseFrame(_ frame: [UInt8]) -> ParsedFrame {
 /// header-CRC live in the first 8 bytes, the inner `[type][seq][cmd][data…]` starts at offset 8,
 /// and the 4-byte CRC32 trailer closes the frame. "Puffin" types 38/56 are aliased onto their base
 /// names (COMMAND_RESPONSE / METADATA) via `canonicalTypeName`.
-public func parseFrame(_ frame: [UInt8], family: DeviceFamily) -> ParsedFrame {
+///
+/// `collectFields` follows `parseFrame(_:collectFields:)` exactly (D#742): default FALSE is the
+/// decode-only fast path with an identical `parsed` dict and an empty `fields` array.
+public func parseFrame(_ frame: [UInt8], family: DeviceFamily, collectFields: Bool = false) -> ParsedFrame {
     switch family {
     case .whoop4:
-        return parseFrame(frame)
+        return parseFrame(frame, collectFields: collectFields)
     case .whoop5:
-        return parseFrameWhoop5(frame)
+        return parseFrameWhoop5(frame, collectFields: collectFields)
     }
 }
 
-private func parseFrameWhoop5(_ frame: [UInt8]) -> ParsedFrame {
-    let rawHex = frame.map { String(format: "%02x", $0) }.joined()
+private func parseFrameWhoop5(_ frame: [UInt8], collectFields: Bool) -> ParsedFrame {
+    // D#969: gated identically to parseFrame — build the hex only when a consumer reads it.
+    let rawHex = collectFields ? frame.map { String(format: "%02x", $0) }.joined() : ""
     // Minimum whoop5 frame: 8 header bytes + 1 inner (type) + 4 CRC32 trailer.
     if frame.count < 12 || frame[0] != 0xAA {
         return ParsedFrame(ok: false, typeName: "INVALID/FRAGMENT", seq: nil, cmdName: nil,
@@ -197,7 +230,7 @@ private func parseFrameWhoop5(_ frame: [UInt8]) -> ParsedFrame {
     let typeName = canonicalTypeName(t, schema: schema)
     let seq = frame.count > innerStart + 1 ? Int(frame[innerStart + 1]) : nil
 
-    let fb = FieldBuilder(frame)
+    let fb = FieldBuilder(frame, collectFields: collectFields)
     // envelope
     fb.add(0, 1, "SOF", "frame", value: .string("0xAA"))
     fb.add(1, 1, "format", "frame", value: .int(Int(frame[1])))
@@ -436,6 +469,12 @@ private func decodeWhoop5Historical(_ frame: [UInt8], fb: FieldBuilder, payloadE
     }
     // The remaining bytes (optical/perfusion + the unmapped tail) are not ground-truth-mapped; keep them
     // as one honest raw region.
+    // PROVENANCE / lossless-tail note (A10): the fields above split into VERIFIED (physiologically
+    // cross-checked vs the live 2A37 HR / |gravity|~1g: unix, heart_rate, rr, gravity, skin_temp) and
+    // EMPIRICAL / not-pinned (status words, aux bytes, unknown_f32_113). This decoder never truncates
+    // `frame`; the unmapped trailing bytes are preserved verbatim upstream (RawHistoryArchive for
+    // undecodable records, the raw-capture batch when that toggle is on), so a future re-decode is
+    // lossless. Kept in lockstep with the Android decodeWhoop5Historical provenance note.
     if let payloadEnd = payloadEnd, 82 < payloadEnd, payloadEnd <= frame.count {
         fb.region(82, payloadEnd, "unmapped (optical/perfusion + tail)", "unknown")
     }

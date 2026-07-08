@@ -1,5 +1,7 @@
 import SwiftUI
-#if canImport(UIKit)
+#if os(watchOS)
+import WatchKit
+#elseif canImport(UIKit)
 import UIKit
 #endif
 
@@ -17,7 +19,21 @@ public enum StrandHaptic {
     case success     // a meaningful milestone (bond success, breathe session done)
     case warning     // a soft "not allowed / invalid"
 
-    #if canImport(UIKit)
+    #if os(watchOS)
+    // watchOS has no UIKit feedback generators; the Taptic engine is driven through WatchKit's
+    // `WKHapticType`. Map our vocabulary onto the closest watch haptics so the breathing / interval
+    // features (which depend on a real tactile cue) actually buzz on the wrist.
+    private func fire() {
+        let device = WKInterfaceDevice.current()
+        switch self {
+        case .selection: device.play(.click)
+        case .light:     device.play(.click)
+        case .commit:    device.play(.success)
+        case .success:   device.play(.success)
+        case .warning:   device.play(.failure)
+        }
+    }
+    #elseif canImport(UIKit)
     // Generators are cheap to make; UIKit pools the engine. We don't retain selection
     // generators (tab/pill taps are bursty).
     private func fire() {
@@ -33,7 +49,9 @@ public enum StrandHaptic {
 
     /// Fire this haptic now. No-op on macOS.
     public func play() {
-        #if canImport(UIKit)
+        #if os(watchOS)
+        fire()
+        #elseif canImport(UIKit)
         fire()
         #endif
     }

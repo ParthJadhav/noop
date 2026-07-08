@@ -18,6 +18,21 @@ class VoipCallClassifierTest {
     }
 
     @Test
+    fun teamsRingingCallStillRoutesThroughVoipPath() {
+        // The per-app catalog moved Teams under Messaging (chats/mentions), but a ringing Teams
+        // call must still light up the Calls card, not the messaging row. Guard that the VoIP
+        // classifier keeps accepting Teams' call-category notifications.
+        val metadata = VoipCallClassifier.Metadata(
+            category = VoipCallClassifier.CATEGORY_CALL,
+            isOngoing = false,
+            isForegroundService = false,
+            isGroupSummary = false,
+        )
+
+        assertTrue(VoipCallClassifier.isIncomingCallNotification("com.microsoft.teams", metadata))
+    }
+
+    @Test
     fun rejectsOngoingKnownPackageCallCategory() {
         val metadata = VoipCallClassifier.Metadata(
             category = VoipCallClassifier.CATEGORY_CALL,

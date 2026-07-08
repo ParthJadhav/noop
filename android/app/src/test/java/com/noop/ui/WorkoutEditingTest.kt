@@ -152,6 +152,33 @@ class WorkoutEditingTest {
     }
 
     @Test
+    fun dedupCrossSourceTrace_keptIsByteIdenticalAndNamesThePair() {
+        // The Workouts test-mode dedup twin must return the SAME kept list dedupCrossSource does, plus a
+        // decision line naming the kept vs dropped source. Mirrors the Swift dedup-trace parity test.
+        val live = richRow(1000, 4600, "Running", "whoop")
+        val hc = thinImport(1030, 4580, "Running", "health-connect")
+        val plain = WorkoutEditing.dedupCrossSource(listOf(live, hc))
+        val (kept, trace) = WorkoutEditing.dedupCrossSourceTrace(listOf(live, hc))
+        assertEquals(plain.map { it.source }, kept.map { it.source })
+        assertEquals(1, kept.size)
+        assertEquals("whoop", kept.first().source)
+        assertEquals(1, trace.size)
+        assertTrue(trace[0].contains("dedup sport=running"))
+        assertTrue(trace[0].contains("kept=strap"))
+        assertTrue(trace[0].contains("dropped=apple"))
+        assertFalse(trace.any { it.contains("\u2014") })
+    }
+
+    @Test
+    fun dedupCrossSourceTrace_emitsNothingForDistinctSessions() {
+        val run = richRow(1000, 4600, "Running", "whoop")
+        val lift = richRow(5000, 8600, "Strength Training", "whoop")
+        val (kept, trace) = WorkoutEditing.dedupCrossSourceTrace(listOf(run, lift))
+        assertEquals(2, kept.size)
+        assertTrue(trace.isEmpty())
+    }
+
+    @Test
     fun dedupCrossSource_keepsNonImportOnRichnessTie() {
         // Two equally-thin rows: a strap "manual" live row and a Health Connect import. Keep the strap one.
         val manual = thinImport(1000, 4600, "Walking", "manual")
@@ -171,6 +198,87 @@ class WorkoutEditingTest {
         assertEquals(2, out.size)
         assertEquals("Running", out[0].sport)
         assertEquals("Strength Training", out[1].sport)
+    }
+
+    // MARK: - detected-vs-real overlap collapse (#975)
+
+    @Test
+    fun detectedShadow_isDroppedWhenItOverlapsAManualSession() {
+        val manual = richRow(1000, 4600, "Strength Training", "manual")
+        val detected = row("my-whoop-noop", 900, 4800, "detected", "my-whoop-noop",
+            avgHr = 175, maxHr = 190, strain = 19.0)   // wider window, implausibly hot
+        val out = WorkoutEditing.dedupCrossSource(listOf(detected, manual))
+        assertEquals(1, out.size)
+        assertEquals("manual", out.first().source)
+    }
+
+    @Test
+    fun detectedBout_keptWhenItDoesNotOverlapAnyReal() {
+        val detected = row("my-whoop-noop", 1000, 4600, "detected", "my-whoop-noop",
+            avgHr = 150, maxHr = 170, strain = 12.0)
+        val manualLater = richRow(20_000, 23_600, "Running", "manual")
+        val out = WorkoutEditing.dedupCrossSource(listOf(detected, manualLater))
+        assertEquals(2, out.size)
+        assertTrue(out.any { WorkoutEditing.classify(it.source) == WorkoutSource.DETECTED })
+    }
+
+    @Test
+    fun detectedShadow_notDroppedForBriefTouchingOverlap() {
+        val manual = richRow(1000, 4600, "Running", "manual")            // 60 min
+        val detected = row("my-whoop-noop", 4500, 8100, "detected", "my-whoop-noop",
+            avgHr = 150, strain = 12.0)                                  // 60 min, 100 s overlap
+        val out = WorkoutEditing.dedupCrossSource(listOf(manual, detected))
+        assertEquals(2, out.size)
+    }
+
+    @Test
+    fun dedupTrace_emitsDroppedShadowLineAndStaysByteIdentical() {
+        val manual = richRow(1000, 4600, "Strength Training", "manual")
+        val detected = row("my-whoop-noop", 900, 4800, "detected", "my-whoop-noop",
+            avgHr = 175, strain = 19.0)
+        val plain = WorkoutEditing.dedupCrossSource(listOf(detected, manual))
+        val (kept, trace) = WorkoutEditing.dedupCrossSourceTrace(listOf(detected, manual))
+        assertEquals(plain.map { it.source }, kept.map { it.source })
+        assertEquals(1, kept.size)
+        assertEquals("manual", kept.first().source)
+        assertTrue(trace.any { it.contains("detectedBout verdict=droppedShadow") })
+        assertTrue(trace.any { it.contains("overlapSource=manual") })
+        assertFalse(trace.any { it.contains("—") })
+    }
+
+    // MARK: - trace privacy (L5) + dedup label (L8)
+
+    @Test
+    fun traceSportKey_whitelistsCatalogAndFoldsFreeTextToCustom() {
+        // L5 PRIVACY: a catalogue sport passes through as its key; a user-named free-text sport never reaches
+        // the export and folds to "custom"; the detector's "Activity" token stays "activity".
+        assertEquals("running", WorkoutEditing.traceSportKey("Running"))
+        assertEquals(WorkoutEditing.sportKey("Open-water swim"), WorkoutEditing.traceSportKey("Open-water swim"))
+        assertEquals("activity", WorkoutEditing.traceSportKey("detected"))
+        // A free-typed name (#519 free text) MUST NOT surface verbatim.
+        assertEquals("custom", WorkoutEditing.traceSportKey("Johns Birthday 5k"))
+        assertNotEquals(WorkoutEditing.sportKey("Johns Birthday 5k"), WorkoutEditing.traceSportKey("Johns Birthday 5k"))
+        // An off-catalogue WHOOP token also folds to custom (privacy-conservative).
+        assertEquals("custom", WorkoutEditing.traceSportKey("TraditionalStrengthTraining"))
+    }
+
+    @Test
+    fun dedupTrace_labelsKeptDroppedOnSameStartSameSourcePair() {
+        // L8: two rows sharing startTs AND source but differing in richness. The OLD (startTs, source) tuple
+        // check could not tell which won; the label must follow the REAL keep rule (richer kept).
+        val rich = richRow(1000, 4600, "Running", "whoop") // richness high
+        // Same start AND source as `rich`, but poorer (energy only) - forces the tuple-collision case.
+        val thin = WorkoutRow(
+            deviceId = "my-whoop", startTs = 1000, endTs = 4600, sport = "Running", source = "whoop",
+            durationS = 3600.0, energyKcal = 590.0,
+        )
+        val (_, trace) = WorkoutEditing.dedupCrossSourceTrace(listOf(thin, rich))
+        assertEquals(1, trace.size)
+        val keptRich = WorkoutEditing.richness(rich)
+        val droppedRich = WorkoutEditing.richness(thin)
+        assertTrue(keptRich > droppedRich)
+        assertTrue(trace[0], trace[0].contains("kept=strap(richness=$keptRich)"))
+        assertTrue(trace[0], trace[0].contains("dropped=strap(richness=$droppedRich)"))
     }
 
     // MARK: - buildManualRow validation
@@ -223,5 +331,174 @@ class WorkoutEditingTest {
     fun preservingCaptured_noOpForFreshAdd() {
         val rebuilt = row("my-whoop", 100, 3700, "Running", "manual", avgHr = 140)
         assertEquals(rebuilt, WorkoutEditing.preservingCaptured(rebuilt, null))
+    }
+
+    // MARK: - avgHrEdited (#18 honest disclosure)
+
+    @Test
+    fun avgHrEdited_trueWhenAvgChangesOnCapturedStrainRow() {
+        // A recorded session carries captured strain; the user edits the Avg HR. The graph/zones/Effort
+        // stay from the recording, so the note must fire.
+        val old = row("my-whoop", 100, 3700, "Running", "manual", avgHr = 130, strain = 13.5)
+        val built = WorkoutEditing.preservingCaptured(old.copy(avgHr = 150), old)
+        assertTrue(WorkoutEditing.avgHrEdited(built, old))
+    }
+
+    @Test
+    fun avgHrEdited_trueWhenAvgChangesOnCapturedZonesRow() {
+        // Captured zones (no strain) are enough to make the graph/zones stale on an avg edit.
+        val old = row("my-whoop", 100, 3700, "Running", "manual", avgHr = 130).copy(zonesJSON = "{\"z1\":50}")
+        val built = WorkoutEditing.preservingCaptured(old.copy(avgHr = 145), old)
+        assertTrue(WorkoutEditing.avgHrEdited(built, old))
+    }
+
+    @Test
+    fun avgHrEdited_falseWhenAvgUnchanged() {
+        val old = row("my-whoop", 100, 3700, "Running", "manual", avgHr = 130, strain = 13.5)
+        val built = WorkoutEditing.preservingCaptured(old.copy(sport = "Cycling"), old)
+        assertFalse(WorkoutEditing.avgHrEdited(built, old))
+    }
+
+    @Test
+    fun avgHrEdited_falseWhenNothingCaptured() {
+        // A thin manual row with no captured strain/zones has nothing to go stale, so no note.
+        val old = row("my-whoop", 100, 3700, "Running", "manual", avgHr = 130)
+        val built = old.copy(avgHr = 160)
+        assertFalse(WorkoutEditing.avgHrEdited(built, old))
+    }
+
+    @Test
+    fun avgHrEdited_falseForFreshAdd() {
+        val built = row("my-whoop", 100, 3700, "Running", "manual", avgHr = 140)
+        assertFalse(WorkoutEditing.avgHrEdited(built, null))
+    }
+
+    // MARK: - Filter predicate (#64)
+
+    private fun fullRow(
+        start: Long, end: Long, sport: String, source: String,
+        avgHr: Int? = null, kcal: Double? = null, dist: Double? = null,
+        strain: Double? = null, maxHr: Int? = null, notes: String? = null,
+    ) = WorkoutRow(
+        deviceId = "my-whoop", startTs = start, endTs = end, sport = sport, source = source,
+        durationS = (end - start).toDouble(), energyKcal = kcal, avgHr = avgHr, maxHr = maxHr,
+        strain = strain, distanceM = dist, zonesJSON = null, notes = notes, routePolyline = null,
+    )
+
+    @Test
+    fun filter_inactiveWhenEmptyPassesEverythingUntouched() {
+        val rows = listOf(
+            fullRow(100, 3700, "Running", "whoop"),
+            fullRow(5000, 8600, "Cycling", "manual"),
+        )
+        val f = WorkoutFilter()
+        assertFalse(f.isActive)
+        assertEquals(rows, f.apply(rows))
+    }
+
+    @Test
+    fun filter_sportSourceAndSearchCompose() {
+        val run = fullRow(100, 3700, "Running", "whoop")
+        val manualRun = fullRow(5000, 8600, "Running", "manual")
+        val cycle = fullRow(9000, 12000, "Cycling", "manual")
+        val detected = fullRow(13000, 14000, "detected", "my-whoop-noop")
+        val rows = listOf(run, manualRun, cycle, detected)
+
+        assertEquals(listOf(run, manualRun), WorkoutFilter(sport = "Running").apply(rows))
+        // "detected" folds to "Activity" for the sport facet.
+        assertEquals(listOf(detected), WorkoutFilter(sport = "Activity").apply(rows))
+        assertEquals(listOf(manualRun, cycle), WorkoutFilter(sourceClass = WorkoutSource.MANUAL).apply(rows))
+        assertEquals(
+            listOf(manualRun),
+            WorkoutFilter(sport = "Running", sourceClass = WorkoutSource.MANUAL).apply(rows),
+        )
+        assertEquals(listOf(cycle), WorkoutFilter(search = "cyc").apply(rows))
+        assertEquals(listOf(run, manualRun), WorkoutFilter(search = "  RUN ").apply(rows))
+        assertEquals(
+            listOf(run),
+            WorkoutFilter(sport = "Running", sourceClass = WorkoutSource.WHOOP, search = "run").apply(rows),
+        )
+    }
+
+    // MARK: - Merge (#64)
+
+    @Test
+    fun merge_eligibilityGatesOnManualOrDetected() {
+        val manual = fullRow(100, 3700, "Running", "manual")
+        val detected = fullRow(100, 3700, "detected", "my-whoop-noop")
+        val whoop = fullRow(100, 3700, "Running", "whoop")
+        val apple = fullRow(100, 3700, "Running", "apple-health")
+        assertTrue(WorkoutMerge.isMergeable(manual))
+        assertTrue(WorkoutMerge.isMergeable(detected))
+        assertFalse(WorkoutMerge.isMergeable(whoop))
+        assertFalse(WorkoutMerge.isMergeable(apple))
+        assertTrue(WorkoutMerge.canMerge(listOf(manual, detected)))
+        assertFalse(WorkoutMerge.canMerge(listOf(manual)))
+        assertFalse(WorkoutMerge.canMerge(listOf(manual, whoop)))
+    }
+
+    @Test
+    fun merge_twoManualSumsAndSpansAndWeightsHr() {
+        val a = fullRow(1000, 4600, "Running", "manual", avgHr = 150, kcal = 600.0, dist = 10_000.0, maxHr = 178)
+        val b = fullRow(5000, 7400, "Running", "manual", avgHr = 120, kcal = 300.0, dist = 5_000.0, maxHr = 150)
+        val m = WorkoutMerge.merge(listOf(a, b))
+        assertEquals("manual", m?.source)
+        assertEquals("Running", m?.sport)
+        assertEquals(1000L, m?.startTs)
+        assertEquals(7400L, m?.endTs)
+        assertEquals(6000.0, m?.durationS)      // SUM of durations, not the 6400s span
+        assertEquals(900.0, m?.energyKcal)
+        assertEquals(15_000.0, m?.distanceM)
+        assertEquals(178, m?.maxHr)
+        assertNull(m?.strain)                    // rescored by analyzeRecent, never summed
+        assertNull(m?.zonesJSON)
+        assertEquals(138, m?.avgHr)              // (150*3600 + 120*2400) / 6000
+    }
+
+    @Test
+    fun merge_weightsOnlyRowsWithHr() {
+        val a = fullRow(1000, 4600, "Cycling", "manual", avgHr = 140)
+        val b = fullRow(5000, 7400, "Cycling", "manual", avgHr = null)
+        assertEquals(140, WorkoutMerge.merge(listOf(a, b))?.avgHr)
+    }
+
+    @Test
+    fun merge_sportResolutionPrefersRealLabelOverDetected() {
+        val detected = fullRow(1000, 4600, "detected", "my-whoop-noop")
+        val manual = fullRow(4600, 6000, "Strength Training", "manual")
+        assertEquals("Strength Training", WorkoutMerge.resolvedSport(listOf(detected, manual)))
+        assertEquals("Strength Training", WorkoutMerge.merge(listOf(detected, manual))?.sport)
+        val detected2 = fullRow(6000, 7000, "detected", "my-whoop-noop")
+        assertNull(WorkoutMerge.resolvedSport(listOf(detected, detected2)))
+        assertEquals("Activity", WorkoutMerge.merge(listOf(detected, detected2))?.sport)
+        assertEquals("Yoga", WorkoutMerge.merge(listOf(detected, detected2), sport = "Yoga")?.sport)
+    }
+
+    @Test
+    fun merge_rejectsFewerThanTwo() {
+        val a = fullRow(1000, 4600, "Running", "manual")
+        assertNull(WorkoutMerge.merge(listOf(a)))
+        assertNull(WorkoutMerge.merge(emptyList()))
+    }
+
+    @Test
+    fun merge_joinsNotesAndOmitsAbsentSums() {
+        val a = fullRow(1000, 4600, "Yoga", "manual", notes = "morning")
+        val b = fullRow(5000, 7400, "Yoga", "manual", notes = "cooldown")
+        val m = WorkoutMerge.merge(listOf(a, b))
+        assertEquals("morning · cooldown", m?.notes)
+        assertNull(m?.energyKcal)
+        assertNull(m?.distanceM)
+        assertNull(m?.avgHr)
+    }
+
+    @Test
+    fun merge_landsUnderStrapDeviceId() {
+        // Merge writes through the manual-row path — the merged row must live under the strap deviceId,
+        // never a detected/computed one, so imported history is never touched.
+        val a = fullRow(1000, 4600, "Running", "manual")
+        val b = fullRow(5000, 7400, "Running", "manual")
+        assertEquals("my-whoop", WorkoutMerge.merge(listOf(a, b))?.deviceId)
+        assertEquals("dev2", WorkoutMerge.merge(listOf(a, b), strapDeviceId = "dev2")?.deviceId)
     }
 }

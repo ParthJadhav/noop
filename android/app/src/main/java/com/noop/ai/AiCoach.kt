@@ -4,10 +4,12 @@ import android.content.Context
 import com.noop.analytics.EffectRanker
 import com.noop.analytics.LabMarkerCategory
 import com.noop.analytics.MarkerCatalog
+import com.noop.analytics.StressIndex
 import com.noop.data.DailyMetric
 import com.noop.data.JournalEntry
 import com.noop.data.LabMarkerRow
 import com.noop.data.WhoopRepository
+import com.noop.ui.NoopPrefs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -33,8 +35,8 @@ import kotlin.math.roundToInt
 class AiCoach(private val repo: WhoopRepository) {
 
     /** The device key the rest of the app reads/writes daily metrics under. Coach reads go
-     *  through the MERGED raw+computed view ([WhoopRepository.daysMerged]) — the same per-field
-     *  coalesce every screen uses — so on-device "-noop" scores are visible too (#124). */
+     *  through the MERGED raw+computed view ([WhoopRepository.daysMerged]), the same per-field
+     *  coalesce every screen uses, so on-device "-noop" scores are visible too (#124). */
     private val deviceId = "my-whoop"
 
     /** The source id native (in-app) journal answers are stored under (matches the UI's
@@ -68,7 +70,7 @@ class AiCoach(private val repo: WhoopRepository) {
         includeSignals: Boolean = false,
     ): String = withContext(Dispatchers.IO) {
         // Local (Custom) servers usually need no key; the cloud providers always do. The guarded read
-        // returns the stored key ONLY if it belongs to THIS provider (or is a legacy cloud key) — so a
+        // returns the stored key ONLY if it belongs to THIS provider (or is a legacy cloud key), so a
         // key saved for one provider is never Bearer-sent to another provider's (or a Custom) endpoint.
         val key = AiKeyStore.read(ctx, provider)
         if (key == null && provider != AiProvider.CUSTOM) {
@@ -85,17 +87,30 @@ class AiCoach(private val repo: WhoopRepository) {
         // Include the user's data ONLY with explicit consent; otherwise a note, never their numbers.
         val groundedFull = if (consent) {
             // Merged read, NOT raw days(): a live-strap user's scores live under "my-whoop-noop"
-            // and a raw read misses them — the coach then claimed it had no data. (#124)
+            // and a raw read misses them, the coach then claimed it had no data. (#124)
             val days = runCatching { repo.daysMerged(deviceId) }.getOrDefault(emptyList())
+            // Derived stress: a single Baevsky Stress Index summary line over TODAY's R-R, read the
+            // same way StressScreen does (repo.rrIntervals over the local day) and gated UNDER this same
+            // `consent` block as the HRV/RHR summary, a derived number, never raw R-R egress. Absent
+            // when there aren't enough clean beats yet. Best-effort; never blocks the send.
+            val stress = runCatching { stressLineToday() }.getOrNull()
             // v5: a SECOND opt-in (on top of `consent`) may append a SUMMARY-ONLY line of the user's
-            // strongest on-device patterns + Lab Book markers. Summary text only — no raw rows, no
-            // per-day series — so the anonymity / no-raw-egress posture holds. Best-effort; never blocks.
+            // strongest on-device patterns + Lab Book markers. Summary text only, no raw rows, no
+            // per-day series, so the anonymity / no-raw-egress posture holds. Best-effort; never blocks.
             val signals = if (includeSignals) runCatching { buildSignalsContext() }.getOrNull() else null
-            val full = if (signals.isNullOrBlank()) buildContext(days) else buildContext(days) + "\n\n" + signals
+            val full = buildString {
+                append(buildContext(days))
+                if (!stress.isNullOrBlank()) append("\n\n").append(stress)
+                if (!signals.isNullOrBlank()) append("\n\n").append(signals)
+            }
             injectContext(history, full)
         } else {
             injectContext(history, NO_CONSENT_NOTE)
         }
+
+        // Resolve the system prompt fresh (user override or the built-in default) so an edit in the
+        // Coach settings takes effect on this very send.
+        val systemPrompt = resolveSystemPrompt(ctx)
 
         // Slide a window over a long conversation so the history can't crowd out the reply on a
         // small local context window (e.g. Ollama's 2048-token default). The first user turn carries
@@ -104,12 +119,26 @@ class AiCoach(private val repo: WhoopRepository) {
 
         when (provider) {
             AiProvider.OPENAI ->
-                callOpenAiCompatible(provider, provider.endpoint, model, key, grounded)
+                callOpenAiCompatible(provider, provider.endpoint, model, key, grounded, systemPrompt)
             AiProvider.ANTHROPIC ->
-                callAnthropic(provider, model, key!!, grounded)
+                callAnthropic(provider, model, key!!, grounded, systemPrompt)
             AiProvider.CUSTOM ->
-                callOpenAiCompatible(provider, customChatUrl(customBaseUrl), model, key, grounded)
+                callOpenAiCompatible(provider, customChatUrl(customBaseUrl), model, key, grounded, systemPrompt)
         }
+    }
+
+    /**
+     * Today's derived stress line for the consent-gated coach context. Reads R-R for the local day
+     * via [WhoopRepository.rrIntervals] (the SAME path StressScreen uses) and summarises it with the
+     * pure [stressIndexLine]. Returns null when there aren't enough clean beats. Summary number only,      * the raw R-R never leaves the device.
+     */
+    private suspend fun stressLineToday(): String? {
+        val nowSeconds = System.currentTimeMillis() / 1000L
+        val tzOffset = java.util.TimeZone.getDefault().getOffset(nowSeconds * 1_000L) / 1_000L
+        val localNow = nowSeconds + tzOffset
+        val from = (localNow - Math.floorMod(localNow, 86_400L)) - tzOffset
+        val rr = repo.rrIntervals(deviceId, from, nowSeconds, limit = 200_000)
+        return stressIndexLine(rr)
     }
 
     /**
@@ -117,7 +146,7 @@ class AiCoach(private val repo: WhoopRepository) {
      *
      * Best-effort: GETs the provider's models endpoint and returns the ids it advertises.
      * On any failure (no key, network, bad key, malformed body) this returns an EMPTY list
-     * rather than throwing — the caller simply keeps its curated/static list. The result is
+     * rather than throwing, the caller simply keeps its curated/static list. The result is
      * filtered to the ids that make sense for chat (OpenAI: ids starting with "gpt" or "o";
      * Anthropic: all returned ids) and de-duplicated.
      *
@@ -128,7 +157,7 @@ class AiCoach(private val repo: WhoopRepository) {
         provider: AiProvider,
         customBaseUrl: String = "",
     ): List<String> = withContext(Dispatchers.IO) {
-        // Guarded read: only a key saved for THIS provider (or a legacy cloud key) is used — never one
+        // Guarded read: only a key saved for THIS provider (or a legacy cloud key) is used, never one
         // provider's key against another's models endpoint.
         val key = AiKeyStore.read(ctx, provider)
         // Cloud providers need a key to list models; a local Custom server usually doesn't.
@@ -222,7 +251,7 @@ class AiCoach(private val repo: WhoopRepository) {
         sb.append("rest ${avg1(last30) { d -> d.totalSleepMin?.div(60.0) }}h, ")
         sb.append("HRV ${avgInt(last30) { it.avgHrv }}ms, ")
         sb.append("RHR ${avgInt(last30) { d -> d.restingHr?.toDouble() }}bpm\n")
-        // Additional vitals when present (#124 — the coach used to see only recovery/strain/sleep/HRV/RHR).
+        // Additional vitals when present (#124, the coach used to see only recovery/strain/sleep/HRV/RHR).
         sb.append("  SpO₂ ${avgInt(last30) { it.spo2Pct }}%, ")
         sb.append("respiration ${avg1(last30) { it.respRateBpm }}/min, ")
         sb.append("skin-temp deviation ${avg1(last30) { it.skinTempDevC }}°C, ")
@@ -243,7 +272,7 @@ class AiCoach(private val repo: WhoopRepository) {
             }
         }
 
-        // Latest snapshot line — handy single reference for the model.
+        // Latest snapshot line, handy single reference for the model.
         days.lastOrNull()?.let { latest ->
             val r = latest.recovery?.let { "${it.roundToInt()}%" } ?: "n/a"
             val s = latest.strain?.let { fmt1(it) } ?: "n/a"
@@ -256,8 +285,7 @@ class AiCoach(private val repo: WhoopRepository) {
     /**
      * SUMMARY-ONLY on-device signals context (v5): the user's strongest associations (from the same
      * [EffectRanker] the Insights hub surfaces) and a one-line-per-marker Lab Book snapshot. Sent only
-     * behind the second opt-in. Deliberately compact + textual — no raw per-day series, no identifiers —
-     * so nothing beyond a plain English summary leaves the device. Returns null/blank when there's
+     * behind the second opt-in. Deliberately compact + textual, no raw per-day series, no identifiers,      * so nothing beyond a plain English summary leaves the device. Returns null/blank when there's
      * nothing to say (the coach then just uses the standard metrics context).
      */
     private suspend fun buildSignalsContext(): String? {
@@ -334,9 +362,9 @@ class AiCoach(private val repo: WhoopRepository) {
     }
 
     // ---------------------------------------------------------------------------------------
-    // OpenAI-compatible — POST {base}/chat/completions
+    // OpenAI-compatible, POST {base}/chat/completions
     //   Used for OpenAI itself and the Custom (local LLM) provider. [key] may be null/blank for a
-    //   local server that needs no auth — the Authorization header is then omitted.
+    //   local server that needs no auth, the Authorization header is then omitted.
     // ---------------------------------------------------------------------------------------
 
     private fun callOpenAiCompatible(
@@ -345,9 +373,10 @@ class AiCoach(private val repo: WhoopRepository) {
         model: String,
         key: String?,
         history: List<ChatMsg>,
+        systemPrompt: String,
     ): String {
         val messages = JSONArray()
-        messages.put(JSONObject().put("role", "system").put("content", SYSTEM_PROMPT))
+        messages.put(JSONObject().put("role", "system").put("content", systemPrompt))
         for (m in history) {
             // OpenAI roles map 1:1 to "user"/"assistant".
             messages.put(JSONObject().put("role", m.role).put("content", m.text))
@@ -379,12 +408,12 @@ class AiCoach(private val repo: WhoopRepository) {
         if (content.isNullOrEmpty()) throw Exception("The provider returned an empty reply. Please try again.")
 
         // Local servers (notably Ollama) stop with finish_reason "length" at the context-window edge
-        // and give NO error — keep the partial text and append the actionable notice so it isn't silent.
+        // and give NO error, keep the partial text and append the actionable notice so it isn't silent.
         val truncated = firstChoice?.optString("finish_reason")?.lowercase() == "length"
         return if (truncated) content + TRUNCATION_NOTE else content
     }
 
-    /** Base for the Custom provider — the user's URL with any trailing slashes trimmed. */
+    /** Base for the Custom provider, the user's URL with any trailing slashes trimmed. */
     private fun customBase(url: String): String = url.trim().trimEnd('/')
 
     private fun customChatUrl(url: String): String {
@@ -401,7 +430,7 @@ class AiCoach(private val repo: WhoopRepository) {
 
     /**
      * Gatekeeper for the Custom (local LLM) provider. https:// is always fine. Plain http:// is
-     * only allowed to a PRIVATE-NETWORK host — loopback, RFC1918, link-local, or *.local — because
+     * only allowed to a PRIVATE-NETWORK host, loopback, RFC1918, link-local, or *.local, because
      * the app's network-security-config permits cleartext app-wide (Android XML can't scope a
      * cleartext rule to a CIDR), so THIS check is what actually keeps cleartext off the public
      * internet (#187). A public http:// host is rejected with a precise, actionable error.
@@ -418,7 +447,7 @@ class AiCoach(private val repo: WhoopRepository) {
             "Unsupported URL scheme \"$scheme\". Use http:// for a local server or https:// for a remote one."
         }
         require(isPrivateLanOrLoopback(host)) {
-            "Plain http:// is only allowed to a local-network server (localhost, 10.x, 172.16–31.x, " +
+            "Plain http:// is only allowed to a local-network server (localhost, 10.x, 172.16-31.x, " +
                 "192.168.x, 169.254.x, or a .local name). Use https:// to reach \"$host\"."
         }
     }
@@ -437,12 +466,12 @@ class AiCoach(private val repo: WhoopRepository) {
         // Is this an IPv6 LITERAL, not a DNS hostname? A URI gives a bracketed host for an IPv6
         // literal ("[::1]"), and an IPv6 literal always contains a colon while a DNS host (the host
         // component excludes the :port) never does. We must only apply the fc/fd/fe80 ULA/link-local
-        // classification to a real literal — otherwise a PUBLIC name like "fclient.evil.com" or
+        // classification to a real literal, otherwise a PUBLIC name like "fclient.evil.com" or
         // "fdn.example.com" starts with "fc"/"fd" and would be wrongly allowed plain-HTTP cleartext.
         val isIpv6Literal = raw.startsWith("[") || h.contains(':')
         if (isIpv6Literal) {
             if (h == "::1") return true                                   // loopback
-            // fc00::/7 unique-local, fe80::/10 link-local — literal-only.
+            // fc00::/7 unique-local, fe80::/10 link-local, literal-only.
             if (h.startsWith("fc") || h.startsWith("fd") || h.startsWith("fe80:")) return true
             return false                                                  // any other IPv6 literal = public
         }
@@ -469,7 +498,7 @@ class AiCoach(private val repo: WhoopRepository) {
     }
 
     // ---------------------------------------------------------------------------------------
-    // Anthropic — POST /v1/messages
+    // Anthropic, POST /v1/messages
     // ---------------------------------------------------------------------------------------
 
     private fun callAnthropic(
@@ -477,6 +506,7 @@ class AiCoach(private val repo: WhoopRepository) {
         model: String,
         key: String,
         history: List<ChatMsg>,
+        systemPrompt: String,
     ): String {
         // Anthropic has no system role inside messages: the system prompt is a top-level field
         // and messages alternate user/assistant.
@@ -488,7 +518,7 @@ class AiCoach(private val repo: WhoopRepository) {
         val body = JSONObject()
             .put("model", model)
             .put("max_tokens", 900)
-            .put("system", SYSTEM_PROMPT)
+            .put("system", systemPrompt)
             .put("messages", messages)
             .toString()
 
@@ -535,11 +565,11 @@ class AiCoach(private val repo: WhoopRepository) {
             // message is "Cleartext HTTP traffic to <host> not permitted" (no dedicated exception
             // class exists). Detect it and explain, instead of the opaque generic line. This should
             // be unreachable now that cleartext is permitted app-wide and guardCustomUrl restricts
-            // http:// to private hosts — but stays as a clear fallback if a policy re-blocks it.
+            // http:// to private hosts, but stays as a clear fallback if a policy re-blocks it.
             val msg = e.message.orEmpty()
             if (msg.contains("Cleartext", ignoreCase = true) && msg.contains("not permitted", ignoreCase = true)) {
                 throw Exception(
-                    "Plain http:// to a LAN address is blocked — update to the build that allows " +
+                    "Plain http:// to a LAN address is blocked, update to the build that allows " +
                         "local-network servers, or use https://."
                 )
             }
@@ -608,20 +638,20 @@ class AiCoach(private val repo: WhoopRepository) {
         /**
          * Appended to a reply when the server stopped early because it ran out of context window.
          * Local OpenAI-compatible servers (notably Ollama, which defaults to a 2048-token window and
-         * IGNORES `num_ctx` on the `/v1` endpoint) truncate silently — no error, the text just stops
+         * IGNORES `num_ctx` on the `/v1` endpoint) truncate silently, no error, the text just stops
          * mid-sentence. We can't raise the window over the OpenAI wire format, so we make the cutoff
          * visible and tell the user exactly how to fix it.
          */
         const val TRUNCATION_NOTE =
             "\n\n---\n*Reply cut off: the model hit its context-window limit. " +
-                "On a local server like Ollama (default 2048 tokens), raise it — create a Modelfile " +
+                "On a local server like Ollama (default 2048 tokens), raise it - create a Modelfile " +
                 "with `PARAMETER num_ctx 8192` and select that model, or set " +
-                "`OLLAMA_CONTEXT_LENGTH=8192` and relaunch Ollama — then ask again.*"
+                "`OLLAMA_CONTEXT_LENGTH=8192` and relaunch Ollama - then ask again.*"
 
         /**
          * Pure: sliding-window the chat. Returns everything when short; otherwise the first user turn
          * (so the data context still has a turn to ride) followed by the last [maxRecent] messages,
-         * with no duplication. No state — unit-tested.
+         * with no duplication. No state, unit-tested.
          */
         fun trimmedHistory(msgs: List<ChatMsg>, maxRecent: Int): List<ChatMsg> {
             if (msgs.size <= maxRecent + 1) return msgs
@@ -635,10 +665,11 @@ class AiCoach(private val repo: WhoopRepository) {
         }
 
         /**
-         * The coach persona. Anonymous (names no app author or model vendor) and includes the
-         * not-a-doctor guardrail.
+         * The built-in coach persona. Anonymous (names no app author or model vendor) and includes the
+         * not-a-doctor guardrail. The user can OVERRIDE this from the Coach settings; the override is
+         * stored in NoopPrefs and read fresh per request via [resolveSystemPrompt].
          */
-        const val SYSTEM_PROMPT =
+        const val DEFAULT_SYSTEM_PROMPT =
             "You are an elite, supportive recovery and performance coach with a real training " +
                 "methodology. You may be given a summary of the user's own wearable data (charge " +
                 "0-100, effort 0-100, rest/sleep, HRV, resting heart rate) and recent workouts. " +
@@ -651,7 +682,7 @@ class AiCoach(private val repo: WhoopRepository) {
                 "biggest recovery lever. Always cite the user's ACTUAL numbers, give a concrete plan " +
                 "(today and the week), and be specific, punchy and motivating. If no data is " +
                 "provided, coach generally and invite them to enable data access. You are NOT a " +
-                "doctor — never diagnose; suggest a professional for genuine health concerns. " +
+                "doctor - never diagnose; suggest a professional for genuine health concerns. " +
                 "Format replies in simple Markdown, chat-sized: short paragraphs, **bold** for key " +
                 "numbers, bullet or numbered lists for plans, and ### headings only when structure " +
                 "genuinely helps. No tables or code blocks."
@@ -660,5 +691,32 @@ class AiCoach(private val repo: WhoopRepository) {
         const val NO_CONSENT_NOTE =
             "NOTE: The user has not granted access to their biometric data. Coach generally and " +
                 "encourage them to enable \"Let the coach use my data\" for tailored guidance."
+
+        /**
+         * The system prompt actually sent: the user's edited override from [NoopPrefs] when it is
+         * non-blank, otherwise [DEFAULT_SYSTEM_PROMPT]. Read fresh per request so an edit in the Coach
+         * settings takes effect on the very next message, with no engine rebuild. Mirrors macOS/iOS
+         * `AICoachEngine.systemPrompt`.
+         */
+        fun resolveSystemPrompt(ctx: Context): String {
+            val custom = NoopPrefs.coachSystemPrompt(ctx).trim()
+            return if (custom.isNotEmpty()) custom else DEFAULT_SYSTEM_PROMPT
+        }
+
+        /**
+         * One derived stress line for the coach context: the Baevsky Stress Index over a series of R-R
+         * intervals, summarised to a single number. Pure (no IO) so it is unit-testable; returns null
+         * when there are too few clean beats (the histogram needs >= [StressIndex.MIN_BEATS]), so the
+         * line is simply absent, never a fabricated value. Summary-only: no raw R-R leaves the device.
+         */
+        fun stressIndexLine(rr: List<com.noop.data.RrInterval>): String? {
+            val si = StressIndex.stressIndex(rr) ?: return null
+            return stressIndexSummary(si)
+        }
+
+        /** Pure formatter for the derived stress line, one labelled summary number. */
+        fun stressIndexSummary(si: Double): String =
+            "Stress (SI): ${si.roundToInt()} (Baevsky Stress Index over today's R-R; higher means more " +
+                "sympathetic / under load; an autonomic-balance proxy, not a clinical figure)."
     }
 }

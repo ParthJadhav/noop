@@ -2,6 +2,7 @@ package com.noop.analytics
 
 import com.noop.data.HrSample
 import com.noop.data.SkinTempSample
+import com.noop.protocol.DeviceFamily
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -92,6 +93,134 @@ class SkinTempAnalyticsTest {
     @Test
     fun emptyInputsAreNull() {
         assertNull(AnalyticsEngine.wornNightlySkinTempC(emptyList(), emptyList(), emptyList()))
+    }
+
+    // ── skin-temp funnel diagnostic (#752) ──────────────────────────────────
+
+    /** The kept-path: the funnel's mean is identical to [AnalyticsEngine.wornNightlySkinTempC], and the
+     *  drop buckets + kept sum to the total (every sample accounted for once). Mirrors Swift
+     *  testFunnelKeptPathMatchesMeanAndAccountsForEverySample. */
+    @Test
+    fun funnelKeptPathMatchesMeanAndAccountsForEverySample() {
+        val start = 6_000_000L
+        val sess = listOf(session(start, 600))
+        val hrs = (0 until 600).map { hr(start + it) }
+        val temps = (0 until 600).map { skin(start + it, 3400) } // 34 °C, all worn + in-window
+        val f = AnalyticsEngine.skinTempFunnel(sess, hrs, temps)
+        assertEquals(600, f.totalSamples)
+        assertEquals(600, f.kept)
+        assertEquals(f.totalSamples, f.droppedNotWorn + f.droppedOutOfWindow + f.droppedOutOfRange + f.kept)
+        assertEquals(34.0, f.mean!!, 1e-9)
+        assertFalse(f.isAbsent)
+        assertEquals(AnalyticsEngine.wornNightlySkinTempC(sess, hrs, temps), f.mean)
+    }
+
+    /** 4.0-style "skin temp absent": samples exist but NONE are worn → all loss to droppedNotWorn, mean
+     *  absent. Mirrors Swift testFunnelAllNotWornExplainsAbsence. */
+    @Test
+    fun funnelAllNotWornExplainsAbsence() {
+        val start = 7_000_000L
+        val sess = listOf(session(start, 600))
+        val temps = (0 until 600).map { skin(start + it, 3400) }
+        val f = AnalyticsEngine.skinTempFunnel(sess, emptyList(), temps)
+        assertEquals(600, f.totalSamples)
+        assertEquals(600, f.droppedNotWorn)
+        assertEquals(0, f.kept)
+        assertTrue(f.isAbsent)
+        assertTrue("the summary names the dominant gate: ${f.summary}", f.summary.contains("notWorn=600"))
+    }
+
+    /** Worn + in-window samples that drift to ambient (~22 °C) fail the worn-range gate → droppedOutOfRange.
+     *  Mirrors Swift testFunnelOutOfRangeIsAttributedToRangeGate. */
+    @Test
+    fun funnelOutOfRangeIsAttributedToRangeGate() {
+        val start = 8_000_000L
+        val sess = listOf(session(start, 600))
+        val hrs = (0 until 600).map { hr(start + it) }
+        val temps = (0 until 600).map { skin(start + it, 2200) } // 22 °C ambient
+        val f = AnalyticsEngine.skinTempFunnel(sess, hrs, temps)
+        assertEquals(600, f.droppedOutOfRange)
+        assertEquals(0, f.droppedNotWorn)
+        assertEquals(0, f.kept)
+        assertTrue(f.isAbsent)
+    }
+
+    /** Worn samples outside every in-bed span → droppedOutOfWindow; with NO session, every sample is out of
+     *  window (legacy early-return parity). Mirrors Swift testFunnelOutOfWindowAndNoSession. */
+    @Test
+    fun funnelOutOfWindowAndNoSession() {
+        val start = 9_000_000L
+        val sess = listOf(session(start, 600))
+        val hrs = (0 until 600).map { hr(start + 100_000 + it) }
+        val temps = (0 until 600).map { skin(start + 100_000 + it, 3400) }
+        val f = AnalyticsEngine.skinTempFunnel(sess, hrs, temps)
+        assertEquals(600, f.droppedOutOfWindow)
+        assertEquals(0, f.kept)
+        assertTrue(f.isAbsent)
+        val none = AnalyticsEngine.skinTempFunnel(emptyList(), hrs, temps)
+        assertEquals(600, none.droppedOutOfWindow)
+        assertTrue(none.isAbsent)
+    }
+
+    /** Below the min-samples floor: every sample kept but the mean is still absent (last gate); kept reports
+     *  the survivor count. Mirrors Swift testFunnelBelowMinSamplesKeepsButMeanAbsent. */
+    @Test
+    fun funnelBelowMinSamplesKeepsButMeanAbsent() {
+        val start = 10_000_000L
+        val sess = listOf(session(start, 100))
+        val hrs = (0 until 100).map { hr(start + it) }
+        val temps = (0 until 100).map { skin(start + it, 3400) } // 100 < MIN_SKIN_TEMP_SAMPLES
+        val f = AnalyticsEngine.skinTempFunnel(sess, hrs, temps)
+        assertEquals(100, f.kept)
+        assertTrue(f.minSamples > 100)
+        assertTrue("kept < minSamples → no trusted mean", f.isAbsent)
+    }
+
+    // ── device-family-aware conversion (#938) ───────────────────────────────
+
+    /** A WHOOP 4.0 v24 worn night (raw ~840, the reporter's steady worn baseline) produced NO nightly mean
+     *  under the old family-blind /100 (8.4 °C, below the 28 °C worn gate). With the WHOOP4 scale it lands
+     *  ~33.7 °C and the night is kept. Mirrors Swift testWhoop4WornNightProducesMeanUnderFamilyAwareScale. */
+    @Test
+    fun whoop4WornNightProducesMeanUnderFamilyAwareScale() {
+        val start = 11_000_000L
+        val sess = listOf(session(start, 600))
+        val hrs = (0 until 600).map { hr(start + it) }
+        val temps = (0 until 600).map { skin(start + it, 840) } // raw 840 (NOT centi-°C for a 4.0)
+        assertNull(AnalyticsEngine.wornNightlySkinTempC(sess, hrs, temps, DeviceFamily.WHOOP5))
+        val mean = AnalyticsEngine.wornNightlySkinTempC(sess, hrs, temps, DeviceFamily.WHOOP4)!!
+        assertTrue("worn 4.0 night must clear the 28 °C gate, was $mean", mean > 28.0)
+        assertTrue("worn 4.0 night must stay under 42 °C, was $mean", mean < 42.0)
+    }
+
+    /** A 5/MG worn night is identical whether family is defaulted or passed explicitly. Mirrors Swift
+     *  testWhoop5NightUnchangedByFamilyParameter. */
+    @Test
+    fun whoop5NightUnchangedByFamilyParameter() {
+        val start = 12_000_000L
+        val sess = listOf(session(start, 600))
+        val hrs = (0 until 600).map { hr(start + it) }
+        val temps = (0 until 600).map { skin(start + it, 3400) } // 34 °C centidegrees
+        val defaulted = AnalyticsEngine.wornNightlySkinTempC(sess, hrs, temps)!!
+        val explicit = AnalyticsEngine.wornNightlySkinTempC(sess, hrs, temps, DeviceFamily.WHOOP5)!!
+        assertEquals(34.0, defaulted, 1e-9)
+        assertEquals(defaulted, explicit, 1e-12)
+    }
+
+    /** The funnel diagnostic reports the SAME family-aware outcome: a worn 4.0 night is kept under WHOOP4 but
+     *  all-out-of-range under the family-blind WHOOP5 scale. Mirrors Swift testFunnelFamilyAwareAttribution. */
+    @Test
+    fun funnelFamilyAwareAttribution() {
+        val start = 13_000_000L
+        val sess = listOf(session(start, 600))
+        val hrs = (0 until 600).map { hr(start + it) }
+        val temps = (0 until 600).map { skin(start + it, 840) }
+        val w5 = AnalyticsEngine.skinTempFunnel(sess, hrs, temps, DeviceFamily.WHOOP5)
+        assertEquals(600, w5.droppedOutOfRange)
+        assertTrue(w5.isAbsent)
+        val w4 = AnalyticsEngine.skinTempFunnel(sess, hrs, temps, DeviceFamily.WHOOP4)
+        assertEquals(600, w4.kept)
+        assertFalse(w4.isAbsent)
     }
 
     // ── seed → deviation (skin_temp baseline) ───────────────────────────────

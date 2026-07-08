@@ -94,3 +94,4 @@ __pycache__/
 
 # Local release artifacts (zips/ipas built for upload; never tracked)
 dist/
+err.txt

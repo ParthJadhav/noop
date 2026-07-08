@@ -179,6 +179,48 @@ enum HeaderNorm {
         "zone_fc_3_pct": "hr_zone_3_pct",
         "zone_fc_4_pct": "hr_zone_4_pct",
         "zone_fc_5_pct": "hr_zone_5_pct",
+        // — Brazilian Portuguese (ciclos_fisiológicos / sonos / treinos / entradas_diário), issue #692.
+        //   Full header set across cycles, sleeps, workouts and journal, from a real pt-BR export. Note
+        //   "FC máx." folds to the same key as the French "FC max." alias above, and a Swift dictionary
+        //   literal traps on a duplicate key, so it is deliberately NOT repeated here. —
+        "hora_de_inicio_do_ciclo": "cycle_start_time",
+        "hora_de_fim_do_ciclo": "cycle_end_time",
+        "fuso_horario_do_ciclo": "cycle_timezone",
+        "pontuacao_de_recuperacao_pct": "recovery_score_pct",
+        "frequencia_cardiaca_em_repouso_bpm": "resting_heart_rate_bpm",
+        "variabilidade_da_frequencia_cardiaca_ms": "heart_rate_variability_ms",
+        "temp_da_pele_celsius": "skin_temp_celsius",
+        "pct_de_oxigenio_no_sangue": "blood_oxygen_pct",   // "% de oxigênio no sangue" → leading % becomes pct_…
+        "esforco_diario": "day_strain",
+        "energia_queimada_cal": "energy_burned_cal",
+        "fc_media_bpm": "average_hr_bpm",
+        "inicio_do_sono": "sleep_onset",
+        "inicio_da_vigilia": "wake_onset",
+        "desempenho_do_sono_pct": "sleep_performance_pct",
+        "frequencia_respiratoria_rpm": "respiratory_rate_rpm",
+        "duracao_do_sono_min": "asleep_duration_min",
+        "duracao_na_cama_min": "in_bed_duration_min",
+        "duracao_do_sono_leve_min": "light_sleep_duration_min",
+        "duracao_profundo_sono_min": "deep_sws_duration_min",   // "Duração profundo (Sono) (min)"
+        "duracao_rem_min": "rem_duration_min",
+        "duracao_de_vigilia_min": "awake_duration_min",
+        "necessidade_de_sono_min": "sleep_need_min",
+        "debito_de_sono_min": "sleep_debt_min",
+        "eficacia_do_sono_pct": "sleep_efficiency_pct",
+        "consistencia_do_sono_pct": "sleep_consistency_pct",
+        "sesta": "nap",
+        "hora_de_inicio_do_treino": "workout_start_time",
+        "hora_de_fim_do_treino": "workout_end_time",
+        "nome_da_atividade": "activity_name",
+        "esforco_da_atividade": "activity_strain",
+        "zona_1_de_fc_pct": "hr_zone_1_pct",
+        "zona_2_de_fc_pct": "hr_zone_2_pct",
+        "zona_3_de_fc_pct": "hr_zone_3_pct",
+        "zona_4_de_fc_pct": "hr_zone_4_pct",
+        "zona_5_de_fc_pct": "hr_zone_5_pct",
+        "texto_de_pergunta": "question_text",
+        "respondeu_sim": "answered_yes_no",
+        "notas": "notes",
     ]
 }
 
@@ -201,7 +243,12 @@ struct CSVTable {
     /// Parse CSV text (BOM already advisable to strip, but handled here too).
     init(text rawText: String) {
         let text = BOM.stripString(rawText)
-        var records = CSVTable.parseRecords(text)
+        // Detect the field delimiter from the header line. WHOOP exports are comma-separated, but other
+        // sources are not: a real Oura account-export CSV uses `;` (and some locales' spreadsheet exports
+        // use `;` or a tab). Sniffing per file lets one parser read all of them; default stays `,` so the
+        // WHOOP path is byte-for-byte unchanged. (issue #862)
+        let delimiter = CSVTable.detectDelimiter(text)
+        var records = CSVTable.parseRecords(text, delimiter: delimiter)
         guard !records.isEmpty else {
             self.headers = []
             self.normalizedHeaders = []
@@ -243,11 +290,37 @@ struct CSVTable {
         self.init(text: text)
     }
 
+    // MARK: Delimiter detection
+
+    /// Sniff the field delimiter from the FIRST (header) line of a CSV: whichever of `,`, `;` or tab
+    /// appears most outside quotes. Defaults to `,` (so WHOOP / Fitbit exports are unaffected) when the
+    /// header has none of them. Only the header line is scanned, so it's O(header length). (issue #862)
+    static func detectDelimiter(_ text: String) -> Character {
+        var commas = 0, semis = 0, tabs = 0
+        var inQuotes = false
+        for ch in text.unicodeScalars {
+            if ch == "\"" { inQuotes.toggle(); continue }
+            if inQuotes { continue }
+            if ch == "\n" || ch == "\r" { break }   // header line only
+            switch ch {
+            case ",":  commas += 1
+            case ";":  semis += 1
+            case "\t": tabs += 1
+            default:   break
+            }
+        }
+        if semis > commas && semis >= tabs { return ";" }
+        if tabs > commas && tabs > semis { return "\t" }
+        return ","
+    }
+
     // MARK: RFC-4180-ish record splitter
 
     /// Split CSV text into records of fields, honouring quotes and escaped
     /// quotes, and treating CRLF / CR / LF uniformly as row terminators.
-    static func parseRecords(_ text: String) -> [[String]] {
+    /// `delimiter` is the field separator (auto-detected per file; `,` by default).
+    static func parseRecords(_ text: String, delimiter: Character = ",") -> [[String]] {
+        let sep = delimiter.unicodeScalars.first ?? ","
         var records: [[String]] = []
         var field = ""
         var record: [String] = []
@@ -284,7 +357,7 @@ struct CSVTable {
                 case "\"":
                     inQuotes = true
                     sawAnyField = true
-                case ",":
+                case sep:
                     record.append(field)
                     field = ""
                     sawAnyField = true

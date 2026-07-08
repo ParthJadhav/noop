@@ -53,7 +53,7 @@ final class JournalWorkoutAppleCacheTests: XCTestCase {
     }
 
     func testDeleteJournalTouchesOnlyTheNamedSource() async throws {
-        // The native logging card clears under "noop-journal" only — an identical
+        // The native logging card clears under "noop-journal" only, an identical
         // (day, question) imported under "my-whoop" must survive the clear.
         let store = try await WhoopStore.inMemory()
         let e = JournalEntry(day: "2026-06-09", question: "Any alcohol?", answeredYes: true, notes: nil)
@@ -102,6 +102,65 @@ final class JournalWorkoutAppleCacheTests: XCTestCase {
             JournalEntry(day: "2026-05-01", question: "B", answeredYes: false, notes: nil),
         ], deviceId: "devA")
         XCTAssertEqual(n, 2)
+    }
+
+    // MARK: - journal numeric value (#322 / v20)
+
+    func testV20AddsNumericValueColumn() async throws {
+        // The v20 migration must add `numericValue` to the journal table (additive, nullable).
+        let store = try await WhoopStore.inMemory()
+        let cols = try await store.columnNamesForTest(table: "journal")
+        XCTAssertTrue(cols.contains("numericValue"), "v20 must add journal.numericValue")
+        // The PK is unchanged (still natural key), so existing history keys the same way.
+        let pk = try await store.primaryKeyColumns("journal")
+        XCTAssertEqual(pk, ["deviceId", "day", "question"])
+    }
+
+    func testJournalNumericValueRoundTrips() async throws {
+        // A numeric log stores answeredYes=true AND the value; both survive the round-trip.
+        let store = try await WhoopStore.inMemory()
+        let e = JournalEntry(day: "2026-06-20", question: "Caffeine (mg)",
+                             answeredYes: true, notes: nil, numericValue: 180)
+        try await store.upsertJournal([e], deviceId: "noop-journal")
+        let rows = try await store.journalEntries(deviceId: "noop-journal",
+                                                  from: "2026-06-01", to: "2026-06-30")
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows[0].numericValue, 180)
+        XCTAssertTrue(rows[0].answeredYes, "a numeric log is also a yes for the with/without split")
+    }
+
+    func testJournalPlainAnswerHasNilNumericValue() async throws {
+        // A plain yes/no answer (and every legacy/imported row) reads back numericValue == nil.
+        let store = try await WhoopStore.inMemory()
+        try await store.upsertJournal(
+            [JournalEntry(day: "2026-06-20", question: "Alcohol?", answeredYes: false, notes: nil)],
+            deviceId: "noop-journal")
+        let rows = try await store.journalEntries(deviceId: "noop-journal",
+                                                  from: "2026-06-20", to: "2026-06-20")
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertNil(rows[0].numericValue, "a plain answer carries no numeric reading")
+    }
+
+    func testJournalNumericValueUpdatesOnConflict() async throws {
+        // Re-logging the same (day, question) with a new value updates in place (no duplicate),
+        // and clearing the value (nil) round-trips as nil.
+        let store = try await WhoopStore.inMemory()
+        let day = "2026-06-21", q = "Water (L)"
+        try await store.upsertJournal(
+            [JournalEntry(day: day, question: q, answeredYes: true, notes: nil, numericValue: 2)],
+            deviceId: "noop-journal")
+        try await store.upsertJournal(
+            [JournalEntry(day: day, question: q, answeredYes: true, notes: nil, numericValue: 3.5)],
+            deviceId: "noop-journal")
+        var rows = try await store.journalEntries(deviceId: "noop-journal", from: day, to: day)
+        XCTAssertEqual(rows.count, 1, "same natural key must not duplicate")
+        XCTAssertEqual(rows[0].numericValue, 3.5)
+        // Overwrite with a plain answer → numericValue clears to nil.
+        try await store.upsertJournal(
+            [JournalEntry(day: day, question: q, answeredYes: false, notes: nil)],
+            deviceId: "noop-journal")
+        rows = try await store.journalEntries(deviceId: "noop-journal", from: day, to: day)
+        XCTAssertNil(rows[0].numericValue)
     }
 
     // MARK: - workout

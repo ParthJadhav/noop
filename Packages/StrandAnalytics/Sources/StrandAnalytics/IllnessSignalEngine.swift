@@ -132,7 +132,7 @@ public enum IllnessSignalEngine {
     }
 
     /// Standing not-a-diagnosis tail reused verbatim from the shipped IllnessNotifier copy.
-    public static let disclaimerTail = "On-device estimate — not a diagnosis."
+    public static let disclaimerTail = "On-device estimate - not a diagnosis."
 
     // MARK: - Evaluate
 
@@ -170,7 +170,7 @@ public enum IllnessSignalEngine {
         if !context.baselineTrusted {
             return Result(score: score, level: .quiet, firedSignals: firedSignals,
                           suppressedBy: [], signalCount: signalCount,
-                          copy: "Still learning your baseline — keeping an eye out.")
+                          copy: "Still learning your baseline - keeping an eye out.")
         }
 
         // Already-unwell path: the user told us. Switch from "early warning" to a gentle "rest up" and
@@ -178,8 +178,8 @@ public enum IllnessSignalEngine {
         if context.alreadyUnwell {
             let agreeing = score >= mildThreshold && signalCount >= 1
             let copy = agreeing
-                ? "Rest up — you logged feeling unwell, and your numbers agree. \(disclaimerTail)"
-                : "Rest up — you logged feeling unwell. Take it easy today. \(disclaimerTail)"
+                ? "Rest up - you logged feeling unwell, and your numbers agree. \(disclaimerTail)"
+                : "Rest up - you logged feeling unwell. Take it easy today. \(disclaimerTail)"
             return Result(score: score, level: .alreadyUnwell, firedSignals: firedSignals,
                           suppressedBy: [], signalCount: signalCount, copy: copy)
         }
@@ -188,7 +188,7 @@ public enum IllnessSignalEngine {
         guard signalCount >= minCorroboratingSignals, score >= mildThreshold else {
             return Result(score: score, level: .quiet, firedSignals: firedSignals,
                           suppressedBy: [], signalCount: signalCount,
-                          copy: "Nothing notable — your signals look like your normal range.")
+                          copy: "Nothing notable - your signals look like your normal range.")
         }
 
         // Confounder suppression — the differentiating part. Collect every present behaviour/travel tag
@@ -205,7 +205,7 @@ public enum IllnessSignalEngine {
         if !suppressedBy.isEmpty {
             let dampened = score * confounderDampen
             let reason = joinReasons(suppressedBy)
-            let copy = "Some signals are up (\(signalsPhrase)), but you logged \(reason) — likely that, "
+            let copy = "Some signals are up (\(signalsPhrase)), but you logged \(reason) - likely that, "
                 + "not illness. \(disclaimerTail)"
             return Result(score: dampened, level: .suppressed, firedSignals: firedSignals,
                           suppressedBy: suppressedBy, signalCount: signalCount, copy: copy)
@@ -213,14 +213,14 @@ public enum IllnessSignalEngine {
 
         // No confounder. Mild stays in the detail view; a strong composite raises.
         if score < raiseThreshold {
-            let copy = "A few signals are mildly up (\(signalsPhrase)). Nothing alarming — worth a calmer "
+            let copy = "A few signals are mildly up (\(signalsPhrase)). Nothing alarming - worth a calmer "
                 + "day. \(disclaimerTail)"
             return Result(score: score, level: .mild, firedSignals: firedSignals,
                           suppressedBy: [], signalCount: signalCount, copy: copy)
         }
 
         let ruledOut = "no alcohol or travel logged"
-        let copy = "Heads-up — your body looks strained. \(signalsPhrase). With \(ruledOut), consider "
+        let copy = "Heads-up - your body looks strained. \(signalsPhrase). With \(ruledOut), consider "
             + "taking it easy. \(disclaimerTail)"
         return Result(score: score, level: .raised, firedSignals: firedSignals,
                       suppressedBy: [], signalCount: signalCount, copy: copy)

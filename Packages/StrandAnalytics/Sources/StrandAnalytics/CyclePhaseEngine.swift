@@ -139,7 +139,7 @@ public enum CyclePhaseEngine {
         guard baselineUsable, nights.count >= minNightsToClassify else {
             return Result(phase: .learning, confidence: .learning, cycleDayLow: nil, cycleDayHigh: nil,
                           cycleLengthDays: nil, nextPeriodWindow: nil, shiftMarkers: [],
-                          note: "Learning your pattern from your nightly temperature — keep wearing it overnight.")
+                          note: "Learning your pattern from your nightly temperature - keep wearing it overnight.")
         }
 
         // Fuse each night into a single luteal index; nil where no signal at all.
@@ -150,7 +150,7 @@ public enum CyclePhaseEngine {
         guard values.count >= minNightsToClassify else {
             return Result(phase: .learning, confidence: .learning, cycleDayLow: nil, cycleDayHigh: nil,
                           cycleLengthDays: nil, nextPeriodWindow: nil, shiftMarkers: [],
-                          note: "Learning your pattern from your nightly temperature — keep wearing it overnight.")
+                          note: "Learning your pattern from your nightly temperature - keep wearing it overnight.")
         }
 
         let center = median(values)
@@ -173,7 +173,7 @@ public enum CyclePhaseEngine {
         guard let lastOnsetIdx = onsets.last else {
             return Result(phase: .unknown, confidence: .building, cycleDayLow: nil, cycleDayHigh: nil,
                           cycleLengthDays: nil, nextPeriodWindow: nil, shiftMarkers: shiftMarkers,
-                          note: "No clear temperature pattern yet — this can happen with irregular cycles, "
+                          note: "No clear temperature pattern yet - this can happen with irregular cycles, "
                               + "hormonal birth control, or shift work.")
         }
 
@@ -206,7 +206,7 @@ public enum CyclePhaseEngine {
             // newer period is overdue) means the log is likely mistimed — FLAG it, don't silently trust.
             let sinceLog = daysBetween(loggedStart, lastNightDay) ?? 0
             if (delta.map { $0 < 0 || $0 > maxCycleDays } ?? false) || sinceLog > maxCycleDays {
-                note = "Your temperature shift came at a different time than your logged date — "
+                note = "Your temperature shift came at a different time than your logged date - "
                     + "the logged start may be off."
             }
         }
@@ -280,15 +280,15 @@ public enum CyclePhaseEngine {
     static func phaseNote(_ phase: Phase) -> String {
         switch phase {
         case .follicular:
-            return "Follicular range — temperature sitting at your baseline."
+            return "Follicular range - temperature sitting at your baseline."
         case .periOvulatory:
-            return "Around your mid-cycle shift — temperature is turning."
+            return "Around your mid-cycle shift - temperature is turning."
         case .luteal:
-            return "Luteal range — temperature is running above your baseline."
+            return "Luteal range - temperature is running above your baseline."
         case .unknown:
             return "No clear pattern yet."
         case .learning:
-            return "Learning your pattern — keep wearing it overnight."
+            return "Learning your pattern - keep wearing it overnight."
         }
     }
 

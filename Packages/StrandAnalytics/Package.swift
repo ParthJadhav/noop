@@ -3,7 +3,7 @@ import PackageDescription
 
 let package = Package(
     name: "StrandAnalytics",
-    platforms: [.macOS(.v13), .iOS(.v16)],
+    platforms: [.macOS(.v13), .iOS(.v16), .watchOS(.v10)],
     products: [.library(name: "StrandAnalytics", targets: ["StrandAnalytics"])],
     dependencies: [
         .package(path: "../WhoopProtocol"),

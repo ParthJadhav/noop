@@ -54,12 +54,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.semantics.contentDescription
@@ -123,7 +125,7 @@ fun Modifier.frostedCardSurface(
             style = Stroke(width = 1.dp.toPx()),
         )
     } else {
-        // TINTED card (iOS parity, Aaron 2026-06-23 "synthesis has the old blue style"): a FLAT raised
+        // TINTED card (iOS parity, 2026-06-23 "synthesis has the old blue style"): a FLAT raised
         // surface — the SAME WHOOP grey as the neutral card, NO navy bevel gradient — carrying only a
         // whisper of the domain tint as a diagonal hue wash so it stays in the grey family.
         // 1) Flat raised fill — identical to the neutral card.
@@ -284,37 +286,17 @@ fun ConnectionDot(
     size: Dp = 9.dp,
     modifier: Modifier = Modifier,
 ) {
-    val transition = rememberInfiniteTransition(label = "dot")
-    val scale by transition.animateFloat(
-        initialValue = 1.0f,
-        targetValue = if (pulsing) 2.4f else 1.0f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(Motion.breathPeriodMs, easing = Motion.easeInOut),
-            repeatMode = RepeatMode.Reverse,
-        ),
-        label = "dotScale",
-    )
-    val haloAlpha by transition.animateFloat(
-        initialValue = 0.5f,
-        targetValue = if (pulsing) 0.0f else 0.5f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(Motion.breathPeriodMs, easing = Motion.easeInOut),
-            repeatMode = RepeatMode.Reverse,
-        ),
-        label = "dotHalo",
-    )
     Box(
         modifier = modifier.size(size),
         contentAlignment = Alignment.Center,
     ) {
+        // PERF (#scroll-jank): only spin up the infinite breathing transition when the dot ACTUALLY pulses.
+        // The transition lived unconditionally here, so every static (non-pulsing) ConnectionDot — and there
+        // are several on Today (each StatePill, source pill, etc.) — kept a running animation-clock
+        // subscription invalidating the frame, for a halo that wasn't even drawn. Hoisting it into a child
+        // that's composed only when `pulsing` means a still dot does zero per-frame work. Identical visuals.
         if (pulsing) {
-            Box(
-                modifier = Modifier
-                    .size(size)
-                    .drawBehind {
-                        drawCircleScaled(tone.color, scale, haloAlpha)
-                    },
-            )
+            PulsingDotHalo(tone = tone, size = size)
         }
         Box(
             modifier = Modifier
@@ -323,6 +305,38 @@ fun ConnectionDot(
                 .background(tone.color),
         )
     }
+}
+
+/** The breathing halo behind a LIVE [ConnectionDot]. Isolated so the infinite transition only exists while
+ *  the dot is actually pulsing (a still dot creates no animation subscription — the scroll-jank fix). */
+@Composable
+private fun PulsingDotHalo(tone: StrandTone, size: Dp) {
+    val transition = rememberInfiniteTransition(label = "dot")
+    val scale by transition.animateFloat(
+        initialValue = 1.0f,
+        targetValue = 2.4f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(Motion.breathPeriodMs, easing = Motion.easeInOut),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "dotScale",
+    )
+    val haloAlpha by transition.animateFloat(
+        initialValue = 0.5f,
+        targetValue = 0.0f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(Motion.breathPeriodMs, easing = Motion.easeInOut),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "dotHalo",
+    )
+    Box(
+        modifier = Modifier
+            .size(size)
+            .drawBehind {
+                drawCircleScaled(tone.color, scale, haloAlpha)
+            },
+    )
 }
 
 private fun DrawScope.drawCircleScaled(
@@ -542,6 +556,10 @@ fun <T> SegmentedPillControl(
     label: (T) -> String,
     onSelect: (T) -> Unit,
     modifier: Modifier = Modifier,
+    // Per-segment availability (#943): a disabled segment stays VISIBLE (dimmed, not clickable) so the
+    // control can teach that an option exists before it is usable, e.g. trend ranges that unlock as
+    // history builds. Defaulted so every existing call site is untouched.
+    enabled: (T) -> Boolean = { true },
 ) {
     val outerShape = RoundedCornerShape(50)
     // The track is a fixed-height pill; the selected pill FILLS that height so its inset is EQUAL on
@@ -560,9 +578,10 @@ fun <T> SegmentedPillControl(
     ) {
         items.forEach { item ->
             val selected = item == selection
+            val itemEnabled = enabled(item)
             // Selected segment is SELECTION CHROME → follows the accent: a gold gradient + gold-deep ink
             // on dark; a flat blue accent + white ink on light (so light selection matches the blue
-            // chrome, not gold). Unselected stays clear with tertiary text.
+            // chrome, not gold). Unselected stays clear with tertiary text; disabled dims further.
             val pillShape = RoundedCornerShape(50)
             val pillBg = if (selected) {
                 if (Palette.isLight) Modifier.background(Palette.accent, pillShape)
@@ -576,17 +595,18 @@ fun <T> SegmentedPillControl(
                     .fillMaxHeight()
                     .clip(pillShape)
                     .then(pillBg)
-                    .clickableNoRipple { onSelect(item) }
+                    .then(if (itemEnabled) Modifier.clickableNoRipple { onSelect(item) } else Modifier)
                     .padding(horizontal = 12.dp),
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
                     text = label(item),
                     style = NoopType.captionNumber,
-                    color = if (selected) {
-                        if (Palette.isLight) androidx.compose.ui.graphics.Color.White else Palette.goldDeepText
-                    } else {
-                        Palette.textTertiary
+                    color = when {
+                        selected && Palette.isLight -> androidx.compose.ui.graphics.Color.White
+                        selected -> Palette.goldDeepText
+                        !itemEnabled -> Palette.textTertiary.copy(alpha = 0.45f)
+                        else -> Palette.textTertiary
                     },
                 )
             }
@@ -652,6 +672,46 @@ fun BevelGauge(
         Box(
             modifier = Modifier
                 .size(diameter)
+                // PERF (#scroll-jank): the frosted inner disc + its hairline rim — and crucially the
+                // radial-gradient disc Brush they need — are STATIC (they read neither the animated
+                // fraction nor any scroll state) yet shared one drawBehind with the fraction-driven arc,
+                // so they were re-issued every animation/scroll frame. Hoist JUST the disc + rim into
+                // drawWithCache (keyed on the implicit size + lineWidth + the palette tones) so they
+                // rasterise once and replay as a texture. The track stays in the per-frame layer because
+                // the original z-order is disc → rim → BLOOM → track → fill arc → cap, i.e. the bloom (a
+                // fraction-driven, per-frame layer) sits BETWEEN the rim and the track — caching the track
+                // above the bloom would move it over the bloom and change the pixels. The remaining
+                // per-frame layer is just the track + bloom + fill arc + cap + core (a handful of
+                // drawArc/drawCircle calls), no longer the expensive radial disc. Pixel-identical.
+                .drawWithCache {
+                    val stroke = lineWidth.toPx()
+                    val radius = (min(size.width, size.height) - stroke) / 2f
+                    val center = Offset(size.width / 2f, size.height / 2f)
+                    val discRadius = (radius - stroke * 0.4f).coerceAtLeast(1f)
+                    val discBrush = Brush.radialGradient(
+                        colors = listOf(
+                            Palette.surfaceInset.copy(alpha = 0f),
+                            Palette.surfaceInset.copy(alpha = 0.55f),
+                        ),
+                        center = center,
+                        radius = radius,
+                    )
+                    val rimStroke = Stroke(width = 1.dp.toPx())
+                    onDrawBehind {
+                        // Frosted inner disc behind the arc — a glassy "well".
+                        drawCircle(brush = discBrush, radius = discRadius, center = center)
+                        // Faint hairline rim around the inner disc (iOS innerDisc strokeBorder hairline 0.5).
+                        drawCircle(
+                            color = Palette.hairline.copy(alpha = 0.5f),
+                            radius = discRadius,
+                            center = center,
+                            style = rimStroke,
+                        )
+                    }
+                }
+                // The per-frame layer: bloom + full-span track + fill arc + end cap + brand core, in the
+                // ORIGINAL order. Drawn AFTER (over) the cached disc/rim. Reads animatedFraction so it
+                // re-issues per frame, but it is only a few drawArc/drawCircle calls now.
                 .drawBehind {
                     val stroke = lineWidth.toPx()
                     val radius = (min(size.width, size.height) - stroke) / 2f
@@ -659,28 +719,6 @@ fun BevelGauge(
                     val topLeft = Offset(center.x - radius, center.y - radius)
                     val arcSize = Size(radius * 2f, radius * 2f)
                     val sweepStroke = Stroke(width = stroke, cap = StrokeCap.Round)
-
-                    // Frosted inner disc behind the arc — a glassy "well".
-                    val discRadius = (radius - stroke * 0.4f).coerceAtLeast(1f)
-                    drawCircle(
-                        brush = Brush.radialGradient(
-                            colors = listOf(
-                                Palette.surfaceInset.copy(alpha = 0f),
-                                Palette.surfaceInset.copy(alpha = 0.55f),
-                            ),
-                            center = center,
-                            radius = radius,
-                        ),
-                        radius = discRadius,
-                        center = center,
-                    )
-                    // Faint hairline rim around the inner disc (iOS innerDisc strokeBorder hairline 0.5).
-                    drawCircle(
-                        color = Palette.hairline.copy(alpha = 0.5f),
-                        radius = discRadius,
-                        center = center,
-                        style = Stroke(width = 1.dp.toPx()),
-                    )
 
                     // Outer bloom — a soft, lower-opacity wide arc (drawn first, under the track).
                     // A glow only reads on the dark canvas; on the white light card it just smears the
@@ -700,7 +738,8 @@ fun BevelGauge(
                     }
 
                     // Full-span track — the carved inset "well" the arc sits in (iOS: solid surfaceInset,
-                    // full opacity, same round cap), not a faint hairline.
+                    // full opacity, same round cap), not a faint hairline. Stays here (over the bloom,
+                    // under the fill arc) to preserve the exact original z-order.
                     drawArc(
                         color = Palette.surfaceInset,
                         startAngle = startDeg,
@@ -857,42 +896,62 @@ fun GlowRing(
     )
     val trackColor = Palette.textPrimary.copy(alpha = 0.10f)
     Box(modifier = modifier.size(diameter), contentAlignment = Alignment.Center) {
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            val stroke = lineWidth.toPx()
-            val inset = stroke / 2f
-            // Always draw a CIRCLE: size the arc off the smaller box dimension and centre it, so a
-            // non-square box (e.g. a hero ring the Row squeezes horizontally) never renders an ellipse.
-            val d = minOf(size.width, size.height)
-            val arcSize = Size(d - stroke, d - stroke)
-            val tl = Offset((size.width - d) / 2f + inset, (size.height - d) / 2f + inset)
-            // Full-circle track so the arc reads as a fraction of a circle (like WHOOP).
-            drawArc(
-                color = trackColor, startAngle = 0f, sweepAngle = 360f, useCenter = false,
-                topLeft = tl, size = arcSize, style = Stroke(width = stroke, cap = StrokeCap.Round),
-            )
-            val sweep = animFraction.coerceIn(0f, 1f) * 360f
-            // Only draw the arc (+ its glow) when there's ACTUAL progress. A near-zero round-capped
-            // arc renders as a full visible dot at 12 o'clock on Android's Canvas (unlike iOS's
-            // sub-pixel `trim`), which read as the unwanted "dot" on empty / No-Data / Calibrating
-            // rings the maintainer flagged. Below the threshold we show just the clean full-circle
-            // track — exactly like the iOS GlowRing's empty state.
-            if (animFraction > 0.001f) {
-                // Tight glow — a wider, low-alpha arc under the crisp one (minSdk-safe, no RenderEffect).
-                // Gated on the dark canvas only, mirroring iOS AdditiveBloom hiding on the light field
-                // (on white it just smears the edge); the crisp arc carries the ring on its own there.
-                if (!Palette.isLight) {
-                    drawArc(
-                        color = color.copy(alpha = 0.45f), startAngle = -90f, sweepAngle = sweep, useCenter = false,
-                        topLeft = tl, size = arcSize, style = Stroke(width = stroke * 1.5f, cap = StrokeCap.Round),
-                    )
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                // PERF (#scroll-jank): the full-circle TRACK is static (it reads no animation state), but
+                // it shared one Canvas draw lambda with the fraction-driven arcs, so it was re-issued on
+                // every animation/scroll frame. Hoist the track into drawWithCache — keyed on the implicit
+                // size + the stroke + the track tone — so it rasterises ONCE and replays; only the glow +
+                // crisp arc re-draw per frame (the drawBehind below). Pixel-identical: same circle geometry,
+                // same round cap, same track-under-arc order.
+                .drawWithCache {
+                    val stroke = lineWidth.toPx()
+                    val inset = stroke / 2f
+                    val d = minOf(size.width, size.height)
+                    val arcSize = Size(d - stroke, d - stroke)
+                    val tl = Offset((size.width - d) / 2f + inset, (size.height - d) / 2f + inset)
+                    val trackStroke = Stroke(width = stroke, cap = StrokeCap.Round)
+                    onDrawBehind {
+                        // Full-circle track so the arc reads as a fraction of a circle (like WHOOP).
+                        drawArc(
+                            color = trackColor, startAngle = 0f, sweepAngle = 360f, useCenter = false,
+                            topLeft = tl, size = arcSize, style = trackStroke,
+                        )
+                    }
                 }
-                // The crisp, solid arc — from 12 o'clock clockwise.
-                drawArc(
-                    color = color, startAngle = -90f, sweepAngle = sweep, useCenter = false,
-                    topLeft = tl, size = arcSize, style = Stroke(width = stroke, cap = StrokeCap.Round),
-                )
-            }
-        }
+                .drawBehind {
+                    val stroke = lineWidth.toPx()
+                    val inset = stroke / 2f
+                    // Always draw a CIRCLE: size the arc off the smaller box dimension and centre it, so a
+                    // non-square box (e.g. a hero ring the Row squeezes horizontally) never renders an ellipse.
+                    val d = minOf(size.width, size.height)
+                    val arcSize = Size(d - stroke, d - stroke)
+                    val tl = Offset((size.width - d) / 2f + inset, (size.height - d) / 2f + inset)
+                    val sweep = animFraction.coerceIn(0f, 1f) * 360f
+                    // Only draw the arc (+ its glow) when there's ACTUAL progress. A near-zero round-capped
+                    // arc renders as a full visible dot at 12 o'clock on Android's Canvas (unlike iOS's
+                    // sub-pixel `trim`), which read as the unwanted "dot" on empty / No-Data / Calibrating
+                    // rings the maintainer flagged. Below the threshold we show just the clean full-circle
+                    // track — exactly like the iOS GlowRing's empty state.
+                    if (animFraction > 0.001f) {
+                        // Tight glow — a wider, low-alpha arc under the crisp one (minSdk-safe, no RenderEffect).
+                        // Gated on the dark canvas only, mirroring iOS AdditiveBloom hiding on the light field
+                        // (on white it just smears the edge); the crisp arc carries the ring on its own there.
+                        if (!Palette.isLight) {
+                            drawArc(
+                                color = color.copy(alpha = 0.45f), startAngle = -90f, sweepAngle = sweep, useCenter = false,
+                                topLeft = tl, size = arcSize, style = Stroke(width = stroke * 1.5f, cap = StrokeCap.Round),
+                            )
+                        }
+                        // The crisp, solid arc — from 12 o'clock clockwise.
+                        drawArc(
+                            color = color, startAngle = -90f, sweepAngle = sweep, useCenter = false,
+                            topLeft = tl, size = arcSize, style = Stroke(width = stroke, cap = StrokeCap.Round),
+                        )
+                    }
+                },
+        )
         if (showsLabel) {
             Text(
                 text = format(animValue.toDouble()),
@@ -1090,7 +1149,9 @@ fun ScreenScaffold(
             modifier = columnModifier
                 .verticalScroll(rememberScrollState())
                 .padding(start = 28.dp, end = 28.dp, top = topPadding, bottom = 28.dp),
-            verticalArrangement = Arrangement.spacedBy(20.dp),
+            // #765: one shared inter-card spacing token (was a bare `20.dp`), so the eager + lazy scaffolds
+            // and every screen through them keep the SAME uniform gap between top-level cards.
+            verticalArrangement = Arrangement.spacedBy(Metrics.screenRowSpacing),
         ) {
             // Compact top bar: an optional LEADING action (e.g. the Today profile avatar, mirroring iOS's
             // avatar-leading header), the screen title/subtitle, then an optional trailing action (e.g. the
@@ -1139,7 +1200,14 @@ fun ScreenScaffold(
                 modifier = Modifier
                     .fillMaxWidth()
                     .align(Alignment.TopCenter)
-                    .offset(y = -statusBarTop),
+                    .offset(y = -statusBarTop)
+                    // PERF (#scroll-jank): promote the static scene backdrop to its OWN compositing layer so
+                    // its gradient + bitmap rasterise ONCE into a render node and are reused as a texture on
+                    // every scroll frame, instead of the parent re-issuing the scene's `drawBehind` draw each
+                    // time the (sibling) scroll column composites over it. The backdrop reads no scroll state
+                    // and never moves, so an empty `graphicsLayer {}` is purely an isolation hint —
+                    // appearance-identical. Mirrors keeping the iOS scene as a static screen-level backdrop.
+                    .graphicsLayer { },
             ) {
                 topBackground()
             }
@@ -1158,31 +1226,107 @@ fun ScreenScaffold(
 // The content slot is a [LazyListScope] (item { } / items(...)) rather than a ColumnScope,
 // so callers stay explicit about what is a one-off header vs the lazily-built list — and
 // every existing ScreenScaffold caller is untouched. The header, 28dp screen padding and
-// 20dp inter-item spacing match ScreenScaffold so the two read identically.
+// the shared Metrics.screenRowSpacing inter-item gap match ScreenScaffold so the two read identically.
 
 @Composable
 fun LazyScreenScaffold(
-    title: String,
+    title: String?,
     subtitle: String? = null,
     modifier: Modifier = Modifier,
+    // Mirrors ScreenScaffold: a screen with a scene-backed header (Today-style) can tighten the gap
+    // above its first row, and supply leading/trailing header actions + a screen-level scene backdrop.
+    // All defaulted, so the existing flat callers (Intelligence) are byte-for-byte untouched.
+    topPadding: Dp = 28.dp,
+    // The inter-row vertical spacing between top-level items. Defaults to the shared `screenRowSpacing`
+    // (20dp) so every existing caller is byte-for-byte untouched; the liquid Today passes a tighter value
+    // to match the iOS Today's compact `VStack(spacing: 12)` section rhythm (the maintainer's "iOS is
+    // tighter/slicker" note). Scoped per-scaffold so no other screen's rhythm shifts.
+    rowSpacing: Dp = Metrics.screenRowSpacing,
+    leading: (@Composable () -> Unit)? = null,
+    trailing: (@Composable () -> Unit)? = null,
+    // Optional full-bleed scene drawn behind the scroll content at the TOP of the screen — the SAME slot
+    // contract as ScreenScaffold.topBackground. Null draws nothing (the flat-canvas path). When supplied,
+    // the scene paints in the wrapping Box (promoted to its own compositing layer) and the LazyColumn is
+    // transparent so the scene shows through behind the rows. Mirrors the iOS scaffold's topBackground.
+    topBackground: (@Composable () -> Unit)? = null,
     content: LazyListScope.() -> Unit,
 ) {
-    LazyColumn(
-        modifier = modifier
-            .fillMaxWidth()
-            .background(Palette.surfaceBase),
-        contentPadding = PaddingValues(28.dp),
-        verticalArrangement = Arrangement.spacedBy(20.dp),
-    ) {
-        item {
-            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text(title, style = NoopType.title1, color = Palette.textPrimary)
-                if (subtitle != null) {
-                    Text(subtitle, style = NoopType.subhead, color = Palette.textSecondary)
+    // The header row: optional leading action, the title/subtitle, optional trailing action. Omitted
+    // entirely when both title and subtitle are null (a screen supplying its own custom header). Matches
+    // ScreenScaffold's header block so the eager + lazy scaffolds read identically.
+    val header: (@Composable () -> Unit)? =
+        if (title != null || subtitle != null || leading != null || trailing != null) {
+            {
+                Row(verticalAlignment = Alignment.Top) {
+                    if (leading != null) {
+                        leading()
+                        Spacer(Modifier.width(12.dp))
+                    }
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        if (title != null) {
+                            Text(title, style = NoopType.title1, color = Palette.textPrimary)
+                        }
+                        if (subtitle != null) {
+                            Text(subtitle, style = NoopType.subhead, color = Palette.textSecondary)
+                        }
+                    }
+                    if (trailing != null) trailing()
                 }
             }
+        } else {
+            null
         }
-        content()
+
+    // The lazy list itself. Its background + the contentPadding differ by path so the scene-backed list
+    // is transparent (scene shows through) while keeping the SAME 28dp screen inset + shared row spacing as
+    // the eager ScreenScaffold. The top inset honours [topPadding] (so a custom-header screen can tighten
+    // the gap above the first row, exactly like ScreenScaffold's `padding(top = topPadding)`).
+    val listModifier: Modifier =
+        if (topBackground == null) {
+            modifier.fillMaxWidth().background(Palette.surfaceBase)
+        } else {
+            Modifier.fillMaxWidth()
+        }
+    val list: @Composable () -> Unit = {
+        LazyColumn(
+            modifier = listModifier,
+            contentPadding = PaddingValues(start = 28.dp, top = topPadding, end = 28.dp, bottom = 28.dp),
+            // #765: the shared inter-card spacing token by default (Today/Explore + the eager screens share
+            // one uniform card rhythm); a caller may pass a tighter [rowSpacing] (the liquid Today does, for
+            // the iOS-compact section rhythm).
+            verticalArrangement = Arrangement.spacedBy(rowSpacing),
+        ) {
+            if (header != null) {
+                item { header() }
+            }
+            content()
+        }
+    }
+
+    if (topBackground == null) {
+        list()
+    } else {
+        // Scene-backed path: the wrapping Box paints the flat canvas + the screen-level scene backdrop
+        // (anchored TOP, bled up behind the status bar), and the transparent LazyColumn floats over both.
+        // Identical scene treatment to ScreenScaffold — including promoting the static backdrop to its own
+        // compositing layer (an empty graphicsLayer {}) so the scene rasterises once and replays as a
+        // texture on every scroll frame instead of being re-issued under the scrolling rows.
+        val statusBarTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+        Box(modifier = modifier.fillMaxSize().background(Palette.surfaceBase)) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .align(Alignment.TopCenter)
+                    .offset(y = -statusBarTop)
+                    .graphicsLayer { },
+            ) {
+                topBackground()
+            }
+            list()
+        }
     }
 }
 

@@ -395,4 +395,77 @@ class TodayMetricTilesTest {
         assertEquals("2026-06-19", carried?.day)
         assertEquals(72.0, carried?.recovery)
     }
+
+    // MARK: lastVitalsRow — the recovery-INDEPENDENT vitals carry (#543 follow-up). HRV / resting-HR /
+    // respiratory exist without a recovery score, so this selector must carry the freshest STRICTLY-PRIOR
+    // night that has ANY of them, NOT the freshest recovery-SCORED night. This is what keeps the overnight
+    // HRV / Resting HR / Respiratory card in step with the (already-correct) per-field Key-Metrics tile
+    // when a post-update re-analysis nulls last night's recovery while preserving its real vitals.
+
+    @Test
+    fun lastVitalsRow_keepsLastNightsOwnVitals_whenItsRecoveryWasNulled_documentsWholeRowBug() {
+        // Post-update re-analysis nulled last night's RECOVERY but PRESERVED its real avgHrv/restingHr; an
+        // older day was recovery-scored. The recovery-gated whole-row carry (lastScoredRecoveryDay) selects
+        // that OLDER day, so a whole-row `carriedDay ?: day` read would discard last night's own 41 ms/61 bpm
+        // — the tile-vs-card mismatch. The per-field read (today-first, else lastVitalsRow) keeps them.
+        val days = listOf(
+            recDay("2026-06-17", 65.0, hrv = 55.0, rhr = 50),   // older, recovery-scored
+            recDay("2026-06-18", null, hrv = 41.0, rhr = 61),   // last night: recovery nulled, vitals intact
+        )
+        // The whole-row carry documents the bug: it picks the OLDER scored day, not last night.
+        val scored = lastScoredRecoveryDay(
+            days, selectedDayKey = "2026-06-19",
+            isToday = true, todayScored = false, isCalibrating = false,
+            today = "2026-06-19",
+        )
+        assertEquals("2026-06-17", scored?.day)
+
+        // The vitals carry keeps last night's OWN preserved values, so the per-field read is correct.
+        val vitals = lastVitalsRow(days, todayKey = "2026-06-19")
+        assertEquals("2026-06-18", vitals?.day)
+        assertEquals(41.0, vitals?.avgHrv)
+        assertEquals(61, vitals?.restingHr)
+
+        // The per-field read the card now uses (today has no row yet → carry): last night's own vitals.
+        val today: DailyMetric? = null
+        assertEquals(41.0, today?.avgHrv ?: vitals?.avgHrv)
+        assertEquals(61, today?.restingHr ?: vitals?.restingHr)
+    }
+
+    @Test
+    fun lastVitalsRow_carriesVitals_evenWhenNoPriorNightWasEverRecoveryScored() {
+        // Prior night has real vitals but its recovery is null, and today is empty. The recovery-gated
+        // selector carries NOTHING (nothing was scored), yet the vitals must still carry so the card doesn't
+        // blank while the tile shows a value.
+        val days = listOf(
+            recDay("2026-06-18", null, hrv = 44.0, rhr = 58),   // vitals present, recovery never scored
+            recDay("2026-06-19", null),                          // today, empty
+        )
+        val scored = lastScoredRecoveryDay(
+            days, selectedDayKey = "2026-06-19",
+            isToday = true, todayScored = false, isCalibrating = false,
+            today = "2026-06-19",
+        )
+        assertNull(scored)
+
+        val vitals = lastVitalsRow(days, todayKey = "2026-06-19")
+        assertEquals("2026-06-18", vitals?.day)
+        assertEquals(44.0, vitals?.avgHrv)
+        assertEquals(58, vitals?.restingHr)
+    }
+
+    @Test
+    fun lastVitalsRow_neverCarriesAFutureDatedRow() {
+        // Belt-and-suspenders (mirrors the #547 guard on lastScoredRecoveryDay): a bad-clock row dated far in
+        // the future sits at the end of the oldest→newest list; the `day < todayKey` bound skips it so it can
+        // never surface as "last night".
+        val days = listOf(
+            recDay("2026-06-18", 72.0, hrv = 50.0, rhr = 55),   // the real freshest prior vitals
+            recDay("2999-01-01", null, hrv = 99.0, rhr = 99),   // future-dated pollution
+        )
+        val vitals = lastVitalsRow(days, todayKey = "2026-06-19")
+        assertEquals("2026-06-18", vitals?.day)
+        assertEquals(50.0, vitals?.avgHrv)
+        assertEquals(55, vitals?.restingHr)
+    }
 }

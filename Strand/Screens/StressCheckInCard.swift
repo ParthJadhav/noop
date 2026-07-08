@@ -60,7 +60,7 @@ struct StressCheckInCard: View {
                         StatePill("Passive", tone: .neutral, showsDot: true)
                     }
 
-                    Text("Your HRV dipped while you were still — want a minute to breathe?")
+                    Text("Your HRV dipped while you were still. Want a minute to breathe?")
                         .font(StrandFont.subhead)
                         .foregroundStyle(StrandPalette.textPrimary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -86,7 +86,7 @@ struct StressCheckInCard: View {
                         }
                     }
 
-                    Text("Relaxation guidance from your own numbers — not a health alert, and not a diagnosis. Trends matter more than any single number.")
+                    Text("Relaxation guidance from your own numbers: not a health alert, and not a diagnosis. Trends matter more than any single number.")
                         .font(StrandFont.footnote)
                         .foregroundStyle(StrandPalette.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -99,7 +99,7 @@ struct StressCheckInCard: View {
     /// An honest one-liner with the two estimates the engine surfaced, framed as "your own number".
     private func honestLine(_ nudge: StressNudgeCenter.Nudge) -> String? {
         guard let fast = nudge.fastRMSSD, let base = nudge.baselineRMSSD, base > 0 else { return nil }
-        return String(format: "RMSSD %.0f ms now vs your ~%.0f ms baseline (estimate from PPG-derived R-R).",
+        return String(format: String(localized: "RMSSD %.0f ms now vs your ~%.0f ms baseline (estimate from PPG-derived R-R)."),
                       fast, base)
     }
 }

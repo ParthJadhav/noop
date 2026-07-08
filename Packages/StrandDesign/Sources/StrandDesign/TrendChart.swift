@@ -1,3 +1,6 @@
+#if !os(watchOS)
+// TrendChart is a Swift Charts view with .onContinuousHover (unavailable on watchOS); the watch
+// never shows it, so the whole file is excluded there. iOS/macOS unchanged.
 import SwiftUI
 import Charts
 
@@ -48,6 +51,12 @@ public struct TrendChart: View {
     /// coordinate space (via the overlay proxy), so it sits exactly on the line. nil = no cap.
     /// (#458: an earlier sibling-overlay cap guessed the plot insets and floated off the line.)
     public var nowCapColor: Color?
+    /// Y-axis domain when it should differ from `valueRange` — e.g. an axis fitted to the data
+    /// window (with a little headroom) while the gradient stays anchored to the metric's full
+    /// scale. nil = `valueRange`. Widening the TOP of this domain is how a caller keeps a peak
+    /// curve and the top axis label clear of the plot clip (see #974); done purely in data space
+    /// so it needs no macOS14/iOS17 plot-dimension padding API — works on our macOS13/iOS16 floor.
+    public var yDomain: ClosedRange<Double>?
 
     /// Mean of all point values, computed once in `init` so the area fill's gradient
     /// stop doesn't run an O(n) reduce for every mark on every render.
@@ -66,7 +75,8 @@ public struct TrendChart: View {
         valueFormat: @escaping (Double) -> String = { String(Int($0.rounded())) },
         dateFormat: @escaping (Date) -> String = { TrendChart.defaultDateString($0) },
         accessibilityLabel: String? = nil,
-        nowCapColor: Color? = nil
+        nowCapColor: Color? = nil,
+        yDomain: ClosedRange<Double>? = nil
     ) {
         let sorted = points.sorted { $0.date < $1.date }
         self.points = sorted
@@ -79,24 +89,39 @@ public struct TrendChart: View {
         self.dateFormat = dateFormat
         self.accessibilityLabel = accessibilityLabel
         self.nowCapColor = nowCapColor
+        self.yDomain = yDomain
         let avg = sorted.isEmpty
             ? valueRange.lowerBound
             : sorted.map(\.value).reduce(0, +) / Double(sorted.count)
         self.averageValue = avg
 
+        // The point set handed to the marks: full resolution up to the threshold, else min/max-bucketed
+        // to ~the plot pixel width (pixel-identical line, far fewer GPU vertices). Computed once here.
+        self.displayPoints = ChartDownsample.minMaxBucketed(sorted, threshold: ChartDownsample.markThreshold,
+                                                            targetCount: ChartDownsample.targetVertices)
+
         // VoiceOver one-liner: count + mean + range — formatted with the SAME valueFormat the
         // tooltip uses, so units match. Computed once here, not per render.
         if sorted.isEmpty {
-            self.a11ySummary = "No data"
+            self.a11ySummary = String(localized: "No data", bundle: .module)
         } else {
             let vals = sorted.map(\.value)
             let lo = vals.min()!, hi = vals.max()!
-            self.a11ySummary = "\(sorted.count) points, mean \(valueFormat(avg)), range \(valueFormat(lo)) to \(valueFormat(hi))"
+            self.a11ySummary = String(localized: "\(sorted.count) points, mean \(valueFormat(avg)), range \(valueFormat(lo)) to \(valueFormat(hi))", bundle: .module)
         }
     }
 
     /// The x-position the cursor is hovering, in chart-local coordinates.
     @State private var hoverX: CGFloat? = nil
+
+    /// PERF: a 365-day (or longer) series feeds Swift Charts hundreds of LineMark/AreaMark vertices, each
+    /// catmullRom-interpolated — far more than the ~360pt plot has pixels, so most are sub-pixel and pure
+    /// draw cost. `displayPoints` is the point set actually handed to the marks: full resolution up to a
+    /// threshold, else min/max-per-bucket down to roughly the plot pixel width. Min/max bucketing keeps
+    /// every visible peak and trough, so the rendered line is pixel-identical on a normal-width chart.
+    /// Computed ONCE in `init` (not per body/hover eval), so it's memoized on `points`; hover / now-cap /
+    /// accessibility stay on the full-resolution `points` so those readouts are unchanged.
+    private let displayPoints: [TrendPoint]
 
     private static let sharedDateFormatter: DateFormatter = {
         let f = DateFormatter(); f.dateFormat = "EEE d MMM"; return f
@@ -132,10 +157,15 @@ public struct TrendChart: View {
         LinearGradient(gradient: gradient, startPoint: .bottom, endPoint: .top)
     }
 
+    /// The Y domain actually applied to the axis + plot clip: the explicit `yDomain` when a caller
+    /// supplied one (e.g. a data-fitted axis with top headroom), else the gradient's `valueRange`.
+    /// Exposed internally so a unit test can pin the resolution without rendering the chart.
+    var resolvedYDomain: ClosedRange<Double> { yDomain ?? valueRange }
+
     public var body: some View {
         Chart {
             if showsArea {
-                ForEach(points) { p in
+                ForEach(displayPoints) { p in
                     AreaMark(
                         x: .value("Date", p.date),
                         y: .value("Value", p.value)
@@ -152,7 +182,7 @@ public struct TrendChart: View {
                     )
                 }
             }
-            ForEach(points) { p in
+            ForEach(displayPoints) { p in
                 LineMark(
                     x: .value("Date", p.date),
                     y: .value("Value", p.value)
@@ -162,9 +192,10 @@ public struct TrendChart: View {
                 .foregroundStyle(valueGradient)
             }
             // 18pt dots are invisible on dense series (e.g. a 365-day year) but still cost the
-            // GPU a mark each — hide them past a threshold; the line carries the data there.
+            // GPU a mark each — hide them past a threshold; the line carries the data there. The gate
+            // stays on the full `points.count` (≤60 is never downsampled, so displayPoints == points).
             if points.count <= 60 {
-                ForEach(points) { p in
+                ForEach(displayPoints) { p in
                     PointMark(
                         x: .value("Date", p.date),
                         y: .value("Value", p.value)
@@ -174,7 +205,11 @@ public struct TrendChart: View {
                 }
             }
         }
-        .chartYScale(domain: valueRange)
+        // Domain drives BOTH the axis extent and the plot clip. A caller that wants a top-of-range
+        // peak (and the top axis label) to clear the clip passes a `yDomain` whose upper bound sits a
+        // little above the data — pure data-space headroom, so no macOS14/iOS17 plot-dimension endPadding
+        // API is needed (#974). The value→color gradient still keys off `valueRange`, unchanged.
+        .chartYScale(domain: resolvedYDomain)
         // Clip the plot to its own bounds. catmullRom interpolation overshoots past the data extremes
         // on sharp turns, and the AreaMark gradient is drawn UNCLIPPED — so on a spiky HR curve the
         // rose fill bled down the page behind the cards below the chart. Clipping the plot area bounds
@@ -272,6 +307,74 @@ public struct TrendChart: View {
     }
 }
 
+// MARK: - Chart downsampling (pure)
+//
+// Reduces a dense point series to roughly the plot's pixel width BEFORE it reaches Swift Charts, so the
+// GPU draws ~one vertex per pixel instead of hundreds it can't resolve. Uses MIN/MAX-per-bucket: each
+// bucket contributes its lowest and highest sample (in time order), so every visible peak and trough
+// survives and the rendered envelope is identical at normal chart widths. First and last points are
+// always kept so the line spans the full domain. Pure + deterministic — same input → same output.
+
+enum ChartDownsample {
+    /// Above this many points we downsample; at or below it the series is passed through untouched (so
+    /// the common 7/30/90-day trends and the ≤60-point dotted series are byte-for-byte unchanged).
+    static let markThreshold = 120
+    /// Target drawn-vertex budget — a touch above a typical ~360pt plot so the line stays crisp.
+    static let targetVertices = 400
+
+    /// Min/max-bucketed copy of `points` when it exceeds `threshold`, else `points` unchanged.
+    /// Assumes `points` is already sorted by date (both chart callers sort in their init).
+    static func minMaxBucketed(_ points: [TrendPoint], threshold: Int, targetCount: Int) -> [TrendPoint] {
+        let n = points.count
+        guard n > threshold, n > 2, targetCount >= 4 else { return points }
+
+        // Reserve the first and last; bucket the interior. Each bucket yields up to 2 vertices (min+max),
+        // so aim for ~targetCount/2 buckets to land near the vertex budget.
+        let first = points[0]
+        let last = points[n - 1]
+        let interior = n - 2
+        let bucketCount = max(1, (targetCount - 2) / 2)
+        guard bucketCount < interior else { return points }
+
+        var out: [TrendPoint] = []
+        out.reserveCapacity(targetCount)
+        out.append(first)
+
+        var lastEmittedDate = first.date
+        for b in 0..<bucketCount {
+            // Interior indices [1 ... n-2] split into `bucketCount` contiguous ranges.
+            let lo = 1 + (b * interior) / bucketCount
+            let hi = 1 + ((b + 1) * interior) / bucketCount // exclusive
+            guard lo < hi else { continue }
+
+            // Find the min-value and max-value samples in this bucket.
+            var minIdx = lo, maxIdx = lo
+            var i = lo + 1
+            while i < hi {
+                if points[i].value < points[minIdx].value { minIdx = i }
+                if points[i].value > points[maxIdx].value { maxIdx = i }
+                i += 1
+            }
+
+            // Emit the two extremes in chronological order, skipping duplicates (monotone bucket → one
+            // point) and any whose date would not advance (keeps `id: Date` unique for ForEach).
+            let lowFirst = minIdx <= maxIdx
+            let aIdx = lowFirst ? minIdx : maxIdx
+            let bIdx = lowFirst ? maxIdx : minIdx
+            for idx in [aIdx, bIdx] {
+                let p = points[idx]
+                if p.date > lastEmittedDate {
+                    out.append(p)
+                    lastEmittedDate = p.date
+                }
+            }
+        }
+
+        if last.date > lastEmittedDate { out.append(last) }
+        return out
+    }
+}
+
 // MARK: - Gradient → stops bridge
 
 extension Gradient {
@@ -325,4 +428,5 @@ private func sampleTrend(days: Int, base: Double, swing: Double) -> [TrendPoint]
     .background(StrandPalette.surfaceBase)
     .preferredColorScheme(.dark)
 }
+#endif
 #endif

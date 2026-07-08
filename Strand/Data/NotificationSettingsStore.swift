@@ -12,10 +12,10 @@ enum BuzzPattern: String, CaseIterable, Codable, Identifiable {
     var id: String { rawValue }
     var label: String {
         switch self {
-        case .single: return "Single"
-        case .double: return "Double"
-        case .triple: return "Triple"
-        case .long:   return "Long"
+        case .single: return String(localized: "Single")
+        case .double: return String(localized: "Double")
+        case .triple: return String(localized: "Triple")
+        case .long:   return String(localized: "Long")
         }
     }
     /// Repeat count handed to the haptic command.
@@ -35,7 +35,7 @@ enum BuzzPattern: String, CaseIterable, Codable, Identifiable {
 enum NotifCategory: String, CaseIterable, Identifiable {
     case email     = "Email"
     case messaging = "Messaging"
-    case meetings  = "Meetings & Calls"
+    case meetings  = "Meetings"
     case calendar  = "Calendar & Reminders"
 
     var id: String { rawValue }
@@ -170,7 +170,10 @@ final class NotificationSettingsStore: ObservableObject {
             ("Slack",             .messaging, ["com.tinyspeck.slackmacgap"],                          "message.fill"),
             ("Telegram",          .messaging, ["ru.keepcoder.Telegram", "org.telegram.desktop"],      "paperplane.fill"),
             ("Signal",            .messaging, ["org.whispersystems.signal-desktop"],                  "message.fill"),
-            ("Microsoft Teams",   .meetings,  ["com.microsoft.teams2", "com.microsoft.teams"],        "video.fill"),
+            // Teams notifications in the shade are overwhelmingly chats, @-mentions and channel
+            // activity, which read as messages. Group it under Messaging with the chat glyph rather
+            // than Meetings so the buzz pattern and icon match what actually arrives.
+            ("Microsoft Teams",   .messaging, ["com.microsoft.teams2", "com.microsoft.teams"],        "message.fill"),
             ("Zoom",              .meetings,  ["us.zoom.xos"],                                        "video.fill"),
             ("FaceTime",          .meetings,  ["com.apple.FaceTime"],                                 "video.fill"),
             ("Calendar",          .calendar,  ["com.apple.iCal"],                                     "calendar"),

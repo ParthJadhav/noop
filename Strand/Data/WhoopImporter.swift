@@ -6,8 +6,13 @@ import StrandImport
 /// (dailyMetric + sleepSession), so importing lights up the full history immediately.
 enum WhoopImporter {
 
+    /// The WHOOP CSV mapping revision, stamped into the Import test-mode parser line. Bump when this
+    /// importer's column->store mapping changes so a shared report's parser version is unambiguous.
+    static let importerVersion = 1
+
     @discardableResult
-    static func importExport(url: URL, into store: WhoopStore, deviceId: String) async throws -> ImportSummary {
+    static func importExport(url: URL, into store: WhoopStore, deviceId: String,
+                             trace: (@Sendable ([String]) -> Void)? = nil) async throws -> ImportSummary {
         let result = try ImportCoordinator().importWhoopExport(from: url)
 
         // physiological_cycles → DailyMetric (one row per sleep-to-sleep day)
@@ -52,8 +57,11 @@ enum WhoopImporter {
                 restingHr: nil, avgHrv: nil, stagesJSON: json))
         }
 
-        try await store.upsertDailyMetrics(metrics, deviceId: deviceId)
-        try await store.upsertSleepSessions(sessions, deviceId: deviceId)
+        // Capture the rows the store ACTUALLY wrote (summed SQLite changes) so the Import test mode can
+        // report mapped-vs-persisted per stage. Capturing the existing return value changes nothing about
+        // what is saved; the calls, their order and their effect are identical with the trace on or off.
+        let metricsWritten = try await store.upsertDailyMetrics(metrics, deviceId: deviceId)
+        let sessionsWritten = try await store.upsertSleepSessions(sessions, deviceId: deviceId)
 
         // Generic metric series — every cycle field, keyed, for the explorer + correlations.
         var points: [MetricPoint] = []
@@ -147,7 +155,38 @@ enum WhoopImporter {
                               strain: WhoopExportImporter.effortFromImportedDayStrain(w.activityStrain), distanceM: w.distanceMeters,
                               zonesJSON: zjson, notes: nil)
         }
-        try await store.upsertWorkouts(workouts, deviceId: deviceId)
+        let workoutsWritten = try await store.upsertWorkouts(workouts, deviceId: deviceId)
+
+        // Import & Data Ingest test mode (Test Centre): emit the per-stage / reject / day-delta trace iff
+        // the mode is on. The caller passes a non-nil `trace` ONLY when TestCentre.active(.dataImport), so
+        // nothing here runs when the mode is off (zero cost). The numbers are the SAME ones the import just
+        // produced (parsed counts + the rows the store reported writing), so emitting them changes nothing
+        // about what was saved. No raw cell value or file name is in any of these lines.
+        if let trace {
+            let c = result.summary.countsByCategory
+            // Per-stage rowsIn is the rows actually HANDED to the store (after the app's mapping drops), so
+            // rowsOut < rowsIn isolates the STORE-write delta - the day-owner-collision / "didn't save" tell
+            // (#601 / #749) - rather than conflating it with the parser/map drop, which the reject line owns.
+            // dailyMetric is keyed by (deviceId, day), so metrics.count == the mapped distinct days.
+            let daysMapped = Set(metrics.map { $0.day }).count
+            // Rows the PARSER produced but the app map then dropped (a cycle with no cycleStart, a non-nap
+            // sleep with no onset/wake, a workout with no start/end): the genuine ingest reject count.
+            let parsedCycles = c["cycles"] ?? 0
+            let parsedSleeps = c["sleeps"] ?? 0
+            let parsedWorkouts = c["workouts"] ?? 0
+            let droppedInMap = max(0, parsedCycles - metrics.count)
+                + max(0, parsedSleeps - sessions.count)
+                + max(0, parsedWorkouts - workouts.count)
+            let lines: [String] = [
+                ImportTrace.parserVersionLine(sourceKind: .whoopExport, importerVersion: importerVersion),
+                ImportTrace.stageLine(category: "cycles", rowsIn: metrics.count, rowsOut: metricsWritten),
+                ImportTrace.stageLine(category: "sleeps", rowsIn: sessions.count, rowsOut: sessionsWritten),
+                ImportTrace.stageLine(category: "workouts", rowsIn: workouts.count, rowsOut: workoutsWritten),
+                ImportTrace.rejectLine(droppedRows: droppedInMap, skippedSpans: result.summary.skippedSpans),
+                ImportTrace.dayDeltaLine(category: "cycles", daysMapped: daysMapped, daysPersisted: metricsWritten),
+            ]
+            trace(lines)
+        }
 
         return result.summary
     }

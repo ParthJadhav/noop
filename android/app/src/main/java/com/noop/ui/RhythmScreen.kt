@@ -110,7 +110,7 @@ object RhythmConsent {
         "It is a picture, not a verdict" to
             "It shows the shape of your heartbeat timing and a plain-language description of how steady it looked. It does not tell you whether anything is right or wrong.",
         "Variation is normal and often benign" to
-            "Beat-to-beat timing varies for many ordinary reasons — breathing, movement, an imperfect optical reading, or the occasional extra or skipped beat that most healthy people have.",
+            "Beat-to-beat timing varies for many ordinary reasons: breathing, movement, an imperfect optical reading, or the occasional extra or skipped beat that most healthy people have.",
         "It is not a substitute for a professional" to
             "If you feel unwell or are worried about your heart, contact a qualified professional; in an emergency, your local emergency service. Do not rely on NOOP.",
         "Everything stays on your device" to
@@ -242,7 +242,10 @@ private fun RhythmVisualization(
         ?: readable.firstOrNull()
     val allPoints = windows.flatMap { it.poincare }
 
-    ScreenScaffold(
+    // PERF (#707): lazy scaffold — each card is its own `item { }` (in the conditional branches too) so
+    // only on-screen cards compose + are accessibility-walked, with the LazyColumn's `spacedBy(20.dp)`
+    // reproducing the eager column's inter-card spacing exactly. The Poincaré PlotCard is the heavy one.
+    LazyScreenScaffold(
         title = "Rhythm",
         subtitle = "An experimental picture of your beat-to-beat timing",
         trailing = if (onClose != null) {
@@ -255,21 +258,23 @@ private fun RhythmVisualization(
             null
         },
     ) {
-        SourceBadge("Experimental", tint = Palette.restColor)
+        item { SourceBadge("Experimental", tint = Palette.restColor) }
 
         if (allPoints.isEmpty()) {
+            item {
             DataPendingNote(
                 title = "No clear reading yet",
-                body = "Rhythm only looks during quiet, still, resting windows — so it needs a calm night's worth of steady beats. Once there's a clean window, the scatter and its description show here.",
+                body = "Rhythm only looks during quiet, still, resting windows, so it needs a calm night's worth of steady beats. Once there's a clean window, the scatter and its description show here.",
             )
+            }
         } else {
-            SummaryCard(night = night, headline = headline)
-            PlotCard(points = allPoints)
-            StatsCard(headline = headline)
+            item { SummaryCard(night = night, headline = headline) }
+            item { PlotCard(points = allPoints) }
+            item { StatsCard(headline = headline) }
         }
 
-        MethodologyCard()
-        RhythmDisclaimerNote()
+        item { MethodologyCard() }
+        item { RhythmDisclaimerNote() }
     }
 }
 
@@ -304,7 +309,7 @@ private fun ConfidencePill(headline: RhythmScreener.WindowResult?, readable: Int
             StatePill("Solid", tone = StrandTone.Accent)
         RhythmConfidence.BUILDING ->
             StatePill(
-                if ((readable ?: 0) <= 1) "Building — 1 window" else "Building",
+                if ((readable ?: 0) <= 1) "Building · 1 window" else "Building",
                 tone = StrandTone.Warning,
             )
         RhythmConfidence.CALIBRATING ->
@@ -451,7 +456,7 @@ private fun MethodologyCard() {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Overline("How this is measured")
             Text(
-                "During quiet, still, resting windows, NOOP looks at the timing between your heartbeats (R-R intervals) and draws their Poincaré scatter. From the cloud it computes its short and long axes (SD1, SD2) and a few plain regularity numbers. Movement and noisy windows are skipped, not shown. These are transparent, published descriptive statistics — a picture of your timing, never a clinical measurement.",
+                "During quiet, still, resting windows, NOOP looks at the timing between your heartbeats (R-R intervals) and draws their Poincaré scatter. From the cloud it computes its short and long axes (SD1, SD2) and a few plain regularity numbers. Movement and noisy windows are skipped, not shown. These are transparent, published descriptive statistics: a picture of your timing, never a clinical measurement.",
                 style = NoopType.footnote, color = Palette.textTertiary,
             )
         }
@@ -476,7 +481,7 @@ private fun RhythmDisclaimerNote() {
                 modifier = Modifier.size(18.dp),
             )
             Text(
-                "Experimental wellness visualization — not a diagnosis, not an ECG, and not a medical device. It cannot detect any heart condition. Beat-to-beat variation has many ordinary, benign causes. If you feel unwell or are worried, contact a qualified professional; in an emergency, your local emergency service. Everything is computed on your device.",
+                "Experimental wellness visualization: not a diagnosis, not an ECG, and not a medical device. It cannot detect any heart condition. Beat-to-beat variation has many ordinary, benign causes. If you feel unwell or are worried, contact a qualified professional; in an emergency, your local emergency service. Everything is computed on your device.",
                 style = NoopType.footnote, color = Palette.textTertiary,
             )
         }
@@ -496,7 +501,7 @@ private fun headlineDetail(label: RhythmRegularity): String = when (label) {
     RhythmRegularity.STEADY ->
         "Across the quiet windows we could read, your beat-to-beat timing held a tight, even shape."
     RhythmRegularity.OCCASIONAL_ECTOPY ->
-        "Mostly steady, with a few isolated extra or skipped beats — very common and usually nothing."
+        "Mostly steady, with a few isolated extra or skipped beats. Very common and usually nothing."
     RhythmRegularity.VARIED ->
         "The scatter looked rounder and more spread out than a tight, steady beat. This has many ordinary causes and is not a diagnosis."
     RhythmRegularity.UNREADABLE ->

@@ -25,7 +25,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -108,7 +108,7 @@ fun PipBar(
         modifier = modifier
             .fillMaxWidth()
             .height(height)
-            .semantics { contentDescription = axValue },
+            .clearAndSetSemantics { contentDescription = axValue },
     ) {
         val n = pipCount.toFloat()
         for (index in 0 until pipCount) {
@@ -202,7 +202,7 @@ fun PipBarRow(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .semantics {
+            .clearAndSetSemantics {
                 contentDescription = if (unit != null) "$label: $valueText $unit" else "$label: $valueText"
             },
         verticalArrangement = Arrangement.spacedBy(8.dp),

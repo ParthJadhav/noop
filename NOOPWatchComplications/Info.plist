@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Mirrors the watch app: exposes APP_GROUP_ID to the complication at runtime so it can read the
+	     same snapshot (latestWatchSnapshot) the phone pushed. Never hard-coded in Swift. -->
+	<key>AppGroupIdentifier</key>
+	<string>$(APP_GROUP_ID)</string>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>CFBundleDisplayName</key>
+	<string>NOOP</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>XPC!</string>
+	<!-- Version keys MUST live here as generated-Info.plist properties (not hand-edited), because
+	     xcodegen regenerates this file on every `xcodegen generate` and would otherwise reset them to
+	     1.0 / 1. Inheriting the globals keeps the complication lockstep with the watch app + the phone. -->
+	<key>CFBundleShortVersionString</key>
+	<string>$(MARKETING_VERSION)</string>
+	<key>CFBundleVersion</key>
+	<string>$(CURRENT_PROJECT_VERSION)</string>
+	<!-- A WidgetKit extension, same point as the iOS widget. On watchOS this surfaces the
+	     accessory* complication families on the watch face. -->
+	<key>NSExtension</key>
+	<dict>
+		<key>NSExtensionPointIdentifier</key>
+		<string>com.apple.widgetkit-extension</string>
+	</dict>
+</dict>
+</plist>

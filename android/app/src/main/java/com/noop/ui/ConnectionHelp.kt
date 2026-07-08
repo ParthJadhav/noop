@@ -70,7 +70,7 @@ fun ConnectionHelp(viewModel: AppViewModel, modifier: Modifier = Modifier) {
                     "Your strap is connected and we're trying an experimental handshake to bring up live " +
                         "heart rate from the standard profile. This isn't verified on 5/MG hardware yet, so " +
                         "HR may or may not appear, and deeper metrics (recovery, strain, sleep) aren't " +
-                        "decoded for 5/MG yet. Nothing's wrong with your strap — WHOOP 4.0 is fully supported.",
+                        "decoded for 5/MG yet. Nothing's wrong with your strap - WHOOP 4.0 is fully supported.",
                     style = NoopType.footnote,
                     color = Palette.textSecondary,
                 )

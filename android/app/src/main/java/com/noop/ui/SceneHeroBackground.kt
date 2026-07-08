@@ -7,8 +7,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
-import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -25,7 +24,7 @@ import java.util.Calendar
 // it dissolves into the flat canvas behind the ring content. The scene is chosen from the CURRENT local
 // hour and recomputed on recomposition (cheap — just a drawable lookup), so it changes through the day.
 //
-// HARD RULES honoured (Aaron, standing):
+// HARD RULES honoured (standing):
 //  - NO GLOW / no bloom. The scene is a flat image at a capped ~0.42 alpha, never a literal photo.
 //  - The rings + WHITE numbers + labels MUST stay legible: a faint bottom-up dark scrim sits UNDER the
 //    ring content so a bright midday scene never washes out the white text. No tinting of the rest of
@@ -119,7 +118,13 @@ private fun Modifier.SceneHeroBackgroundModifier(
     val canvas = Palette.surfaceBase
     return this
         .clipToBounds()
-        .drawWithContent {
+        // PERF (#scroll-jank): the two verticalGradient Brushes + the aspect-fill drawH math were
+        // rebuilt on every frame the hero composited (and a hero that sits in a scroll re-composites
+        // constantly). Hoist the geometry + both Brushes into drawWithCache — keyed on the implicit size,
+        // the drawable + its alphas — so they're built ONCE; onDrawWithContent just blits the painter,
+        // over-paints the two pre-built gradients and draws the content. Pixel-identical: same aspect-fill
+        // rule, same gradient stops/extents, same source-over order, same scrim gate.
+        .drawWithCache {
             val h = size.height
             val fadeEnd = (h * fadeEndFraction).coerceIn(1f, h)
             val intrinsic = painter.intrinsicSize
@@ -134,45 +139,45 @@ private fun Modifier.SceneHeroBackgroundModifier(
             } else {
                 h
             }
-
-            // 1) The scene image, top-aligned (origin 0,0), at the capped alpha. clipToBounds crops the
-            //    overflow below the hero. A plain source-over draw — no layer, no blend mode.
-            with(painter) {
-                draw(size = Size(drawW, drawH), alpha = maxAlpha)
-            }
-
-            // 2) Top-down fade: OVER-paint the canvas colour, transparent at the very top → fully the canvas
-            //    colour by ~fadeEnd, so the lower scene dissolves into the flat canvas exactly like the iOS
-            //    top-down mask. Source-over (no DstIn) — robust, and it reads identically on the dark canvas.
-            drawRect(
-                brush = Brush.verticalGradient(
-                    colorStops = arrayOf(
-                        0.0f to Color.Transparent,
-                        0.45f to canvas.copy(alpha = 0.55f),
-                        1.0f to canvas,
-                    ),
-                    startY = 0f,
-                    endY = fadeEnd,
+            val imageSize = Size(drawW, drawH)
+            val fadeBrush = Brush.verticalGradient(
+                colorStops = arrayOf(
+                    0.0f to Color.Transparent,
+                    0.45f to canvas.copy(alpha = 0.55f),
+                    1.0f to canvas,
                 ),
+                startY = 0f,
+                endY = fadeEnd,
             )
-
-            // 3) A faint bottom dark scrim so the white ring numbers + labels keep their contrast on a bright
-            //    (midday) scene. Subtle, dark-mode only — no glow.
-            if (scrim && dark) {
-                drawRect(
-                    brush = Brush.verticalGradient(
-                        colors = listOf(
-                            Color.Transparent,
-                            Color(0xFF0D1014).copy(alpha = 0.28f),
-                        ),
-                        startY = h * 0.55f,
-                        endY = h,
+            val scrimBrush = if (scrim && dark) {
+                Brush.verticalGradient(
+                    colors = listOf(
+                        Color.Transparent,
+                        Color(0xFF0D1014).copy(alpha = 0.28f),
                     ),
+                    startY = h * 0.55f,
+                    endY = h,
                 )
+            } else {
+                null
             }
-
-            // 4) The actual content (rings, labels) on top — always fully legible.
-            drawContent()
+            onDrawWithContent {
+                // 1) The scene image, top-aligned (origin 0,0), at the capped alpha. clipToBounds crops the
+                //    overflow below the hero. A plain source-over draw — no layer, no blend mode.
+                with(painter) {
+                    draw(size = imageSize, alpha = maxAlpha)
+                }
+                // 2) Top-down fade: OVER-paint the canvas colour so the lower scene dissolves into the flat
+                //    canvas exactly like the iOS top-down mask. Source-over (no DstIn) — robust.
+                drawRect(brush = fadeBrush)
+                // 3) A faint bottom dark scrim so the white ring numbers + labels keep their contrast on a
+                //    bright (midday) scene. Subtle, dark-mode only — no glow.
+                if (scrimBrush != null) {
+                    drawRect(brush = scrimBrush)
+                }
+                // 4) The actual content (rings, labels) on top — always fully legible.
+                drawContent()
+            }
         }
 }
 
@@ -180,7 +185,7 @@ private fun Modifier.SceneHeroBackgroundModifier(
 //
 // Compose port of the iOS `SceneScreenBackground`. The day-cycle scene anchored to the TOP of the SCREEN,
 // behind the header + the rings hero — so it "forms part of the background" and the cards sit OVER it
-// (Aaron's direction). Full-WIDTH (aspect-fill), TOP-aligned so the sky shows, fading into the canvas
+// (the design direction). Full-WIDTH (aspect-fill), TOP-aligned so the sky shows, fading into the canvas
 // ([Palette.surfaceBase]) over its lower portion (~92% down) so it dissolves before the dashboard cards, at
 // a ~0.5 image alpha. A faint dark scrim under the VERY top keeps the white header text legible on a bright
 // sky. Place it edge-to-edge as a TOP-anchored screen background behind the scroll content (the caller
@@ -215,7 +220,12 @@ fun Modifier.sceneScreenBackground(
     val dark = !Palette.isLight
     return this
         .clipToBounds()
-        .drawBehind {
+        // PERF (#scroll-jank): the Today screen-level scene backdrop — its fade + top-scrim Brushes and
+        // the aspect-fill drawH math were rebuilt every frame the backdrop was re-issued under the
+        // scrolling content. Hoist them into drawWithCache (keyed on the implicit size + drawable +
+        // alphas); onDrawBehind just blits the painter and over-paints the two pre-built gradients.
+        // Pixel-identical: same band/fade math, same gradient stops, same scrim gate + extent.
+        .drawWithCache {
             val h = size.height
             // The fade band: the scene fully dissolves into the canvas by `band * fadeEndFraction`. When no
             // explicit band is given, use the full box height (the caller already sizes the Box to the
@@ -234,42 +244,43 @@ fun Modifier.sceneScreenBackground(
             } else {
                 band
             }
-
-            // 1) The scene image, top-aligned (origin 0,0), at the capped alpha. A plain source-over draw —
-            //    no layer, no blend mode (the same robust idiom as the hero background).
-            with(painter) {
-                draw(size = Size(drawW, drawH), alpha = maxAlpha)
-            }
-
-            // 2) Top-down fade: OVER-paint the canvas colour, transparent at the very top → fully the canvas
-            //    colour by ~fadeEnd, so the lower scene dissolves into the flat canvas before the cards —
-            //    exactly like the iOS top-down mask. Source-over (no DstIn) — robust on the dark canvas.
-            drawRect(
-                brush = Brush.verticalGradient(
-                    colorStops = arrayOf(
-                        0.0f to Color.Transparent,
-                        0.34f to canvas.copy(alpha = 0.10f),
-                        0.62f to canvas.copy(alpha = 0.60f),
-                        1.0f to canvas,
+            val imageSize = Size(drawW, drawH)
+            val fadeBrush = Brush.verticalGradient(
+                colorStops = arrayOf(
+                    0.0f to Color.Transparent,
+                    0.34f to canvas.copy(alpha = 0.10f),
+                    0.62f to canvas.copy(alpha = 0.60f),
+                    1.0f to canvas,
+                ),
+                startY = 0f,
+                endY = fadeEnd,
+            )
+            val scrimBrush = if (dark) {
+                Brush.verticalGradient(
+                    colors = listOf(
+                        Color(0xFF0D1014).copy(alpha = 0.12f),
+                        Color.Transparent,
                     ),
                     startY = 0f,
-                    endY = fadeEnd,
-                ),
-            )
-
-            // 3) A faint dark scrim under the VERY top so the white header text (Today + the date + the
-            //    top-bar icons) stays legible on a bright (midday) sky. Subtle, dark-mode only — no glow.
-            if (dark) {
-                drawRect(
-                    brush = Brush.verticalGradient(
-                        colors = listOf(
-                            Color(0xFF0D1014).copy(alpha = 0.12f),
-                            Color.Transparent,
-                        ),
-                        startY = 0f,
-                        endY = (band * 0.22f).coerceIn(1f, h.coerceAtLeast(1f)),
-                    ),
+                    endY = (band * 0.22f).coerceIn(1f, h.coerceAtLeast(1f)),
                 )
+            } else {
+                null
+            }
+            onDrawBehind {
+                // 1) The scene image, top-aligned (origin 0,0), at the capped alpha. A plain source-over
+                //    draw — no layer, no blend mode (the same robust idiom as the hero background).
+                with(painter) {
+                    draw(size = imageSize, alpha = maxAlpha)
+                }
+                // 2) Top-down fade: OVER-paint the canvas colour so the lower scene dissolves into the flat
+                //    canvas before the cards — exactly like the iOS top-down mask. Source-over (no DstIn).
+                drawRect(brush = fadeBrush)
+                // 3) A faint dark scrim under the VERY top so the white header text (Today + the date + the
+                //    top-bar icons) stays legible on a bright (midday) sky. Subtle, dark-mode only — no glow.
+                if (scrimBrush != null) {
+                    drawRect(brush = scrimBrush)
+                }
             }
         }
 }

@@ -270,6 +270,18 @@ object SleepStager {
     const val stageWakeMoveFrac: Double = 0.15
     const val stageStillMoveFrac: Double = 0.10
 
+    /**
+     * Fraction of sleep-period epochs that must carry a MISSING per-epoch RMSSD (sparse R-R) for the
+     * session's cardiac signal to count as PPG-DERIVED / sparse-cardiac. On a WHOOP 5/MG the PPG-derived
+     * HR feeds a noisier per-epoch HR-variance, which inflates `hrVar` on otherwise still, low-HR sleep
+     * epochs and was tripping the Stage-2 WAKE rule (which keys on the `hrvarHigh` percentile), so a
+     * whole night over-reported WAKE. We already trust `!rmssd.isFinite()` as a PPG/sparse tell for the
+     * pro-deep RMSSD handling (#127/#129); at this share across the night it also down-weights the
+     * HR-variance half of the WAKE rule. ~50% keeps a real worn 4.0 night (dense R-R) on the strict
+     * path and only relaxes nights whose cardiac signal is genuinely sparse/derived. (#705)
+     */
+    const val cardiacSparseEpochFrac: Double = 0.5
+
     const val smoothEpochs: Int = 5
     const val noREMAfterOnsetMin: Double = 15.0
     const val deepFirstFraction: Double = 1.0 / 3.0
@@ -725,6 +737,44 @@ object SleepStager {
     // ── detectSleep (public) ──────────────────────────────────────────────────
 
     /**
+     * One folded Long per sample stream for the [detectSleep] memo key: folds the COUNT plus every
+     * (ts, quantised value) with large odd multipliers — the same every-element discipline as
+     * [StagerCache.fingerprint] — so an in-place interior edit (a re-import correcting a value), a
+     * truncation, or an append all re-key to a fresh compute and a stale hit is never served.
+     * Internal so the fingerprint-completeness test pins those properties directly.
+     */
+    internal fun <T> streamFingerprint(samples: List<T>, ts: (T) -> Long, quant: (T) -> Long): Long {
+        var h = samples.size.toLong() * 2_654_435_761L
+        for (e in samples) h = (h * 1_000_003L + ts(e)) * 1_000_003L + quant(e)
+        return h
+    }
+
+    /** Full memo key for [detectSleep] — every input that steers detection or staging, nothing else. */
+    private data class DetectKey(
+        val grav: Long, val hr: Long, val rr: Long, val resp: Long,
+        val tz: Long, val wristOff: Long, val band: Long, val v2: Boolean,
+    )
+
+    /** Bound ≈ the distinct days of a scoring window (matches the Swift detectSleepCache capacity, 40).
+     *  Access-order LRU so the hottest nights survive a long session; an entry is a handful of small
+     *  sessions — the multi-hour raw streams are never retained (#707 rule: the cache must not be the
+     *  next leak). */
+    private const val DETECT_CACHE_MAX_DAYS = 40
+    private val detectCache = object : LinkedHashMap<DetectKey, List<DetectedSleep>>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<DetectKey, List<DetectedSleep>>): Boolean =
+            size > DETECT_CACHE_MAX_DAYS
+    }
+    private val detectCacheLock = Any()
+
+    /** Deep copy across the memo boundary. [DetectedSleep] itself is immutable, but its `stages` are
+     *  mutable [StageSegment]s — the exact reason [StagerCache] deep-copies hypnograms — so the memo
+     *  holds a private copy and hands every hit a fresh one; a caller reshaping a segment in place can
+     *  never poison the cache. Swift needs no copy (value-type structs); Kotlin's mutable StageSegment
+     *  does. O(stages), a rounding error next to the detection spine the memo skips. */
+    private fun copyDetected(sessions: List<DetectedSleep>): List<DetectedSleep> =
+        sessions.map { it.copy(stages = StagerCache.copyOf(it.stages)) }
+
+    /**
      * Detect sleep sessions from biometric streams. Empty/absent gravity → [].
      * Gravity-only input degrades gracefully (HR/RR/resp refinements skipped).
      *
@@ -740,6 +790,16 @@ object SleepStager {
      * intervals) reaches [maxOffWristSleepFraction] of its duration — the FRACTIONAL rule from #504, so
      * a real night with a short off-wrist tail survives (#500). Defaults to empty (HR-gap proxy only),
      * so the pure function and its tests stay event-free.
+     *
+     * PERF (#707 parity, mirrors the Swift detectSleepCache): this is the single heaviest analytics
+     * call — it sorts the dense full-day gravity stream, builds the delta/still spine, and stages every
+     * accepted run — and [IntelligenceEngine.analyzeRecent] re-runs it per day across the window every
+     * 15-min tick, so an idempotent re-pass (or a sync that never touched a given day) redid all of it
+     * for an identical result; the exact path that ANR'd before #125. Android had only the staging-layer
+     * [StagerCache], so the detection spine still re-ran uncached ~21× per pass. The public entry now
+     * memoizes the RESULT on a FULL input key (every argument that steers detection or staging: the four
+     * streams, tz offset, #500 off-wrist intervals, #531 band state, the V2 toggle) in a bounded LRU. A
+     * hit is byte-identical to recomputing — the memo only ever skips work, never changes it.
      */
     fun detectSleep(
         hr: List<HrSample> = emptyList(),
@@ -754,6 +814,67 @@ object SleepStager {
         // HR dip. Default empty keeps pure-function callers/tests free of it; IntelligenceEngine passes the
         // night window's persisted band state. It can only RESCUE a real-sleep block, never fabricate. Mirrors Swift.
         bandSleepState: List<Pair<Long, Int>> = emptyList(),
+        // V7 / #690: when true, each accepted night is staged by the experimental cardiorespiratory recipe
+        // [SleepStagerV2.stageSession] instead of V1's [stageSession]. DETECTION is unchanged (same accepted
+        // windows); only the per-epoch hypnogram differs. Default false keeps V1 the byte-identical default
+        // (frozen-golden tests stay green). The live call site threads the experimentalSleepV2 flag so the
+        // Settings toggle now affects normal detected nights, not just the self-heal restage path. Mirrors Swift.
+        useSleepStagerV2: Boolean = false,
+        // Sleep & Rest test mode (E10): when non-null, each candidate run emits ONE gate verdict line
+        // and the sparse-gravity bridge records its result. Side-effect-only; the returned list is
+        // byte-identical to the untraced call. Default null = no work, byte-identical. Mirrors Swift.
+        traceSink: ((String) -> Unit)? = null,
+    ): List<DetectedSleep> {
+        // Test mode ONLY: a requested trace MUST run the live gate ladder so every verdict emits for THIS
+        // night — never a silent memo replay. The trace is side-effect-only (the returned list is
+        // byte-identical to the untraced call), so every real call still memoizes below. Mirrors the
+        // Swift detectSleep traceSink bypass (#707).
+        if (traceSink != null) {
+            return detectSleepUncached(hr, rr, resp, gravity, tzOffsetSeconds, wristOff,
+                bandSleepState, useSleepStagerV2, traceSink)
+        }
+        val key = DetectKey(
+            // Fold the three gravity axes SEPARATELY (raw IEEE-754 bits, like StagerCache.fingerprint)
+            // rather than quantising the x+y+z SUM: two different postures sharing a component sum must
+            // not alias. DELIBERATELY harder than the Swift key's summed quant — a fingerprint difference
+            // can only cost one platform an extra recompute, never change a value, so this is free
+            // collision hardening, not a parity break.
+            grav = streamFingerprint(gravity, { it.ts }) { s ->
+                var q = java.lang.Double.doubleToRawLongBits(s.x)
+                q = q * 1_000_003L + java.lang.Double.doubleToRawLongBits(s.y)
+                q = q * 1_000_003L + java.lang.Double.doubleToRawLongBits(s.z)
+                q
+            },
+            hr = streamFingerprint(hr, { it.ts }) { it.bpm.toLong() },
+            rr = streamFingerprint(rr, { it.ts }) { it.rrMs.toLong() },
+            resp = streamFingerprint(resp, { it.ts }) { it.raw.toLong() },
+            tz = tzOffsetSeconds,
+            wristOff = streamFingerprint(wristOff, { it.first }) { it.second },
+            band = streamFingerprint(bandSleepState, { it.first }) { it.second.toLong() },
+            v2 = useSleepStagerV2,
+        )
+        synchronized(detectCacheLock) { detectCache[key] }?.let { return copyDetected(it) }
+        // Compute OUTSIDE the lock (the Swift AnalyticsMemoCache does the same): a slow night never
+        // serialises another thread's lookup, and a racing duplicate compute just overwrites the entry
+        // with an identical value — benign, the function is deterministic.
+        val sessions = detectSleepUncached(hr, rr, resp, gravity, tzOffsetSeconds, wristOff,
+            bandSleepState, useSleepStagerV2, null)
+        synchronized(detectCacheLock) { detectCache[key] = copyDetected(sessions) }
+        return sessions
+    }
+
+    /** The unchanged detection + staging pipeline, split out verbatim so [detectSleep] can memoize in
+     *  front (#707 parity). Parameters are documented on the public wrapper. */
+    private fun detectSleepUncached(
+        hr: List<HrSample>,
+        rr: List<RrInterval>,
+        resp: List<RespSample>,
+        gravity: List<GravitySample>,
+        tzOffsetSeconds: Long,
+        wristOff: List<Pair<Long, Long>>,
+        bandSleepState: List<Pair<Long, Int>>,
+        useSleepStagerV2: Boolean,
+        traceSink: ((String) -> Unit)?,
     ): List<DetectedSleep> {
         val grav = gravity.sortedBy { it.ts }
         if (grav.size < 2) return emptyList()
@@ -774,7 +895,16 @@ object SleepStager {
         var runs = buildRuns(grav, flags, sparse = sparse, hr = hrS, baseline = baseline)
         runs = mergePeriods(runs)
         // Re-stitch sleep runs fragmented by pure gravity dropouts (sparse only) before minSleepMin.
+        val runsBeforeBridge = if (traceSink == null) 0 else runs.count { it.stage == "sleep" }
         runs = bridgeSparseSleep(runs, sparse = sparse, hr = hrS, baseline = baseline)
+        // Sleep & Rest test mode (E10): record the sparse-gravity bridge result, so a sparse 5.0 night
+        // rescued from fragmentation is visible. Only when gravity is sparse and only when tracing.
+        if (traceSink != null && sparse) {
+            val runsAfterBridge = runs.count { it.stage == "sleep" }
+            traceSink(SleepStagerTrace.runLine(-1, 0, 0,
+                if (runsAfterBridge < runsBeforeBridge) SleepStagerTrace.Verdict.KEPT else SleepStagerTrace.Verdict.DROPPED,
+                "sparseBridge", "sparse=true gapMin=$sparseBridgeGapMin runsBefore=$runsBeforeBridge runsAfter=$runsAfterBridge"))
+        }
 
         val minSleepS = (minSleepMin * 60).toLong()
 
@@ -789,16 +919,35 @@ object SleepStager {
         val continuationGapS = (nightContinuationGapMin * 60).toLong()
         var chainPrevEnd: Long? = null       // end of the last accepted sleep run
         var chainFromOvernight = false       // did the current contiguous chain begin overnight?
+        // Sleep & Rest test mode (E10): each candidate sleep run emits ONE verdict line naming the gate
+        // that kept or dropped it. The decisions below are byte-identical to the untraced path; the
+        // traceSink calls are the only addition and never alter `sessions`. `runIndex` counts only
+        // sleep-stage runs so the trace numbers match the candidate ordinal.
+        var runIndex = -1
         for (p in runs) {
             if (p.stage != "sleep") continue
-            if ((p.end - p.start) <= minSleepS) continue
+            runIndex += 1
+            val spanMin = ((p.end - p.start) / 60).toInt()
+            if ((p.end - p.start) <= minSleepS) {
+                traceSink?.invoke(SleepStagerTrace.runLine(runIndex, p.start, p.end,
+                    SleepStagerTrace.Verdict.DROPPED, "minSleepMin", "spanMin=$spanMin minSleepMin=$minSleepMin"))
+                continue
+            }
             // H4 physiological in-bed span cap (#547/#531/#509 tail): a single assembled main-sleep run
             // longer than ~16 h is a bad-clock artefact (a frozen still stretch banked under a stale/wrong
             // clock), not a real night. Drop it rather than report (or truncate to) a 12 h+ "sleep" — an
             // over-long block can't be trusted to assert a span at all, and truncating would fabricate a
             // wake time. Checked before staging so the artefact never reaches the aggregate. Mirrors Swift.
-            if ((p.end - p.start) > maxMainSleepSpanS) continue
-            if (!confirmSleepWithHR(p, hrS, baseline)) continue
+            if ((p.end - p.start) > maxMainSleepSpanS) {
+                traceSink?.invoke(SleepStagerTrace.runLine(runIndex, p.start, p.end,
+                    SleepStagerTrace.Verdict.DROPPED, "maxMainSleepSpanS", "spanMin=$spanMin maxMainSleepSpanMin=${maxMainSleepSpanS / 60}"))
+                continue
+            }
+            if (!confirmSleepWithHR(p, hrS, baseline)) {
+                traceSink?.invoke(SleepStagerTrace.runLine(runIndex, p.start, p.end,
+                    SleepStagerTrace.Verdict.DROPPED, "hrConfirm", "hrSleepBaselineMult=$hrSleepBaselineMult baseline=${baseline?.toInt() ?: -1}"))
+                continue
+            }
             // Off-wrist backstop (#500), FRACTIONAL rule (design credited to j0b-dev's #504 analysis):
             // a wrist-OFF stretch is still gravity with no HR, so it slips past both the gravity spine
             // and the daytime guard's "missing data" path. Measure off-wrist COVERAGE — the union of the
@@ -809,7 +958,12 @@ object SleepStager {
             // (≈100% gap) is still dropped. Checked BEFORE the night-tail exemption: off-wrist time is
             // off-wrist day or night and must NOT ride a continuation chain. It does NOT re-anchor the
             // chain (the run is simply skipped).
-            if (offWristFraction(p, hrS, wristOff) >= maxOffWristSleepFraction) continue
+            val offFrac = offWristFraction(p, hrS, wristOff)
+            if (offFrac >= maxOffWristSleepFraction) {
+                traceSink?.invoke(SleepStagerTrace.runLine(runIndex, p.start, p.end,
+                    SleepStagerTrace.Verdict.DROPPED, "offWrist", "offWristFrac=${SleepStagerTrace.round2(offFrac)} max=$maxOffWristSleepFraction"))
+                continue
+            }
             // Daytime false-sleep guard (#90): a window centered in the local daytime band
             // must clear a stricter bar (≥daytimeMinSleepMin AND a real resting-HR dip).
             // Overnight windows skip this entirely. restingHR is computed here (reused below).
@@ -821,12 +975,27 @@ object SleepStager {
             // clear the STRONGER re-onset bar — killing the 9 am phantom nap of residual post-wake stillness
             // while keeping a genuine second sleep. Outside the window the guard is the ordinary daytime bar.
             val morningWakeEnd = if (chainFromOvernight) chainPrevEnd else null
-            if (isDaytimeCenter(p, tzOffsetSeconds) &&
-                !passesMorningStillnessGuard(p, resting, baseline, morningWakeEnd, bandSleepState) &&
-                !isNightTail
-            ) continue
-            val stages = stageSession(start = p.start, end = p.end, grav = grav,
-                hr = hrS, rr = rrS, resp = respS)
+            val isDaytime = isDaytimeCenter(p, tzOffsetSeconds)
+            // Evaluate the morning-stillness guard ONLY when the run is daytime-centered, preserving the
+            // original short-circuit (overnight runs never call it). The boolean used to drop below is
+            // identical to the original combined condition.
+            val passesMorning = if (isDaytime)
+                passesMorningStillnessGuard(p, resting, baseline, morningWakeEnd, bandSleepState)
+            else true
+            if (isDaytime && !passesMorning && !isNightTail) {
+                val gateName = if (morningWakeEnd != null) "morningStillness" else "daytimeGuard"
+                traceSink?.invoke(SleepStagerTrace.runLine(runIndex, p.start, p.end,
+                    SleepStagerTrace.Verdict.DROPPED, gateName,
+                    "daytime=true restingHR=${resting ?: -1} baseline=${baseline?.toInt() ?: -1} nightTail=false"))
+                continue
+            }
+            val stages = if (useSleepStagerV2) {
+                SleepStagerV2.stageSession(start = p.start, end = p.end, grav = grav,
+                    hr = hrS, rr = rrS, resp = respS)
+            } else {
+                stageSession(start = p.start, end = p.end, grav = grav,
+                    hr = hrS, rr = rrS, resp = respS)
+            }
             val eff = efficiency(start = p.start, end = p.end, stages = stages)
             val avgHrv = sessionAvgHRV(start = p.start, end = p.end, rr = rrS)
             sessions.add(
@@ -835,6 +1004,9 @@ object SleepStager {
                     stages = stages, restingHR = resting, avgHRV = avgHrv,
                 )
             )
+            traceSink?.invoke(SleepStagerTrace.runLine(runIndex, p.start, p.end,
+                SleepStagerTrace.Verdict.KEPT, "accepted",
+                "spanMin=$spanMin eff=${SleepStagerTrace.round2(eff)} restingHR=${resting ?: -1} daytime=$isDaytime"))
             // A run that does NOT continue the chain re-anchors it on this run's onset.
             if (!continuesChain) chainFromOvernight = isOvernightOnset(p.start, tzOffsetSeconds)
             chainPrevEnd = p.end
@@ -880,8 +1052,32 @@ object SleepStager {
         return Pair(o, f)
     }
 
-    /** Build a 30 s hypnogram for [start, end] and return StageSegments. */
+    /**
+     * Build a 30 s hypnogram for [start, end] and return StageSegments.
+     *
+     * PERF (v7.0.2 / #707): staging is the heaviest per-night step on the model path and it was being
+     * re-run for EVERY detected night on EVERY [IntelligenceEngine.analyzeRecent] — ~21× per post-sync
+     * pass, again per sleep edit, and up to thousands of nights on the one-shot full-history Effort rescore
+     * (maxDays=4000). It is a pure function of (start, end, samples), so this is a thin cache veneer over
+     * [stageSessionUncached]: each distinct night stages AT MOST ONCE, peak heap stays flat across repeated
+     * passes, and the output is byte-identical (the cached list is the same one the recipe produced, handed
+     * back as a fresh copy so a caller extending a segment in place can never poison the cache). Edits
+     * invalidate naturally — a moved bed/wake time changes start/end → new key; newly-banked samples change
+     * the per-stream count/edge-ts/checksum → new key (see [StagerCache.fingerprint]).
+     */
     internal fun stageSession(
+        start: Long, end: Long, grav: List<GravitySample>,
+        hr: List<HrSample>, rr: List<RrInterval>, resp: List<RespSample>,
+    ): List<StageSegment> {
+        val key = StagerCache.fingerprint(StagerCache.Version.V1, start, end, grav, hr, rr, resp)
+        StagerCache.get(key)?.let { return StagerCache.copyOf(it) }
+        val segments = stageSessionUncached(start, end, grav, hr, rr, resp)
+        StagerCache.put(key, segments)
+        return StagerCache.copyOf(segments)
+    }
+
+    /** The pure recipe, exactly as before — extracted so [stageSession] can memoize it. */
+    private fun stageSessionUncached(
         start: Long, end: Long, grav: List<GravitySample>,
         hr: List<HrSample>, rr: List<RrInterval>, resp: List<RespSample>,
     ): List<StageSegment> {
@@ -964,6 +1160,37 @@ object SleepStager {
             hr = emptyList(), rr = emptyList(), resp = emptyList(),
         )
         return grid.counts
+    }
+
+    /**
+     * #175: the strap's OWN band sleep_state (0 wake/1 still/2 asleep/3 up) gridded onto the SAME 30 s epoch
+     * grid `stagesJSON` / [sessionEpochMotion] use, so the caller can persist it via
+     * [com.noop.data.WhoopRepository.persistSessionSleepState] and the H7 re-onset CONFIRM guard can read it
+     * back as timestamped `(startTs + i*epochS, state)` samples. Returns EMPTY when the session carries no
+     * band-state samples (a WHOOP 4.0, or an unbanded window) — an absent signal stays absent, never a
+     * fabricated array. When present, each epoch takes the band's LAST reported state within its
+     * `[start + i*30, start + (i+1)*30)` window; an epoch with no sample of its own CARRIES FORWARD the
+     * previous epoch's state (band state is a step function). Leading epochs before the first sample take the
+     * first sample's state. The band code is carried VERBATIM — this never converts an unproven code into a
+     * derived stage; consumers decide meaning. Mirrors Swift `sessionEpochSleepState`. (#175)
+     */
+    fun sessionEpochSleepState(start: Long, end: Long, sleepState: List<Pair<Long, Int>>): List<Int> {
+        val seg = rowsBetween(sleepState, start, end) { it.first }.sortedBy { it.first }
+        if (seg.isEmpty() || end <= start) return emptyList()
+        val nEpochs = maxOf(1, kotlin.math.ceil((end - start).toDouble() / epochS).toInt())
+        val out = IntArray(nEpochs) { seg[0].second }   // lead-in = first sample's state
+        var last = seg[0].second
+        var si = 0
+        for (i in 0 until nEpochs) {
+            val epochEnd = start + ((i + 1) * epochS).toLong()
+            // Advance through every sample that falls in/at-or-before this epoch's window; the LAST one wins.
+            while (si < seg.size && seg[si].first < epochEnd) {
+                last = seg[si].second
+                si++
+            }
+            out[i] = last   // carry-forward when the epoch had no sample of its own
+        }
+        return out.toList()
     }
 
     // ── Epoch grid ────────────────────────────────────────────────────────────
@@ -1486,16 +1713,32 @@ object SleepStager {
         val hrvarHi = percentile(sleepFeats.map { it.hrVar }, stageHRVarHighPct)
         val rrvHi = percentile(sleepFeats.map { it.rrv }, stageRRVHighPct)
         val rrvLo = percentile(sleepFeats.map { it.rrv }, stageRRVLowPct)
+        val cardiacSparse = isCardiacSparse(sleepFeats)
 
         return features.map {
             classifyOne(it, hrLo = hrLo, hrHi = hrHi, rmssdHi = rmssdHi,
-                hrvarHi = hrvarHi, rrvHi = rrvHi, rrvLo = rrvLo)
+                hrvarHi = hrvarHi, rrvHi = rrvHi, rrvLo = rrvLo,
+                cardiacSparse = cardiacSparse)
         }
+    }
+
+    /**
+     * Session-level PPG-derived / sparse-cardiac tell: most sleep-period epochs carry NO finite
+     * per-epoch RMSSD (sparse R-R). On those nights the HR is PPG-derived and its windowed variance
+     * (`hrVar`) is noisier, so the percentile `hrvarHigh` bar fires on genuinely still, low-HR sleep —
+     * which the WAKE rule must NOT treat as cardiac activation. Same `!rmssd.isFinite()` signal already
+     * trusted for the pro-deep RMSSD handling (#127/#129), aggregated across the night. (#705)
+     */
+    internal fun isCardiacSparse(sleepFeats: List<EpochFeatures>): Boolean {
+        if (sleepFeats.isEmpty()) return false
+        val sparse = sleepFeats.count { !it.rmssd.isFinite() }
+        return sparse.toDouble() >= cardiacSparseEpochFrac * sleepFeats.size.toDouble()
     }
 
     internal fun classifyOne(
         f: EpochFeatures, hrLo: Double?, hrHi: Double?,
         rmssdHi: Double?, hrvarHi: Double?, rrvHi: Double?, rrvLo: Double?,
+        cardiacSparse: Boolean = false,
     ): String {
         val hasHR = f.hr.isFinite()
         val hrLow = hasHR && hrLo != null && f.hr <= hrLo
@@ -1512,6 +1755,13 @@ object SleepStager {
         val hrvarHigh = f.hrVar.isFinite() && hrvarHi != null && f.hrVar >= hrvarHi
         val cardiacActivated = hrHigh || hrvarHigh
 
+        // WAKE-specific cardiac vetting. On a PPG-derived / sparse-cardiac night the per-epoch HR-variance
+        // is noisy, so `hrvarHigh` fires on still, low-HR sleep and used to flip those epochs to WAKE. When
+        // the session is sparse we DOWN-WEIGHT hrVar for the wake promotion and require a real elevated HR
+        // (`hrHigh`) — the down-weighting mirrors how sparse R-R is trusted for the pro-deep RMSSD handling.
+        // Dense 4.0 nights keep the full `hrHigh || hrvarHigh` signal, so their behaviour is unchanged. (#705)
+        val cardiacActivatedForWake = if (cardiacSparse) hrHigh else cardiacActivated
+
         val rrvIrregular = f.rrv.isFinite() && rrvHi != null && f.rrv >= rrvHi
         // Missing respiration (NaN RRV) treated as "regular" (pro-deep bias).
         val rrvRegular = (!f.rrv.isFinite()) || (rrvLo != null && f.rrv <= rrvLo)
@@ -1519,8 +1769,10 @@ object SleepStager {
         val still = f.moveFrac <= stageStillMoveFrac
         val moving = f.moveFrac >= stageWakeMoveFrac
 
-        // WAKE: sustained motion + activated cardiac (or no HR to vet motion).
-        if (moving && (cardiacActivated || !hasHR)) return "wake"
+        // WAKE: sustained motion + activated cardiac (or no HR to vet motion). On a sparse/PPG night the
+        // cardiac half is vetted by HR only (see `cardiacActivatedForWake`), so noisy hrVar no longer
+        // over-promotes still sleep to wake. (#705)
+        if (moving && (cardiacActivatedForWake || !hasHR)) return "wake"
         // DEEP: still + low HR + regular respiration, with high parasympathetic tone when measurable.
         if (still && parasympOK && hrLow && rrvRegular) return "deep"
         // REM: still body + activated cardiac + irregular respiration.
@@ -1646,6 +1898,7 @@ object SleepStager {
     internal fun remRejectReason(
         f: EpochFeatures, hrLo: Double?, hrHi: Double?,
         rmssdHi: Double?, hrvarHi: Double?, rrvHi: Double?, rrvLo: Double?,
+        cardiacSparse: Boolean = false,
     ): REMRejectReason {
         // Mirror classifyOne's derived predicates exactly.
         val hasHR = f.hr.isFinite()
@@ -1654,6 +1907,7 @@ object SleepStager {
         val parasympOK = (!f.rmssd.isFinite()) || (rmssdHi != null && f.rmssd >= rmssdHi)
         val hrvarHigh = f.hrVar.isFinite() && hrvarHi != null && f.hrVar >= hrvarHi
         val cardiacActivated = hrHigh || hrvarHigh
+        val cardiacActivatedForWake = if (cardiacSparse) hrHigh else cardiacActivated
         val rrvIrregular = f.rrv.isFinite() && rrvHi != null && f.rrv >= rrvHi
         val rrvRegular = (!f.rrv.isFinite()) || (rrvLo != null && f.rrv <= rrvLo)
         val still = f.moveFrac <= stageStillMoveFrac
@@ -1661,7 +1915,7 @@ object SleepStager {
 
         // classifyOne precedence: WAKE, then DEEP, then REM (then REM fallback), else LIGHT.
         // An epoch that wins WAKE or DEEP was never a REM candidate.
-        if (moving && (cardiacActivated || !hasHR)) return REMRejectReason.WON_OTHER_STAGE  // → wake
+        if (moving && (cardiacActivatedForWake || !hasHR)) return REMRejectReason.WON_OTHER_STAGE  // → wake
         if (still && parasympOK && hrLow && rrvRegular) return REMRejectReason.WON_OTHER_STAGE // → deep
         // From here the epoch did NOT win wake/deep; it is either REM or falls through to LIGHT.
         if (still && cardiacActivated && rrvIrregular) return REMRejectReason.REM_ELIGIBLE
@@ -1715,6 +1969,7 @@ object SleepStager {
         val hrvarHi = percentile(sleepFeats.map { it.hrVar }, stageHRVarHighPct)
         val rrvHi = percentile(sleepFeats.map { it.rrv }, stageRRVHighPct)
         val rrvLo = percentile(sleepFeats.map { it.rrv }, stageRRVLowPct)
+        val cardiacSparse = isCardiacSparse(sleepFeats)
 
         // Classify + post-process exactly as stageSession does, so we explain the SAME hypnogram.
         val labels = classifyEpochs(feats)
@@ -1735,7 +1990,8 @@ object SleepStager {
             if (f.rrv.isFinite()) respChannelPresent = true
             // Per-epoch REM reason at the raw classifier seam (pre-smoothing) — the funnel's mouth.
             when (remRejectReason(f, hrLo = hrLo, hrHi = hrHi, rmssdHi = rmssdHi,
-                hrvarHi = hrvarHi, rrvHi = rrvHi, rrvLo = rrvLo)) {
+                hrvarHi = hrvarHi, rrvHi = rrvHi, rrvLo = rrvLo,
+                cardiacSparse = cardiacSparse)) {
                 REMRejectReason.REM_ELIGIBLE -> remAtClassify += 1
                 REMRejectReason.WON_OTHER_STAGE -> wonOtherStage += 1
                 REMRejectReason.NOT_STILL -> blockedNotStill += 1

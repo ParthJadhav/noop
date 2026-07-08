@@ -37,6 +37,16 @@ object GpsSession {
     /** The live route, observed by the UI (via AppViewModel) and the service's collect-gate. */
     val state: StateFlow<State> = _state.asStateFlow()
 
+    /** Workouts & GPS test mode (Test Centre): the tagged sink for the .workouts GPS-fix lines, wired by
+     *  [com.noop.ble.WhoopConnectionService] (which holds the BLE client + the gate). Default null (inert) so
+     *  the route fold is byte-identical when the mode is off. The service ALWAYS checks the WORKOUTS gate
+     *  before setting this, so [append] pays nothing extra when off. Diagnostic only - it never changes the
+     *  route. The Android LocationTracker pre-filters UPSTREAM, so every appended fix is already ACCEPTED and
+     *  the raw pre-filter count is not available at this seam; the gps line passes rawFixes = null (reads
+     *  `n/a`) rather than imply an accept rate the platform never measured (the macOS recorder, which sees
+     *  the raw stream, passes a real count). L4. */
+    var workoutsLog: ((String) -> Unit)? = null
+
     /** Begin a route for [sportName]'s workout started at [startMs]. A re-arm just resets the track. */
     fun start(startMs: Long, sportName: String) {
         _state.value = State(active = true, startMs = startMs, sportName = sportName)
@@ -50,6 +60,17 @@ object GpsSession {
         val dist = RouteMath.totalMeters(track)
         val secs = (System.currentTimeMillis() - s.startMs) / 1000.0
         _state.value = s.copy(track = track, distanceM = dist, paceSecPerKm = RouteMath.paceSecPerKm(dist, secs))
+        // Workouts & GPS test mode: one GPS-fix-progress line per accepted fix, only when the service wired a
+        // sink (the WORKOUTS gate was on). The LocationTracker pre-filters UPSTREAM, so the raw pre-filter
+        // count is not available at this seam (every fix here is already accepted). Pass rawFixes = null so
+        // the line reads `rawFixes=n/a` instead of `rawFixes == accepted`, which would falsely imply a 100%
+        // accept rate the platform never actually measured (macOS, which sees the raw stream, passes a real
+        // count). L4.
+        workoutsLog?.invoke(
+            com.noop.analytics.WorkoutsTrace.gpsLine(
+                rawFixes = null, acceptedPoints = track.size, distanceM = dist,
+            ),
+        )
     }
 
     /** End the route and clear it. Returns the final accumulated track for the saved WorkoutRow. */

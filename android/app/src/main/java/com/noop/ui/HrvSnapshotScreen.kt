@@ -54,6 +54,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.noop.analytics.HrvAnalyzer
+import com.noop.analytics.HrvAnalyzerTrace
 import com.noop.analytics.SpotHrvReading
 import com.noop.data.MetricSeriesRow
 import kotlinx.coroutines.delay
@@ -133,15 +134,37 @@ fun HrvSnapshotScreen(
             secondsRemaining -= 1
         }
         // End the capture and run the full cleaning analysis over everything collected.
-        result = HrvAnalyzer.analyzeRaw(captureBuffer.value.map { it.toDouble() }, HrvAnalyzer.DEFAULT_SPOT_MAX_REJECTED_FRACTION)
+        val raw = captureBuffer.value.map { it.toDouble() }
+        // HRV & Autonomic test mode (Test Centre Group G): when the mode is on, emit the cleaning trace
+        // (nInput / nClean / rejected fraction, the range + Malik ectopic counts, the minBeats + spot
+        // gates, RMSSD/SDNN/meanNN) tagged HRV. analyzeTrace returns the SAME HrvResult analyzeRaw would
+        // (it reuses analyzeRaw verbatim), so the headline RMSSD is byte-identical with the trace on or off.
+        // Zero cost when off: one SharedPreferences bool read and analyzeTrace is never called, so the plain
+        // analyzeRaw path below runs untouched. Mirrors the macOS HRVSnapshotView wiring.
+        result = if (com.noop.testcentre.TestCentre.from(context)
+                .active(com.noop.testcentre.TestDomain.HRV)
+        ) {
+            val (traced, lines) = HrvAnalyzerTrace.analyzeTrace(
+                raw, HrvAnalyzer.DEFAULT_SPOT_MAX_REJECTED_FRACTION, path = "spot",
+            )
+            for (line in lines) viewModel.ble.externalLog(line, com.noop.testcentre.TestDomain.HRV)
+            traced
+        } else {
+            HrvAnalyzer.analyzeRaw(raw, HrvAnalyzer.DEFAULT_SPOT_MAX_REJECTED_FRACTION)
+        }
         phase = HrvPhase.Done
     }
 
-    ScreenScaffold(
+    // PERF (#707): lazy scaffold — each section is one `item { }`; the capture dial ticks `secondsRemaining`
+    // each second during a capture, and a LazyColumn confines that tick's recomposition to the visible
+    // items. Conditional sections use `if (cond) { item {} }` so a hidden result/hint adds no row. Order +
+    // spacing identical (LazyColumn reproduces the eager `spacedBy(20.dp)`).
+    LazyScreenScaffold(
         title = "HRV Reading",
         subtitle = "A still, seated snapshot of your heart-rate variability",
     ) {
         // Status row.
+        item {
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             when (phase) {
                 HrvPhase.Idle -> StatePill("Ready", tone = StrandTone.Neutral)
@@ -163,8 +186,10 @@ fun HrvSnapshotScreen(
                 )
             }
         }
+        }
 
         // Capture card — the progress dial over a calm Rest-world starfield.
+        item {
         NoopCard(padding = 24.dp, tint = Palette.restColor) {
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
@@ -200,8 +225,10 @@ fun HrvSnapshotScreen(
                 )
             }
         }
+        }
 
         // Controls.
+        item {
         Row(horizontalArrangement = Arrangement.spacedBy(Metrics.gap), modifier = Modifier.fillMaxWidth()) {
             Button(
                 onClick = {
@@ -262,16 +289,18 @@ fun HrvSnapshotScreen(
                 }
             }
         }
+        }
 
         // Result.
         val done = result
         if (phase == HrvPhase.Done && done != null) {
-            ResultCard(done)
+            item { ResultCard(done) }
         }
 
         // Methodology — source-aware caveat (a 5/MG's R-R is optical PPG, noisier than a chest strap).
         // The same RMSSD math the nightly HRV uses (Task Force 1996, cleaned), so the spot number is
         // comparable to your overnight figure.
+        item {
         NoopCard(tint = Palette.restColor) {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Overline("How this is measured")
@@ -287,8 +316,9 @@ fun HrvSnapshotScreen(
                 )
             }
         }
+        }
 
-        if (!bonded) NotBondedHint()
+        if (!bonded) { item { NotBondedHint() } }
     }
 }
 
@@ -375,7 +405,7 @@ private fun ResultCard(result: HrvAnalyzer.HrvResult) {
                 ) {
                     Icon(Icons.Filled.WarningAmber, contentDescription = null, tint = Palette.statusWarning)
                     Text(
-                        "Not enough clean beats — sit still and try again. ${result.nClean} of " +
+                        "Not enough clean beats - sit still and try again. ${result.nClean} of " +
                             "${result.nInput} beats survived filtering (need ${HrvAnalyzer.MIN_BEATS}).",
                         style = NoopType.footnote, color = Palette.textSecondary,
                     )
@@ -480,7 +510,7 @@ private fun instruction(phase: HrvPhase, bonded: Boolean, result: HrvAnalyzer.Hr
         }
         HrvPhase.Capturing -> "Sit still, breathe normally. Keep your wrist relaxed and steady."
         HrvPhase.Done -> if (result != null && result.rmssd == null) {
-            "Not enough clean beats — sit still and try again."
+            "Not enough clean beats - sit still and try again."
         } else {
             "Done. Save this reading to keep it in your trends."
         }

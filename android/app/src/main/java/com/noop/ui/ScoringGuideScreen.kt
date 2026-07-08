@@ -186,12 +186,12 @@ fun ScoringGuideScreen(
                 IntroCard()
                 ScoreCard(
                     section = ScoreSection.CHARGE,
-                    headline = "Charge — how recovered are you?",
+                    headline = "Charge: how recovered are you?",
                     body = "Led by your heart-rate variability (HRV) measured against your own " +
                         "personal baseline, plus resting heart rate, last night's Rest, breathing " +
                         "rate, and a skin-temperature signal (an early illness or overreach flag). " +
                         "Higher HRV versus your baseline means more Charge. NOOP needs a few nights " +
-                        "to learn your baseline first — until then you'll see “Calibrating”.",
+                        "to learn your baseline first. Until then you'll see “Calibrating”.",
                     vsWhoop = "Same core idea as WHOOP's Recovery % (HRV-led recovery), but our " +
                         "weighting and baseline maths are our own, and openly documented.",
                     highlighted = highlighted == ScoreSection.CHARGE,
@@ -199,22 +199,22 @@ fun ScoringGuideScreen(
                 )
                 ScoreCard(
                     section = ScoreSection.EFFORT,
-                    headline = "Effort — how hard did your heart work?",
+                    headline = "Effort: how hard did your heart work?",
                     body = "Your cardiovascular load. NOOP turns every second of heart rate into a " +
                         "training-impulse using heart-rate-reserve zones (Karvonen), weights time in " +
                         "harder zones more heavily (Edwards / Banister), and places it on a " +
-                        "logarithmic 0–100 scale — so easy days sit low and an all-out day approaches " +
+                        "logarithmic 0-100 scale, so easy days sit low and an all-out day approaches " +
                         "100, which stays genuinely rare. A long walk with little cardio still counts, " +
                         "through a steps / active-energy floor.",
-                    vsWhoop = "Same cardiovascular-load idea as WHOOP's Day Strain (0–21). We " +
+                    vsWhoop = "Same cardiovascular-load idea as WHOOP's Day Strain (0-21). We " +
                         "rescaled the top of the ladder from 21 to 100 so all three scores share one " +
-                        "scale — the rungs didn't move, so a 100 is as rare as a 21.0 was.",
+                        "scale. The rungs didn't move, so a 100 is as rare as a 21.0 was.",
                     highlighted = highlighted == ScoreSection.EFFORT,
                     onPositioned = { if (ScoreSection.EFFORT !in anchors) anchors[ScoreSection.EFFORT] = it },
                 )
                 ScoreCard(
                     section = ScoreSection.REST,
-                    headline = "Rest — how restorative was your sleep?",
+                    headline = "Rest: how restorative was your sleep?",
                     body = "A blend of how long you slept versus your personal need (the biggest " +
                         "factor), how efficiently (asleep versus in bed), how much was restorative " +
                         "(deep + REM sleep), and how consistent your sleep and wake timing is.",
@@ -274,12 +274,12 @@ private fun IntroCard() {
         Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Overline("The three scores")
             Text(
-                "NOOP gives you three daily scores — Charge, Effort and Rest — each on a 0–100 " +
+                "NOOP gives you three daily scores (Charge, Effort and Rest), each on a 0-100 " +
                     "scale. They're built from your strap's raw signals using published, " +
                     "peer-reviewed sport science, and computed entirely on your device. They are " +
                     "NOT WHOOP's scores: we don't have WHOOP's private algorithms and don't pretend " +
                     "to. They aim at the same three questions using open science, so they'll usually " +
-                    "track WHOOP's in direction, but won't match number-for-number — and that's the " +
+                    "track WHOOP's in direction, but won't match number-for-number. And that's the " +
                     "point.",
                 style = NoopType.subhead,
                 color = Palette.textSecondary,
@@ -449,7 +449,7 @@ private fun ConfidenceCard() {
 @Composable
 private fun FooterNote() {
     Text(
-        "These are independent approximations from a consumer strap, built on open science — not " +
+        "These are independent approximations from a consumer strap, built on open science: not " +
             "medical advice, and not WHOOP's official scores.",
         style = NoopType.footnote,
         color = Palette.textTertiary,

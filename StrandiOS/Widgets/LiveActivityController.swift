@@ -69,7 +69,7 @@ final class LiveActivityController {
             isStarting = true
             do {
                 activity = try Activity.request(
-                    attributes: NOOPActivityAttributes(title: "Live HR"),
+                    attributes: NOOPActivityAttributes(title: String(localized: "Live HR")),
                     content: ActivityContent(state: state, staleDate: staleDate),
                     pushType: nil
                 )

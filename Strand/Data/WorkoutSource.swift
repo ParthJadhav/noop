@@ -1,5 +1,6 @@
 import Foundation
 import WhoopStore
+import StrandAnalytics   // WorkoutsTrace: the dedup-decision line formatter for the Workouts test mode
 
 /// Origin of a workout row, classified from its stored `source` column. The macOS read model
 /// (`WorkoutRow`) carries no `deviceId`, so the row's origin has to be recovered from `source`.
@@ -46,7 +47,13 @@ enum WorkoutSource: Equatable {
     /// unbreakable word and truncates badly — split it into words on the lower→Upper boundary so it
     /// renders "Traditional Strength Training". Already-spaced labels (manual/edited) pass through. (#175)
     static func displaySport(_ sport: String) -> String {
-        if sport == "detected" { return "Activity" }
+        if sport == "detected" { return String(localized: "Activity") }
+        return splitCamelCase(sport)
+    }
+
+    /// The camelCase splitter shared by the display and KEY paths. Deliberately NOT localized: the
+    /// key path below must be locale-stable.
+    private static func splitCamelCase(_ sport: String) -> String {
         if sport.isEmpty || sport.contains(" ") { return sport }
         var out = ""
         var prev: Character?
@@ -56,6 +63,12 @@ enum WorkoutSource: Equatable {
             prev = ch
         }
         return out
+    }
+
+    /// The locale-stable editable form: what an edit field should SEED so a save round-trips a stable
+    /// token ("Activity", never a translated word that would split cross-source dedup per language).
+    static func editableSport(_ sport: String) -> String {
+        sport == "detected" ? "Activity" : splitCamelCase(sport)
     }
 
     // MARK: - Dismissed detected bouts (durable across re-detection)
@@ -106,8 +119,28 @@ enum WorkoutSource: Equatable {
     /// human-readable import label to the same key ("TraditionalStrengthTraining" and
     /// "Traditional Strength Training" → "traditionalstrengthtraining"), case- and space-insensitive,
     /// so the same activity matches across sources. "detected"/"Activity" both fold to "activity".
+    /// LOCALE-STABLE by construction: computed from the raw token, never the localized display (a
+    /// localized word here would vary the dedup key and the trace allowlist per user language).
     static func sportKey(_ sport: String) -> String {
-        displaySport(sport).lowercased().filter { !$0.isWhitespace }
+        editableSport(sport).lowercased().filter { !$0.isWhitespace }
+    }
+
+    /// The set of `sportKey`s for the named catalogue (Running, Cycling, … Padel, Other), computed once.
+    /// Used ONLY by the TRACE path to decide whether a key is a known, non-PII catalogue sport.
+    private static let catalogSportKeys: Set<String> =
+        Set(WorkoutCatalog.all.map { sportKey($0.name) })
+
+    /// PRIVACY (TRACE PATH ONLY): a redaction-safe sport key for the Workouts test-mode trace. `sportKey`
+    /// returns a free-typed name verbatim (folded), so a user-named sport like "Johns Birthday 5k" would
+    /// otherwise surface as `sport=johnsbirthday5k` in the export, which `redactPii` cannot catch. Here we
+    /// emit the key ONLY when it matches the known named catalogue; any off-catalogue / free-text sport
+    /// folds to the generic "custom" so genuine user text can never enter a shared bundle. The user-facing
+    /// `displaySport` is unchanged - this is purely the diagnostic-line token. "detected"/"Activity" fold to
+    /// "activity" via `sportKey` and that IS a catalogue-independent known token, so it is allowed through.
+    static func traceSportKey(_ sport: String) -> String {
+        let key = sportKey(sport)
+        if key == "activity" { return key }   // the detector's neutral token, never user text
+        return catalogSportKeys.contains(key) ? key : "custom"
     }
 
     /// How many "rich" captured signals a row carries — the tiebreak for which duplicate to keep.
@@ -149,13 +182,51 @@ enum WorkoutSource: Equatable {
         return a
     }
 
+    // MARK: - Detected-vs-real overlap collapse (#975)
+    //
+    // The engine derives a "detected" bout from raw HR and DROPS it when it overlaps a real logged session
+    // (IntelligenceEngine: bare time overlap, ANY source), but only on the next analyze pass. Between a live
+    // /manual session ending and that pass, BOTH the manual row AND the detected shadow of the same bout show
+    // in the list, and the detected shadow (a WIDER, sport-agnostic HR window) reads an implausibly high
+    // interpolated Effort/HR next to the real one. `sameActivity` cannot collapse them because their SPORTS
+    // differ ("detected" vs the user's sport). This read-time guard mirrors the engine's own rule so the list
+    // never shows the transient duplicate: a DETECTED row is dropped when its time window overlaps a REAL
+    // (non-detected) session by more than half of the shorter of the two. The >50%-of-shorter test (not bare
+    // touching) keeps a genuinely separate back-to-back session distinct, matching `sameActivity`'s overlap
+    // rule. Runs BEFORE the same-sport cross-source dedup, so the detected shadow is gone before that walk.
+
+    /// True when `detected` (a detected bout) is a redundant shadow of `real` (a logged session of any source
+    /// other than detected): their windows overlap by more than half of the shorter session. Order matters ,
+    /// `detected` must be the detected row and `real` a non-detected row; the caller enforces that.
+    static func detectedShadowsReal(_ detected: WorkoutRow, _ real: WorkoutRow) -> Bool {
+        let overlap = min(detected.endTs, real.endTs) - max(detected.startTs, real.startTs)
+        guard overlap > 0 else { return false }
+        let shorter = max(1, min(detected.endTs - detected.startTs, real.endTs - real.startTs))
+        return Double(overlap) > 0.5 * Double(shorter)
+    }
+
+    /// Drop every DETECTED row whose window shadows a REAL (non-detected) session in the same list (#975), so
+    /// the live/manual session and its detected twin never both show. Order-stable; a list with no detected
+    /// row, or no real row, passes through unchanged. Runs before `dedupCrossSource`.
+    static func dropDetectedShadows(_ rows: [WorkoutRow]) -> [WorkoutRow] {
+        let reals = rows.filter { classify($0.source) != .detected }
+        guard !reals.isEmpty else { return rows }
+        return rows.filter { row in
+            guard classify(row.source) == .detected else { return true }
+            return !reals.contains { detectedShadowsReal(row, $0) }
+        }
+    }
+
     /// Collapse cross-source duplicates of the same activity, keeping the richer row of each pair.
     /// Order-stable: walks the input once, and a row that duplicates one already kept is dropped (with
     /// the kept row swapped for the richer of the two). Single-source lists pass through unchanged.
+    /// #975: a DETECTED bout that shadows a real logged session is dropped FIRST so the transient
+    /// live+detected duplicate never shows and can't pollute the Effort/HR read-out.
     static func dedupCrossSource(_ rows: [WorkoutRow]) -> [WorkoutRow] {
         var kept: [WorkoutRow] = []
-        kept.reserveCapacity(rows.count)
-        outer: for row in rows {
+        let input = dropDetectedShadows(rows)
+        kept.reserveCapacity(input.count)
+        outer: for row in input {
             for i in kept.indices where sameActivity(kept[i], row) {
                 kept[i] = preferred(kept[i], row)
                 continue outer
@@ -163,6 +234,67 @@ enum WorkoutSource: Equatable {
             kept.append(row)
         }
         return kept
+    }
+
+    /// A short, source-only descriptor of a row for the Workouts test-mode dedup trace ("strap" / "apple" /
+    /// "detected" / "manual" / "lifting" / "activityFile"). No timestamps or free text.
+    static func sourceLabel(_ row: WorkoutRow) -> String {
+        switch classify(row.source) {
+        case .whoop:        return "strap"
+        case .apple:        return "apple"
+        case .detected:     return "detected"
+        case .manual:       return "manual"
+        case .lifting:      return "lifting"
+        case .activityFile: return "activityFile"
+        }
+    }
+
+    /// Diagnostic twin of `dedupCrossSource(...)` for the Workouts & GPS test mode: returns the BYTE-IDENTICAL
+    /// kept list (the SAME walk, the SAME `preferred` choice) plus a trace line per collapsed pair naming the
+    /// kept vs dropped source and their richness. The kept output equals `dedupCrossSource(...)` exactly, so
+    /// the trace can never diverge from the list the screen shows. Only called when the mode is on.
+    /// #975: it FIRST drops any detected shadow of a real session (the SAME `dropDetectedShadows` step the
+    /// plain path runs) and emits one `detectedBout verdict=droppedShadow` line per drop, so the export shows
+    /// exactly which detected twin was suppressed to keep the live/manual session single.
+    static func dedupCrossSourceTrace(_ rows: [WorkoutRow]) -> (kept: [WorkoutRow], trace: [String]) {
+        var kept: [WorkoutRow] = []
+        var lines: [String] = []
+        // Detected-shadow drop first (byte-identical to dedupCrossSource's `dropDetectedShadows`), tracing each.
+        let reals = rows.filter { classify($0.source) != .detected }
+        var input: [WorkoutRow] = []
+        input.reserveCapacity(rows.count)
+        for row in rows {
+            if classify(row.source) == .detected,
+               let hit = reals.first(where: { detectedShadowsReal(row, $0) }) {
+                let durMin = max(0, (row.endTs - row.startTs) / 60)
+                lines.append(WorkoutsTrace.detectedBoutLine(
+                    verdict: "droppedShadow", durMin: durMin, avgBpm: row.avgHr ?? 0,
+                    overlapSource: sourceLabel(hit)))
+                continue
+            }
+            input.append(row)
+        }
+        kept.reserveCapacity(input.count)
+        outer: for row in input {
+            for i in kept.indices where sameActivity(kept[i], row) {
+                // L8: identify kept-vs-dropped by the REAL keep decision, not by a (startTs, source) tuple
+                // that collides when row and kept[i] share both fields (e.g. a same-start same-source pair
+                // differing only in richness). preferred() returns one of the two rows; a full-row ==
+                // against kept[i] tells us which side won. When the two rows are byte-identical the label is
+                // interchangeable, so == is correct in every case.
+                let keptWins = preferred(kept[i], row) == kept[i]
+                let winner = keptWins ? kept[i] : row
+                let loser = keptWins ? row : kept[i]
+                lines.append(WorkoutsTrace.dedupLine(
+                    sportKey: traceSportKey(row.sport),   // PRIVACY: catalogue key or "custom", never free text
+                    keptSource: sourceLabel(winner), droppedSource: sourceLabel(loser),
+                    keptRichness: richness(winner), droppedRichness: richness(loser)))
+                kept[i] = winner
+                continue outer
+            }
+            kept.append(row)
+        }
+        return (kept, lines)
     }
 
     // MARK: - Building / preserving rows
@@ -196,5 +328,143 @@ enum WorkoutSource: Equatable {
                           durationS: Double(durationMin) * 60, energyKcal: energyKcal,
                           avgHr: avgHr, maxHr: nil, strain: nil, distanceM: nil,
                           zonesJSON: nil, notes: nil)
+    }
+}
+
+// MARK: - Filter predicate (#64)
+//
+// The Workouts list filters beyond the time range: a SPORT filter (a specific displayed sport, or all)
+// and a SOURCE filter (Whoop / Apple / Detected / Manual / Lifting / File, or all), plus a free-text
+// SEARCH over the displayed sport name. All three are pure and compose with the time-range window the
+// screen already computes, so the whole screen (hero, tiles, breakdown, zones, list) reads one filtered
+// set. Kept alongside `WorkoutSource` so both platforms share one rule and the unit test pins it.
+
+/// One workout-list filter state. `sport` is a displayed-sport key (`WorkoutSource.displaySport`), nil =
+/// all sports. `sourceClass` is the origin class, nil = all sources. `search` is a free-text query over
+/// the displayed sport name (trimmed, case-insensitive; empty = no search).
+struct WorkoutFilter: Equatable {
+    var sport: String?
+    var sourceClass: WorkoutSource?
+    var search: String
+
+    init(sport: String? = nil, sourceClass: WorkoutSource? = nil, search: String = "") {
+        self.sport = sport
+        self.sourceClass = sourceClass
+        self.search = search
+    }
+
+    /// True when no facet is active — the caller can skip the walk and keep the input verbatim.
+    var isActive: Bool {
+        sport != nil || sourceClass != nil
+            || !search.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    /// Does one row pass every active facet? Sport matches on the DISPLAYED name (so "detected" folds to
+    /// "Activity", camelCase splits) exactly as the picker lists it; source matches on `classify`; search
+    /// is a case-insensitive substring of the displayed sport.
+    func matches(_ row: WorkoutRow) -> Bool {
+        if let sport, WorkoutSource.displaySport(row.sport) != sport { return false }
+        if let sourceClass, WorkoutSource.classify(row.source) != sourceClass { return false }
+        let q = search.trimmingCharacters(in: .whitespaces)
+        if !q.isEmpty,
+           WorkoutSource.displaySport(row.sport).range(of: q, options: .caseInsensitive) == nil {
+            return false
+        }
+        return true
+    }
+
+    /// Apply the filter to a windowed list, preserving order. A no-op when nothing is active.
+    func apply(_ rows: [WorkoutRow]) -> [WorkoutRow] {
+        guard isActive else { return rows }
+        return rows.filter(matches)
+    }
+}
+
+// MARK: - Merge (#64)
+//
+// Merge two or more overlapping / adjacent MANUAL or DETECTED sessions into one, keeping the richer
+// captured signals. Imported history (whoop / apple / lifting / activityFile) is read-only and is NEVER
+// merged — the eligibility gate below enforces it, and the persistence path (Repository.mergeWorkouts)
+// only ever writes through the manual-row path. Pure + deterministic so both platforms and the unit test
+// share one rule; the persistence sequence lives in the repository.
+
+enum WorkoutMerge {
+
+    /// Only MANUAL and DETECTED rows can be merged (imported history stays read-only). A merge needs at
+    /// least two eligible rows.
+    static func isMergeable(_ row: WorkoutRow) -> Bool {
+        switch WorkoutSource.classify(row.source) {
+        case .manual, .detected: return true
+        case .whoop, .apple, .lifting, .activityFile: return false
+        }
+    }
+
+    /// True when a set of selected rows can be merged: two or more, and every one is mergeable.
+    static func canMerge(_ rows: [WorkoutRow]) -> Bool {
+        rows.count >= 2 && rows.allSatisfy(isMergeable)
+    }
+
+    /// The sport the merge should carry: the most-frequent non-"detected" sport across the inputs (ties
+    /// broken by first appearance), or nil when every input is a bare detected bout — then the caller
+    /// asks the user to pick one. "detected"/"Activity" never wins so a merge with any real label keeps it.
+    static func resolvedSport(_ rows: [WorkoutRow]) -> String? {
+        var counts: [String: Int] = [:]
+        var order: [String] = []
+        for r in rows where r.sport != "detected" {
+            let s = r.sport
+            if counts[s] == nil { order.append(s) }
+            counts[s, default: 0] += 1
+        }
+        guard !order.isEmpty else { return nil }
+        // Stable: highest count, ties resolved by first appearance (order index).
+        return order.max(by: { (counts[$0] ?? 0, order.firstIndex(of: $1) ?? 0)
+                                < (counts[$1] ?? 0, order.firstIndex(of: $0) ?? 0) })
+    }
+
+    /// Merge the given rows into one manual row. `sport` overrides the resolved sport (used when the
+    /// inputs are all detected and the user picked one); when nil the resolved sport is used, falling back
+    /// to "Activity" only if there is genuinely no label. Returns nil for fewer than two rows.
+    ///
+    /// Math (per the #64 brief): startTs = min, endTs = max (the honest span); durationS = SUM of the
+    /// per-session durations (honest active time, NOT the span); energyKcal = SUM; avgHr = duration-
+    /// weighted mean of the sessions that carry one; maxHr = max; distanceM = SUM; strain = nil (the repo
+    /// rescores it from the strap HR via analyzeRecent, the #598 pattern); zonesJSON = nil; notes = joined.
+    static func merge(_ rows: [WorkoutRow], sport: String? = nil) -> WorkoutRow? {
+        guard rows.count >= 2 else { return nil }
+        let start = rows.map(\.startTs).min() ?? rows[0].startTs
+        let end = rows.map(\.endTs).max() ?? rows[0].endTs
+
+        // Duration = sum of each session's active duration (fall back to its own span when nil).
+        let durationS = rows.reduce(0.0) { $0 + ($1.durationS ?? Double(max(0, $1.endTs - $1.startTs))) }
+
+        // Energy + distance sum only the present values; nil when NOTHING carried one (never a fake 0).
+        let kcals = rows.compactMap(\.energyKcal)
+        let energyKcal = kcals.isEmpty ? nil : kcals.reduce(0, +)
+        let dists = rows.compactMap(\.distanceM)
+        let distanceM = dists.isEmpty ? nil : dists.reduce(0, +)
+
+        // Avg HR = duration-weighted mean over the rows that HAVE an avg; weight = that row's duration
+        // (fall back to its span). maxHr = the max present peak. Both nil when no row carried the field.
+        var hrWeight = 0.0, hrSum = 0.0
+        for r in rows {
+            guard let hr = r.avgHr else { continue }
+            let w = r.durationS ?? Double(max(1, r.endTs - r.startTs))
+            hrWeight += w
+            hrSum += Double(hr) * w
+        }
+        let avgHr = hrWeight > 0 ? Int((hrSum / hrWeight).rounded()) : nil
+        let maxHrs = rows.compactMap(\.maxHr)
+        let maxHr = maxHrs.max()
+
+        // Notes = the non-empty notes joined (order-stable), nil when none.
+        let notes = rows.compactMap { $0.notes?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        let mergedNotes = notes.isEmpty ? nil : notes.joined(separator: " · ")
+
+        let mergedSport = sport ?? resolvedSport(rows) ?? "Activity"
+
+        return WorkoutRow(startTs: start, endTs: end, sport: mergedSport, source: "manual",
+                          durationS: durationS, energyKcal: energyKcal, avgHr: avgHr, maxHr: maxHr,
+                          strain: nil, distanceM: distanceM, zonesJSON: nil, notes: mergedNotes)
     }
 }

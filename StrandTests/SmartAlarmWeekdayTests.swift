@@ -3,7 +3,10 @@ import XCTest
 
 /// Per-weekday smart-alarm scheduling (PR #539, @hkuehl): the alarm only fires on selected weekdays.
 /// Covers the pure date math (`AppModel.nextSmartAlarmDate`) and the picker's selection rules
-/// (`AutomationsView.toggledWeekday` / `weekdayIsSelected` / `weekdaySummary`).
+/// (`SmartAlarmView.alarmToggledWeekday` / `alarmWeekdayIsSelected` / `alarmWeekdaySummary`).
+///
+/// The picker rules moved from AutomationsView to SmartAlarmView in #766 (the strap wake-alarm UI was
+/// consolidated onto the dedicated Alarms screen); the helpers gained an `alarm` prefix there.
 ///
 /// Calendar weekday numbers: 1 = Sun … 7 = Sat. An empty set means "every day" (backward compatible).
 final class SmartAlarmWeekdayTests: XCTestCase {
@@ -86,32 +89,32 @@ final class SmartAlarmWeekdayTests: XCTestCase {
     // MARK: Picker selection rules
 
     func testWeekdayIsSelected_emptyMeansEveryDay() {
-        for dow in 1...7 { XCTAssertTrue(AutomationsView.weekdayIsSelected(dow, in: [])) }
+        for dow in 1...7 { XCTAssertTrue(SmartAlarmView.alarmWeekdayIsSelected(dow, in: [])) }
     }
 
     func testToggle_fromEveryDay_deselectsJustOne() {
         // Empty (every day) → tap Wed (4) off → the other six explicit.
-        let result = AutomationsView.toggledWeekday(4, in: [])
+        let result = SmartAlarmView.alarmToggledWeekday(4, in: [])
         XCTAssertEqual(result, Set([1, 2, 3, 5, 6, 7]))
     }
 
     func testToggle_reselectingSeventh_collapsesBackToEveryDay() {
         // Six selected, add the last one → canonical empty "every day".
-        let result = AutomationsView.toggledWeekday(4, in: Set([1, 2, 3, 5, 6, 7]))
+        let result = SmartAlarmView.alarmToggledWeekday(4, in: Set([1, 2, 3, 5, 6, 7]))
         XCTAssertTrue(result.isEmpty, "all seven selected collapses to the empty every-day set")
     }
 
     func testToggle_addAndRemoveWithinExplicitSet() {
-        XCTAssertEqual(AutomationsView.toggledWeekday(3, in: [2]), Set([2, 3]))
-        XCTAssertEqual(AutomationsView.toggledWeekday(2, in: [2, 3]), Set([3]))
+        XCTAssertEqual(SmartAlarmView.alarmToggledWeekday(3, in: [2]), Set([2, 3]))
+        XCTAssertEqual(SmartAlarmView.alarmToggledWeekday(2, in: [2, 3]), Set([3]))
     }
 
     func testSummary_labels() {
-        XCTAssertEqual(AutomationsView.weekdaySummary([]), "Every day")
-        XCTAssertEqual(AutomationsView.weekdaySummary(Set(1...7)), "Every day")
-        XCTAssertEqual(AutomationsView.weekdaySummary(Set(2...6)), "Weekdays")
-        XCTAssertEqual(AutomationsView.weekdaySummary(Set([1, 7])), "Weekends")
+        XCTAssertEqual(SmartAlarmView.alarmWeekdaySummary([]), "Every day")
+        XCTAssertEqual(SmartAlarmView.alarmWeekdaySummary(Set(1...7)), "Every day")
+        XCTAssertEqual(SmartAlarmView.alarmWeekdaySummary(Set(2...6)), "Weekdays")
+        XCTAssertEqual(SmartAlarmView.alarmWeekdaySummary(Set([1, 7])), "Weekends")
         // Mixed set lists Monday-first short names.
-        XCTAssertEqual(AutomationsView.weekdaySummary(Set([2, 4])), "Mon, Wed")
+        XCTAssertEqual(SmartAlarmView.alarmWeekdaySummary(Set([2, 4])), "Mon, Wed")
     }
 }

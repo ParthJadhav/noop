@@ -370,7 +370,7 @@ extension HuamiHRSource: @preconcurrency CBPeripheralDelegate {
     /// Record + log the honest "this band needs pairing we can't do yet" outcome (once).
     private func announceNeedsPairing() {
         guard needsPairing == nil else { return }
-        let msg = "This band needs a pairing handshake NOOP can't do yet. Live data isn't available — try " +
+        let msg = "This band needs a pairing handshake NOOP can't do yet. Live data isn't available - try " +
                   "exporting from the Zepp app and importing the file instead."
         needsPairing = msg
         log("Huami: \(msg)")

@@ -169,4 +169,47 @@ final class StrandDesignTests: XCTestCase {
         XCTAssertEqual(Sparkline.defaultValueString(64), "64")
         XCTAssertEqual(Sparkline.defaultValueString(64.5), "64.5")
     }
+
+    // MARK: - TrendChart Y domain (#974 top-headroom fix)
+
+    /// With no explicit yDomain the axis falls back to the gradient's valueRange.
+    func testTrendChartResolvedDomainDefaultsToValueRange() {
+        let pts = [
+            TrendPoint(date: Date(timeIntervalSince1970: 0), value: 10),
+            TrendPoint(date: Date(timeIntervalSince1970: 86_400), value: 40),
+        ]
+        let chart = TrendChart(points: pts, valueRange: 0...100)
+        XCTAssertEqual(chart.resolvedYDomain.lowerBound, 0, accuracy: 0.0001)
+        XCTAssertEqual(chart.resolvedYDomain.upperBound, 100, accuracy: 0.0001)
+    }
+
+    /// An explicit yDomain (a data-fitted axis with top headroom) overrides valueRange, and its
+    /// top sits ABOVE the highest reading so a peak curve + the top axis label clear the plot clip.
+    func testTrendChartExplicitYDomainProvidesTopHeadroom() {
+        let peak = 2.4
+        let pts = [
+            TrendPoint(date: Date(timeIntervalSince1970: 0), value: 0.5),
+            TrendPoint(date: Date(timeIntervalSince1970: 86_400), value: peak),
+        ]
+        // Mirrors StressView's fitted axis: round the peak up, add headroom, floor at 1.
+        let yTop = max(1, peak.rounded(.up) + 0.3)
+        let chart = TrendChart(points: pts, valueRange: 0...3, yDomain: 0...yTop)
+        XCTAssertEqual(chart.resolvedYDomain.lowerBound, 0, accuracy: 0.0001)
+        // 2.4 → ceil 3 → +0.3 = 3.3, comfortably above the peak.
+        XCTAssertGreaterThan(chart.resolvedYDomain.upperBound, peak)
+        XCTAssertEqual(chart.resolvedYDomain.upperBound, 3.3, accuracy: 0.0001)
+    }
+
+    /// A flat, all-calm history (max 0) must not collapse to a zero-height axis: the floor holds it at 1.
+    func testTrendChartFittedDomainFloorsAtOne() {
+        let peak = 0.0
+        let yTop = max(1, peak.rounded(.up) + 0.3)
+        let pts = [
+            TrendPoint(date: Date(timeIntervalSince1970: 0), value: 0),
+            TrendPoint(date: Date(timeIntervalSince1970: 86_400), value: 0),
+        ]
+        let chart = TrendChart(points: pts, valueRange: 0...3, yDomain: 0...yTop)
+        XCTAssertEqual(chart.resolvedYDomain.upperBound, 1, accuracy: 0.0001)
+        XCTAssertGreaterThan(chart.resolvedYDomain.upperBound, chart.resolvedYDomain.lowerBound)
+    }
 }

@@ -66,7 +66,7 @@ data class DoseResponse(
         return when {
             priorDominated ->
                 "Each extra unit typically lines up with about $mag $outcome $dir " +
-                    "— typical patterns, not yet yours (n=$nUser)."
+                    " - typical patterns, not yet yours (n=$nUser)."
             contradictsPrior ->
                 "In your data so far, this doesn't move your $outcome the way it typically " +
                     "does (n=$nUser)."

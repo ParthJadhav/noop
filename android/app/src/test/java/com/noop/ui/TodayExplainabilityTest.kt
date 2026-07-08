@@ -64,11 +64,37 @@ class TodayExplainabilityTest {
 
     @Test
     fun scoreState_carriedLastNight_whenNotCalibratingAndPriorExists() {
+        // A genuine post-rollover carry (yesterday's score) stays "Last night". An explicit `today` anchors
+        // the recency check so the test is stable regardless of the real wall-clock date (#779).
         val prior = day("2026-01-14", recovery = 65.0)
-        val state = scoreStateForToday(todayRecovery = null, calibratingNights = null, carriedDay = prior)
-        assertEquals(ScoreState.CarriedLastNight("14 Jan"), state)
+        val state = scoreStateForToday(todayRecovery = null, calibratingNights = null, carriedDay = prior,
+            today = "2026-01-15")
+        assertEquals(ScoreState.CarriedLastNight("14 Jan", false), state)
         assertEquals("Last night · 14 Jan", state.title)
         assertEquals("Tonight's lands after you sleep with the strap on.", state.detail)
+    }
+
+    @Test
+    fun scoreState_staleCarry_relabelsLatestSleep() {
+        // #779: a weeks-old carry is still shown (not a bare blank) but relabelled so the number is never
+        // passed off as "Last night".
+        val prior = day("2026-01-14", recovery = 65.0)
+        val state = scoreStateForToday(todayRecovery = null, calibratingNights = null, carriedDay = prior,
+            today = "2026-02-11")
+        assertEquals(ScoreState.CarriedLastNight("14 Jan", true), state)
+        assertEquals("Latest sleep · 14 Jan", state.title)
+        assertEquals("This is your last scored session. Wear the strap overnight for a fresh score.", state.detail)
+    }
+
+    @Test
+    fun carriedCaption_capsLastNightToTwoDays() {
+        // Within the cap → "Last night"; older → "Latest sleep". The cap is inclusive at 2 days. (#779)
+        assertEquals(false, isCarryStale("2026-01-13", "2026-01-15"))
+        assertEquals("Last night · 13 Jan", carriedCaption("2026-01-13", "2026-01-15"))
+        assertEquals(true, isCarryStale("2026-01-12", "2026-01-15"))
+        assertEquals("Latest sleep · 12 Jan", carriedCaption("2026-01-12", "2026-01-15"))
+        // An unparseable key never reads stale (never over-claims).
+        assertEquals(false, isCarryStale("not-a-date", "2026-01-15"))
     }
 
     @Test

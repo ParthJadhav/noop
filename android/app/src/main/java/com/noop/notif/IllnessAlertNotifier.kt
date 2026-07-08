@@ -43,11 +43,11 @@ object IllnessAlertNotifier {
             )
             val n = NotificationCompat.Builder(context, CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_stat_heart)
-                .setContentTitle("Early warning — take it easy")
+                .setContentTitle("Early warning: take it easy")
                 .setContentText(alert)
                 .setStyle(
                     NotificationCompat.BigTextStyle()
-                        .bigText("$alert\nOn-device estimate (approximate) — not a diagnosis."),
+                        .bigText("$alert\nOn-device estimate (approximate), not a diagnosis."),
                 )
                 .setContentIntent(openApp)
                 .setAutoCancel(true)

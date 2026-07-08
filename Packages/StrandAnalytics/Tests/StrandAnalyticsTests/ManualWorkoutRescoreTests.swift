@@ -68,6 +68,33 @@ final class ManualWorkoutRescoreTests: XCTestCase {
         XCTAssertFalse(ManualWorkoutRescore.improves(none, over: 1))    // no recompute ⇒ never replace
     }
 
+    /// The merged-row case: a merged workout's kcal is the SUM of its inputs, so it never looks
+    /// under-scored, yet WorkoutMerge leaves its strain nil. A recompute that produces a strain must be
+    /// accepted as a STRAIN-ONLY improvement even when its kcal does NOT beat the summed value, otherwise
+    /// Effort stays blank forever. And once strain exists, a re-run is a no-op (idempotent).
+    func testStrainOnlyImprovementFillsMergedRow() {
+        // Recompute yields a strain but a MODEST kcal that does not beat the merged sum (e.g. 300).
+        let recomputed = ManualWorkoutRescore.Scored(avgHr: 130, maxHr: 150, strain: 9, kcal: 120)
+        let summedKcal: Double? = 300   // merged: SUM of inputs, well past the under-scored gate
+
+        // Strain missing on the stored row → accept (fill Effort), even though kcal < summed sum.
+        XCTAssertTrue(ManualWorkoutRescore.improves(recomputed, over: summedKcal,
+                                                    currentStrain: nil, allowStrainOnlyFill: true))
+        // Strain already present → no churn (kcal doesn't beat the sum, strain isn't missing).
+        XCTAssertFalse(ManualWorkoutRescore.improves(recomputed, over: summedKcal,
+                                                     currentStrain: 9, allowStrainOnlyFill: true))
+
+        // A recompute with NO strain can't fill anything → still no-op.
+        let noStrain = ManualWorkoutRescore.Scored(avgHr: 0, maxHr: 0, strain: nil, kcal: 120)
+        XCTAssertFalse(ManualWorkoutRescore.improves(noStrain, over: summedKcal,
+                                                     currentStrain: nil, allowStrainOnlyFill: true))
+
+        // The strain-only path is OPT-IN: without the flag the contract is unchanged (kcal-only), so a
+        // missing-strain row does NOT qualify on a 2-arg call, and the existing rescore path is untouched.
+        XCTAssertFalse(ManualWorkoutRescore.improves(recomputed, over: summedKcal))
+        XCTAssertFalse(ManualWorkoutRescore.improves(recomputed, over: summedKcal, currentStrain: nil))
+    }
+
     /// End-to-end shape of the fix: a workout saved with ~1 kcal (sparse live HR) gets rescored from a
     /// dense offloaded window, and the result both clears the under-scored gate and improves.
     func testUnderScoredWorkoutGetsRescoredFromDenseWindow() {

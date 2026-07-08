@@ -6,12 +6,13 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.BlendMode
@@ -35,7 +36,7 @@ import kotlin.math.sin
 // layer sits at alpha <= 0.16, painted OVER the WHOOP `surfaceBase` canvas so screens stay dark,
 // flat and clean.
 //
-// HARD RULES honoured (Aaron, standing):
+// HARD RULES honoured (standing):
 //  - NO GLOW. No bloom, no blur halos, no neon. The sun/moon are plain filled circles at very low
 //    opacity; stars are tiny crisp dots.
 //  - TOKENS first (`Palette`). The only literal colours are the few subtle atmosphere tints the
@@ -88,13 +89,21 @@ fun TimeOfDayBackground(
     val starColor = Palette.scenicStar
     val nightDeepen = if (isLight) Color(0x00000000) else Color(0xFF0D1014)
 
-    Canvas(
+    // PERF (#scroll-jank): replaces the single phase-reading Canvas with a cached static wash + a thin
+    // phase-reading drift layer (same split as the modifier form). Appearance-identical — same draw order.
+    Box(
         modifier = modifier
             .fillMaxSize()
-            .clearAndSetSemantics {}, // decorative — invisible to TalkBack
-    ) {
-        drawAtmosphere(dayPart, isLight, phase, starColor, nightDeepen)
-    }
+            .clearAndSetSemantics {} // decorative — invisible to TalkBack
+            .drawWithCache {
+                onDrawBehind {
+                    drawAtmosphereStatic(dayPart, isLight, starColor, nightDeepen)
+                }
+            }
+            .drawBehind {
+                drawAtmosphereDrift(dayPart, isLight, phase)
+            },
+    )
 }
 
 /**
@@ -116,9 +125,18 @@ fun Modifier.timeOfDayBackground(
     val isLight = Palette.isLight
     val starColor = Palette.scenicStar
     val nightDeepen = if (isLight) Color(0x00000000) else Color(0xFF0D1014)
-    return this.drawBehind {
-        drawAtmosphere(dayPart, isLight, phase, starColor, nightDeepen)
-    }
+    return this
+        // Static wash (deepen + gradients + sun/moon/stars) cached once — keyed on the implicit size +
+        // the day part + scheme + star tone, NOT the drift phase, so the animation never re-rasterises it.
+        .drawWithCache {
+            onDrawBehind {
+                drawAtmosphereStatic(dayPart, isLight, starColor, nightDeepen)
+            }
+        }
+        // The drifting floaters over it — the only phase-reading draw.
+        .drawBehind {
+            drawAtmosphereDrift(dayPart, isLight, phase)
+        }
 }
 
 /** The single 0…1 drift phase driving every floating shape. Pinned to 0 when not animated or under
@@ -142,11 +160,17 @@ private fun atmospherePhase(animated: Boolean): Float {
 
 // MARK: - Drawing
 
-/** Paint the whole atmosphere: base deepen → per-part wash (gradients + sun/moon/stars) → drift. */
-private fun DrawScope.drawAtmosphere(
+// PERF (#scroll-jank): the atmosphere was ONE draw lambda reading the infinite drift [phase], so the
+// WHOLE layer — the night-deepen rect, the per-part wash gradients AND the sun/moon/stars — was
+// re-rasterised on every animation frame even though only the 2-3 floaters actually move. Split into a
+// STATIC half (deepen + wash, phase-free → cached once via drawWithCache) and a phase-reading half (just
+// the floaters). Pixel-identical: same draw order (deepen → wash → floaters), same shapes.
+
+/** The STATIC atmosphere: base deepen → per-part wash (gradients + sun/moon/stars). Reads NO phase, so a
+ *  drawWithCache layer holding this rasterises once and is never invalidated by the drift animation. */
+private fun DrawScope.drawAtmosphereStatic(
     dayPart: DayPart,
     isLight: Boolean,
-    phase: Float,
     starColor: Color,
     nightDeepen: Color,
 ) {
@@ -165,8 +189,11 @@ private fun DrawScope.drawAtmosphere(
         DayPart.Dusk -> drawDusk(w, h, isLight)
         DayPart.Night -> drawNight(w, h, isLight, starColor)
     }
+}
 
-    // 3) Slow-drifting soft shapes (clouds for day/dusk, orbs for night/dawn).
+/** The drifting layer: 2-3 slow soft shapes (clouds for day/dusk, orbs for night/dawn). Reads [phase] —
+ *  this is the ONLY part that re-draws per animation frame; pinned at rest when phase == 0. */
+private fun DrawScope.drawAtmosphereDrift(dayPart: DayPart, isLight: Boolean, phase: Float) {
     floatersFor(dayPart).forEach { drawFloater(it, phase, isLight) }
 }
 

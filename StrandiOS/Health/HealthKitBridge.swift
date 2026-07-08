@@ -120,6 +120,11 @@ final class HealthKitBridge: ObservableObject {
             // never the entitlement-missing reroute.
             auth = .denied
         }
+        // First successful grant in this process: arm the live HealthKit stream so a watch-only user
+        // gets continuous ingestion (new SDNN/RHR/sleep/etc. land within the hour) instead of only on
+        // app foreground. Guarded inside enableLiveDelivery on auth == .authorized, so the .denied path
+        // above is a no-op.
+        enableLiveDelivery()
     }
 
     /// Resume a prior grant on launch without re-prompting. `auth` is a fresh `.unknown` every
@@ -131,7 +136,134 @@ final class HealthKitBridge: ObservableObject {
     func refreshAuthIfPreviouslyGranted() {
         guard auth == .unknown, HKHealthStore.isHealthDataAvailable() else { return }
         let granted = writeTypes.allSatisfy { store.authorizationStatus(for: $0) == .sharingAuthorized }
-        if granted { auth = .authorized }
+        if granted {
+            auth = .authorized
+            // A returning user who already granted access should get the live stream re-armed for this
+            // process. enableLiveDelivery is idempotent (HealthKit dedups observers + background
+            // delivery per type), so calling it here as well as after a fresh requestAuthorization is safe.
+            enableLiveDelivery()
+        }
+    }
+
+    // MARK: - Live delivery (continuous ingestion)
+
+    /// The scored read types we want a live observer + hourly background delivery on. This is the
+    /// subset of `quantityReadIds` (plus sleep) that actually feeds Charge/Rest/Effort/Fitness Age, so
+    /// a watch-only user's numbers refresh on their own rather than only when the app is foregrounded.
+    /// We deliberately do NOT observe the body-composition reads (weight/BMI/etc.) — those don't move a
+    /// score and a manual weigh-in shouldn't wake the app every hour.
+    private static let liveQuantityIds: [HKQuantityTypeIdentifier] = [
+        .heartRateVariabilitySDNN, .restingHeartRate, .activeEnergyBurned, .heartRate, .vo2Max
+    ]
+
+    /// Long-lived observer queries, retained so HealthKit doesn't tear them down. Keyed by the sample
+    /// type's identifier so a second `enableLiveDelivery()` call replaces rather than duplicates.
+    private var observerQueries: [String: HKObserverQuery] = [:]
+
+    /// Register one `HKObserverQuery` per scored read type and turn on hourly background delivery, so
+    /// new Apple Watch data is ingested continuously. Each observer's update handler runs an anchored
+    /// delta sync of just the affected window and then calls HealthKit's completion handler (required —
+    /// HealthKit stops delivering to an observer that never acknowledges). Idempotent and guarded behind
+    /// `auth == .authorized`; safe to call from several entry points.
+    func enableLiveDelivery() {
+        guard auth == .authorized, HKHealthStore.isHealthDataAvailable() else { return }
+
+        var types: [HKSampleType] = []
+        for id in HealthKitBridge.liveQuantityIds {
+            if let t = HKObjectType.quantityType(forIdentifier: id) { types.append(t) }
+        }
+        if let sleep = HKObjectType.categoryType(forIdentifier: .sleepAnalysis) { types.append(sleep) }
+
+        for type in types {
+            let key = type.identifier
+            // Tear down a prior observer for this type before re-registering, so a re-arm (e.g. a
+            // returning user hitting both requestAuthorization and refreshAuthIfPreviouslyGranted) can
+            // never leave two live observers fighting over the same completion handler.
+            if let existing = observerQueries[key] {
+                store.stop(existing)
+                observerQueries[key] = nil
+            }
+            let observer = HKObserverQuery(sampleType: type, predicate: nil) { [weak self] _, completion, _ in
+                // HealthKit invokes this on a background queue. Hop to the main actor (the bridge is
+                // @MainActor and `sync` mutates published state), run the incremental catch-up, then
+                // ALWAYS call completion so HealthKit keeps delivering. We don't tie completion to sync
+                // success: a transient store error shouldn't make HealthKit think we never handled the
+                // update and back off — the next foreground catch-up will reconcile.
+                guard let self else { completion(); return }
+                Task { @MainActor in
+                    await self.syncFromObserver(type: type)
+                    completion()
+                }
+            }
+            store.execute(observer)
+            observerQueries[key] = observer
+
+            // Hourly is the finest cadence HealthKit honours for most types and is plenty for daily
+            // aggregate scores. Failure here is non-fatal: the foreground catch-up still backfills.
+            store.enableBackgroundDelivery(for: type, frequency: .hourly) { _, _ in }
+        }
+    }
+
+    /// Foreground catch-up. Call on app-active so anything background delivery missed (the system can
+    /// throttle or skip wakes) is backfilled. A short window is enough because live delivery keeps the
+    /// recent days current; 7 covers a weekend of missed wakes. Exposed for the existing scenePhase
+    /// hook in `StrandiOSApp` to call — no other file is edited.
+    func foregroundCatchUp() async {
+        await sync(days: 7)
+    }
+
+    /// Drive an incremental sync off an observer wake. We use an `HKAnchoredObjectQuery` per type to
+    /// learn the span of days touched since we last looked (persisting the anchor so the same samples
+    /// aren't walked twice and nothing between wakes is missed), then re-aggregate just that day window
+    /// via the existing `sync(days:)` path. Re-aggregating the window (rather than the deltas alone)
+    /// keeps every per-day average correct and idempotent — `sync` upserts are keyed by day.
+    private func syncFromObserver(type: HKSampleType) async {
+        guard auth == .authorized else { return }
+        let touched = await fetchTouchedDayWindow(type: type)
+        // No new samples since the last anchor (a spurious wake): nothing to do.
+        guard let touched else { return }
+        let cal = Calendar.current
+        let daysBack = cal.dateComponents([.day], from: cal.startOfDay(for: touched),
+                                          to: cal.startOfDay(for: Date())).day ?? 0
+        // Clamp to a sane window: at least today, and never re-walk more than a month from one wake.
+        let window = max(1, min(31, daysBack + 1))
+        await sync(days: window)
+    }
+
+    /// Advance this type's stored anchor over any new samples and return the OLDEST sample date seen,
+    /// or nil when there were no new samples. Anchors are persisted in UserDefaults per type so live
+    /// deltas are neither re-ingested nor missed across launches. We don't consume the samples here —
+    /// `sync(days:)` re-reads the aggregate for the affected window — the anchor's only job is to tell
+    /// us how far back the change reached.
+    private func fetchTouchedDayWindow(type: HKSampleType) async -> Date? {
+        let key = HealthKitBridge.anchorDefaultsKey(for: type)
+        let priorAnchor: HKQueryAnchor? = {
+            guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
+            return try? NSKeyedUnarchiver.unarchivedObject(ofClass: HKQueryAnchor.self, from: data)
+        }()
+
+        return await withCheckedContinuation { (cont: CheckedContinuation<Date?, Never>) in
+            let q = HKAnchoredObjectQuery(
+                type: type, predicate: Self.notNoopAuthored,
+                anchor: priorAnchor, limit: HKObjectQueryNoLimit
+            ) { _, samples, _, newAnchor, _ in
+                // Persist the advanced anchor so the next wake only sees genuinely-new samples. Skip the
+                // write on a query error (newAnchor nil) so we don't blow away a good cursor.
+                if let newAnchor,
+                   let data = try? NSKeyedArchiver.archivedData(withRootObject: newAnchor, requiringSecureCoding: true) {
+                    UserDefaults.standard.set(data, forKey: key)
+                }
+                let oldest = (samples ?? []).map { $0.startDate }.min()
+                cont.resume(returning: oldest)
+            }
+            store.execute(q)
+        }
+    }
+
+    /// UserDefaults key for a type's persisted HealthKit anchor. Namespaced so it can't collide with
+    /// other app defaults, and keyed by the stable HK identifier so it survives across launches.
+    private static func anchorDefaultsKey(for type: HKSampleType) -> String {
+        "hkAnchor.v1.\(type.identifier)"
     }
 
     // MARK: - Read → store
@@ -254,6 +386,12 @@ final class HealthKitBridge: ObservableObject {
         let points = AppleHealthAggregator.metricPoints(aggregates)
             .map { MetricPoint(day: $0.day, key: $0.key, value: $0.value) }
 
+        // Workouts the user logged in Apple Health (Apple Watch rings, gym apps, etc.). macOS already
+        // imports these from a static Health export and Android reads them from Health Connect; iOS now
+        // reads them live on-device too, so the platforms reach parity. ON-DEVICE ONLY: this is a plain
+        // HealthKit read of workouts NOOP did NOT author, never any cloud/3rd-party API. (#835)
+        let workoutRows = await collectWorkouts(start: start, end: end)
+
         // Persist all the apple-health rows AND write back, advancing lastSync only when the WHOLE
         // round-trip succeeds. The three read-side upserts used to be swallowed by `try?`, so a failed
         // import (e.g. a disk-full GRDB write) dropped rows yet still cleared lastError and advanced
@@ -263,11 +401,12 @@ final class HealthKitBridge: ObservableObject {
             try await store.upsertAppleDaily(appleRows, deviceId: appleDeviceId)
             try await store.upsertDailyMetrics(dmRows, deviceId: appleDeviceId)
             try await store.upsertMetricSeries(points, deviceId: appleDeviceId)
+            if !workoutRows.isEmpty { try await store.upsertWorkouts(workoutRows, deviceId: appleDeviceId) }
             try await writeBack(whoopStore: store)
             lastSync = Date()
             lastError = nil
         } catch {
-            lastError = "Apple Health sync failed: \(error.localizedDescription)"
+            lastError = String(localized: "Apple Health sync failed: \(error.localizedDescription)")
         }
     }
 
@@ -426,6 +565,96 @@ final class HealthKitBridge: ObservableObject {
                 cont.resume()
             }
             store.execute(q)
+        }
+    }
+
+    // MARK: - Workouts (#835)
+
+    /// Read the workouts the user logged in Apple Health over `[start, end)` and map each to a
+    /// `WorkoutRow` under the apple-health source. ON-DEVICE ONLY: a straight HealthKit `HKWorkout` query,
+    /// no cloud or third-party API. NOOP-authored workouts are excluded (the same `notNoopAuthored`
+    /// predicate the metric reads use) so our own write-back never re-imports as "Apple Health". Mirrors
+    /// the macOS export importer and the Android Health Connect importer, which already ingest workouts,
+    /// closing the iOS gap. The upsert is idempotent on (deviceId, startTs), so re-running a sync window
+    /// refreshes rather than duplicates.
+    private func collectWorkouts(start: Date, end: Date) async -> [WorkoutRow] {
+        let predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
+            HKQuery.predicateForSamples(withStart: start, end: end, options: .strictStartDate),
+            Self.notNoopAuthored,
+        ])
+        return await withCheckedContinuation { (cont: CheckedContinuation<[WorkoutRow], Never>) in
+            let sort = NSSortDescriptor(key: HKSampleSortIdentifierStartDate, ascending: true)
+            let q = HKSampleQuery(sampleType: HKObjectType.workoutType(), predicate: predicate,
+                                  limit: HKObjectQueryNoLimit, sortDescriptors: [sort]) { _, samples, _ in
+                var rows: [WorkoutRow] = []
+                for case let workout as HKWorkout in samples ?? [] {
+                    let startTs = Int(workout.startDate.timeIntervalSince1970)
+                    let endTs = max(Int(workout.endDate.timeIntervalSince1970), startTs)
+                    let duration = workout.duration > 0 ? workout.duration : Double(endTs - startTs)
+                    rows.append(WorkoutRow(
+                        startTs: startTs,
+                        endTs: endTs,
+                        sport: Self.sportName(workout.workoutActivityType),
+                        source: HealthKitBridge.appleWorkoutSource,
+                        durationS: duration,
+                        energyKcal: workout.totalEnergyBurned?.doubleValue(for: .kilocalorie()),
+                        avgHr: nil,
+                        maxHr: nil,
+                        strain: nil,
+                        distanceM: workout.totalDistance?.doubleValue(for: .meter()),
+                        zonesJSON: nil,
+                        notes: nil))
+                }
+                cont.resume(returning: rows)
+            }
+            store.execute(q)
+        }
+    }
+
+    /// Source tag stamped on workouts imported from Apple Health. Matches the macOS importer's
+    /// `WorkoutSource.appleHealthSource` ("apple-health") and `appleDeviceId`, so the workout list and
+    /// source filters treat an iOS-read workout exactly like a macOS-imported one.
+    static let appleWorkoutSource = "apple-health"
+
+    /// Map an `HKWorkoutActivityType` to NOOP's human sport label. Strength training routes to the
+    /// shared lifting sport so a gym session lands in the Lifting lane; anything we don't name explicitly
+    /// falls back to a generic "Workout" rather than an opaque numeric type.
+    private static func sportName(_ type: HKWorkoutActivityType) -> String {
+        switch type {
+        case .running:                    return "Running"
+        case .walking:                    return "Walking"
+        case .hiking:                     return "Hiking"
+        case .cycling:                    return "Cycling"
+        case .traditionalStrengthTraining,
+             .functionalStrengthTraining: return LiftingImporter.sport
+        case .highIntensityIntervalTraining: return "HIIT"
+        case .coreTraining:               return "Core training"
+        case .yoga:                       return "Yoga"
+        case .pilates:                    return "Pilates"
+        case .rowing:                     return "Rowing"
+        case .elliptical:                 return "Elliptical"
+        case .stairClimbing, .stairs:     return "Stairs"
+        case .jumpRope:                   return "Jump rope"
+        case .boxing, .kickboxing:        return "Boxing"
+        case .basketball:                 return "Basketball"
+        case .soccer:                     return "Soccer"
+        case .americanFootball:           return "Football"
+        case .baseball:                   return "Baseball"
+        case .badminton:                  return "Badminton"
+        case .tennis:                     return "Tennis"
+        case .tableTennis:                return "Table tennis"
+        case .volleyball:                 return "Volleyball"
+        case .squash, .racquetball:       return "Squash"
+        case .martialArts, .taiChi:       return "Martial arts"
+        case .dance, .cardioDance, .socialDance: return "Dancing"
+        case .golf:                       return "Golf"
+        case .climbing:                   return "Climbing"
+        case .downhillSkiing, .crossCountrySkiing: return "Skiing"
+        case .snowboarding:               return "Snowboarding"
+        case .swimming:                   return "Swimming"
+        case .surfingSports:              return "Surfing"
+        case .paddleSports:               return "Paddling"
+        default:                          return "Workout"
         }
     }
 

@@ -40,11 +40,11 @@ enum MoodStore {
     /// Neutral, non-clinical word for a stored 1–5 value — never a verdict.
     static func label(for value: Int) -> String {
         switch value {
-        case ...1: return "Rough"
-        case 2:    return "Low"
-        case 3:    return "Okay"
-        case 4:    return "Good"
-        default:   return "Great"
+        case ...1: return String(localized: "Rough")
+        case 2:    return String(localized: "Low")
+        case 3:    return String(localized: "Okay")
+        case 4:    return String(localized: "Good")
+        default:   return String(localized: "Great")
         }
     }
 }

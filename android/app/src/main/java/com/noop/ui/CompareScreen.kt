@@ -1,6 +1,5 @@
 package com.noop.ui
 
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -37,6 +36,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
@@ -44,6 +44,8 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -83,6 +85,10 @@ data class CompareMetric(
     val unit: String,
     val source: String,      // "my-whoop" or "apple-health"
     val decimals: Int,
+    // Optional honesty note shown in the metric picker (e.g. BMI is derived from the profile height
+    // when it comes from Health Connect, since Health Connect carries no measured BMI record). The
+    // parity-locked [title] stays identical to the iOS MetricCatalog; the caveat lives here instead.
+    val note: String? = null,
 ) {
     val id: String get() = "$source:$key"
 
@@ -162,7 +168,10 @@ private object CompareCatalog {
         CompareMetric("weight", "Weight", "Health", "kg", "apple-health", 1),
         CompareMetric("body_fat", "Body Fat", "Health", "%", "apple-health", 1),
         CompareMetric("lean_mass", "Lean Body Mass", "Health", "kg", "apple-health", 1),
-        CompareMetric("bmi", "BMI", "Health", "", "apple-health", 1),
+        CompareMetric(
+            "bmi", "BMI", "Health", "", "apple-health", 1,
+            note = "From Health Connect this is derived from your weight and profile height.",
+        ),
         // Nutrition (imported from a food-tracker CSV — calories-in next to calories-out).
         // Mirrors the macOS MetricCatalog entries exactly (same keys + sources, v2.2.0 parity).
         CompareMetric("calories_in", "Calories In", "Nutrition", "kcal", NutritionCsvImporter.SOURCE_ID, 0),
@@ -317,6 +326,11 @@ private object CorrelationEngine {
 fun CompareScreen(vm: AppViewModel) {
     val days by vm.recentDays.collectAsStateWithLifecycle()
 
+    // Liquid finish (pilot pattern): the time-of-day sky settles behind the top of the screen, gated on the
+    // same day-cycle-background preference the liquid Today honours. Off = the flat dark canvas path.
+    val context = LocalContext.current
+    val showDayCycleBackground = remember { NoopPrefs.showDayCycleBackground(context) }
+
     val maxSelection = 4
     val minSelection = 2
 
@@ -394,11 +408,18 @@ fun CompareScreen(vm: AppViewModel) {
         if (anyWidened) "$base · sparse widened" else base
     }
 
-    ScreenScaffold(title = "Compare", subtitle = "Overlay signals, draw conclusions.") {
+    LazyScreenScaffold(
+        title = "Compare",
+        subtitle = "Overlay signals, draw conclusions.",
+        // Liquid sky backdrop (LiquidScreenSky.kt) in the scaffold's topBackground slot, gated on the
+        // day-cycle preference — the same pilot plumbing the liquid Today uses.
+        topBackground = if (showDayCycleBackground) { { LiquidScreenSky() } } else null,
+    ) {
 
         // ── Metric picker section (chips + range control)
+        item {
         Column(verticalArrangement = Arrangement.spacedBy(Metrics.gap)) {
-            SectionHeader("Metrics", overline = "Overlay 2–4 signals")
+            SectionHeader("Metrics", overline = "Overlay 2-4 signals")
             NoopCard {
                 Column(verticalArrangement = Arrangement.spacedBy(Metrics.gap)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
@@ -451,24 +472,29 @@ fun CompareScreen(vm: AppViewModel) {
                 }
             }
         }
+        }
 
         if (selected.size < minSelection) {
-            EmptyNote("Pick at least two metrics above to overlay them and read how they move together.")
+            item {
+                EmptyNote("Pick at least two metrics above to overlay them and read how they move together.")
+            }
         } else {
             val nonEmpty = activeSeries.filter { it.rows.isNotEmpty() }
             if (nonEmpty.isEmpty()) {
                 if (loadedOnce) {
-                    DataPendingNote(
-                        title = "Compare needs at least two metrics with history",
-                        body = "Compare needs at least two metrics with history. Import your " +
-                            "WHOOP export in Data Sources first.",
-                    )
+                    item {
+                        DataPendingNote(
+                            title = "Compare needs at least two metrics with history",
+                            body = "Compare needs at least two metrics with history. Import your " +
+                                "WHOOP export in Data Sources first.",
+                        )
+                    }
                 } else {
-                    EmptyNote("Reading your history…")
+                    item { EmptyNote("Reading your history…") }
                 }
             } else {
-                OverlaySection(nonEmpty, range, anyWidened)
-                CorrelationSection(activeSeries, range)
+                item { OverlaySection(nonEmpty, range, anyWidened) }
+                item { CorrelationSection(activeSeries, range) }
             }
         }
     }
@@ -575,11 +601,20 @@ private fun AddMetricMenu(
                                 }
                             },
                             text = {
-                                Text(
-                                    metric.title,
-                                    style = NoopType.body,
-                                    color = if (enabled) Palette.textPrimary else Palette.textTertiary,
-                                )
+                                Column {
+                                    Text(
+                                        metric.title,
+                                        style = NoopType.body,
+                                        color = if (enabled) Palette.textPrimary else Palette.textTertiary,
+                                    )
+                                    metric.note?.let {
+                                        Text(
+                                            it,
+                                            style = NoopType.footnote,
+                                            color = Palette.textTertiary,
+                                        )
+                                    }
+                                }
                             },
                         )
                     }
@@ -624,9 +659,14 @@ private fun MetricChip(
     modifier: Modifier = Modifier,
 ) {
     val shape = RoundedCornerShape(50)
+    // liquidPress on the whole pick chip, driven by the SAME interactionSource that drives its only tap
+    // target (the remove ✕) — so pressing to remove settles the chip inward, the pilot's tappable-card feel.
+    // The remove gesture is unchanged (still the ✕ tap → onRemove).
+    val interaction = remember { MutableInteractionSource() }
     Row(
         modifier = modifier
             .clip(shape)
+            .liquidPress(interaction)
             .background(Palette.surfaceOverlay)
             .border(1.dp, color.copy(alpha = 0.4f), shape)
             .padding(horizontal = 11.dp, vertical = 8.dp),
@@ -654,7 +694,11 @@ private fun MetricChip(
             modifier = Modifier
                 .size(18.dp)
                 .clip(CircleShape)
-                .clickableNoRippleLocal(enabled = true) { onRemove() }
+                .clickable(
+                    interactionSource = interaction,
+                    indication = null,
+                    onClick = onRemove,
+                )
                 .padding(3.dp),
         )
     }
@@ -677,9 +721,9 @@ private fun OverlaySection(
                 Overline("Normalized overlay")
                 Text(
                     if (anyWidened) {
-                        "Each line min–max normalized · sparse series widened past ${range.phrase}"
+                        "Each line min-max normalized · sparse series widened past ${range.phrase}"
                     } else {
-                        "Each line min–max normalized within ${range.phrase}"
+                        "Each line min-max normalized within ${range.phrase}"
                     },
                     style = NoopType.footnote,
                     color = Palette.textTertiary,
@@ -715,66 +759,112 @@ private fun OverlaySection(
  */
 @Composable
 private fun OverlayChart(series: List<CompareSeries>, modifier: Modifier) {
-    // Union of all day ordinals present → shared x domain.
-    val dayOrds = remember(series) {
-        series.flatMap { s -> s.rows.mapNotNull { dayOrdinal(it.first) } }
-    }
-    val minOrd = dayOrds.minOrNull()
-    val maxOrd = dayOrds.maxOrNull()
-
-    Canvas(modifier = modifier) {
-        val w = size.width
-        val h = size.height
-        if (w <= 0f || h <= 0f) return@Canvas
-
-        val topPad = 6f
-        val usableH = (h - topPad * 2f).coerceAtLeast(1f)
-
-        // Faint low / mid / high gridlines.
-        val gridColor = Palette.hairline.copy(alpha = 0.4f)
-        for (f in listOf(0f, 0.5f, 1f)) {
-            val y = topPad + (1f - f) * usableH
-            drawLine(
-                color = gridColor,
-                start = Offset(0f, y),
-                end = Offset(w, y),
-                strokeWidth = 1f,
-            )
-        }
-
-        if (minOrd == null || maxOrd == null) return@Canvas
-        val span = (maxOrd - minOrd).coerceAtLeast(1L).toFloat()
-
-        series.forEach { s ->
-            val pts = s.rows.mapNotNull { (day, value) ->
+    // PERF (#scroll-jank — drawing-bound): the old draw lambda re-parsed every day string (dayOrdinal)
+    // and re-normalised every value on EVERY frame, then rebuilt each series' Path. Precompute the
+    // expensive, size-INDEPENDENT part once per `series` change: the parsed (ordinal, normalized) pairs
+    // and the shared x-domain. The math is byte-identical to the old per-point computation; only its
+    // timing moves out of the hot draw loop.
+    val prepared = remember(series) {
+        // Per series: its rows reduced to (ordinal, norm0to1) pairs, dropping unparseable days exactly
+        // as the old `mapNotNull { dayOrdinal(...) }` did — same order, same drop rule, same normalize.
+        val perSeries = series.map { s ->
+            val pairs = s.rows.mapNotNull { (day, value) ->
                 val ord = dayOrdinal(day) ?: return@mapNotNull null
-                val x = if (maxOrd > minOrd) (ord - minOrd).toFloat() / span * w else w / 2f
-                val norm = s.normalized(value).toFloat().coerceIn(0f, 1f)
-                val y = topPad + (1f - norm) * usableH
-                Offset(x, y)
+                ord to s.normalized(value).toFloat().coerceIn(0f, 1f)
             }
-            if (pts.size < 2) {
-                // A single point still renders as a dot so the series is visible.
-                pts.firstOrNull()?.let { drawCircle(s.color, radius = 3.5f, center = it) }
-                return@forEach
-            }
-            val path = Path().apply {
-                moveTo(pts.first().x, pts.first().y)
-                for (i in 1 until pts.size) lineTo(pts[i].x, pts[i].y)
-            }
-            drawPath(
-                path = path,
-                color = s.color,
-                style = Stroke(width = 2.2f, cap = StrokeCap.Round, join = StrokeJoin.Round),
-            )
-            // Bevel "now" end-cap on this series' latest point — soft halo + bright core + white centre.
-            val last = pts.last()
-            drawCircle(color = s.color.copy(alpha = 0.30f), radius = 8f, center = last)
-            drawCircle(color = s.color.copy(alpha = 0.65f), radius = 5f, center = last)
-            drawCircle(color = Palette.tipCore, radius = 2.2f, center = last)
+            Triple(s.color, pairs, s)
         }
+        val allOrds = perSeries.flatMap { (_, pairs, _) -> pairs.map { it.first } }
+        OverlayPrepared(minOrd = allOrds.minOrNull(), maxOrd = allOrds.maxOrNull(), perSeries = perSeries)
     }
+
+    // Build the per-series Paths in drawWithCache — rebuilt only when the prepared pairs or the canvas
+    // size change (NOT on unrelated recompositions), instead of allocating a fresh Path every frame.
+    Box(
+        modifier = modifier.drawWithCache {
+            val w = size.width
+            val h = size.height
+            val topPad = 6f
+            val usableH = (h - topPad * 2f).coerceAtLeast(1f)
+            val minOrd = prepared.minOrd
+            val maxOrd = prepared.maxOrd
+
+            // Pre-place each series' pixel points + Path once (size-dependent, so it lives here, keyed
+            // on size by drawWithCache). x/y formulas are identical to the old per-frame computation.
+            data class Built(val color: Color, val path: Path?, val singleDot: Offset?, val last: Offset?)
+            val built = if (minOrd != null && maxOrd != null) {
+                val span = (maxOrd - minOrd).coerceAtLeast(1L).toFloat()
+                prepared.perSeries.map { (color, pairs, _) ->
+                    val pts = pairs.map { (ord, norm) ->
+                        val x = if (maxOrd > minOrd) (ord - minOrd).toFloat() / span * w else w / 2f
+                        val y = topPad + (1f - norm) * usableH
+                        Offset(x, y)
+                    }
+                    when {
+                        pts.size < 2 -> Built(color, null, pts.firstOrNull(), null)
+                        else -> {
+                            val path = Path().apply {
+                                moveTo(pts.first().x, pts.first().y)
+                                for (i in 1 until pts.size) lineTo(pts[i].x, pts[i].y)
+                            }
+                            Built(color, path, null, pts.last())
+                        }
+                    }
+                }
+            } else {
+                emptyList()
+            }
+
+            val gridColor = Palette.hairline.copy(alpha = 0.4f)
+            val tipCore = Palette.tipCore
+
+            onDrawBehind {
+                if (w <= 0f || h <= 0f) return@onDrawBehind
+
+                // Faint low / mid / high gridlines.
+                for (f in listOf(0f, 0.5f, 1f)) {
+                    val y = topPad + (1f - f) * usableH
+                    drawLine(
+                        color = gridColor,
+                        start = Offset(0f, y),
+                        end = Offset(w, y),
+                        strokeWidth = 1f,
+                    )
+                }
+
+                if (minOrd == null || maxOrd == null) return@onDrawBehind
+
+                built.forEach { b ->
+                    if (b.singleDot != null) {
+                        // A single point still renders as a dot so the series is visible.
+                        drawCircle(b.color, radius = 3.5f, center = b.singleDot)
+                        return@forEach
+                    }
+                    if (b.path != null) {
+                        drawPath(
+                            path = b.path,
+                            color = b.color,
+                            style = Stroke(width = 2.2f, cap = StrokeCap.Round, join = StrokeJoin.Round),
+                        )
+                    }
+                    // Bevel "now" end-cap on this series' latest point — soft halo + bright core + white centre.
+                    b.last?.let { last ->
+                        drawCircle(color = b.color.copy(alpha = 0.30f), radius = 8f, center = last)
+                        drawCircle(color = b.color.copy(alpha = 0.65f), radius = 5f, center = last)
+                        drawCircle(color = tipCore, radius = 2.2f, center = last)
+                    }
+                }
+            }
+        },
+    )
 }
+
+/** Pre-parsed overlay inputs (size-independent): the shared x-domain + each series' (ordinal, norm) pairs. */
+private data class OverlayPrepared(
+    val minOrd: Long?,
+    val maxOrd: Long?,
+    val perSeries: List<Triple<Color, List<Pair<Long, Float>>, CompareSeries>>,
+)
 
 @Composable
 private fun Legend(series: List<CompareSeries>) {
@@ -808,7 +898,7 @@ private fun Legend(series: List<CompareSeries>) {
                     modifier = Modifier.weight(1f),
                 )
                 Text(
-                    "${s.metric.format(s.realMin, unitSystem, tempUnit)} – " +
+                    "${s.metric.format(s.realMin, unitSystem, tempUnit)}-" +
                         s.metric.format(s.realMax, unitSystem, tempUnit),
                     style = NoopType.captionNumber,
                     color = Palette.textSecondary,
@@ -901,7 +991,27 @@ private fun PairCard(p: PairResult) {
                     modifier = Modifier.weight(1f),
                 )
                 TrendChip(text = signedR(p.r), color = tint)
-                Text("r = ${signedR(p.r)}", style = NoopType.number(18f), color = tint)
+                // Small liquid vessel accent for the headline single value: |r| fills the vessel in the
+                // relationship's own tint, with the signed r rolled up over it (white, tabular, hit-
+                // transparent so a tap falls through). Same r, same tint, same signedR formatting the plain
+                // "r = …" readout used — just visualised as a headline vessel. STATIC (animated = false):
+                // up to six of these render in a scrolling list, so they pose once (the pilot's small-gauge
+                // static-raster rule) rather than each running a live clock.
+                Box(modifier = Modifier.size(38.dp), contentAlignment = Alignment.Center) {
+                    LiquidVessel(
+                        value = abs(p.r).coerceIn(0.0, 1.0),
+                        tint = tint,
+                        animated = false,
+                        modifier = Modifier.size(38.dp),
+                    )
+                    CountUpText(
+                        value = p.r,
+                        format = { signedR(it) },
+                        style = NoopType.number(12f, weight = FontWeight.Bold),
+                        color = Color.White,
+                        modifier = Modifier.clearAndSetSemantics {},
+                    )
+                }
             }
 
             Text(insightSentence(p), style = NoopType.subhead, color = Palette.textSecondary)
@@ -923,12 +1033,12 @@ private fun insightSentence(p: PairResult): String {
         "(${strengthWord(p.r)} ${directionWord(p.r)}) over ${p.n} shared days.")
         .replace("  ", " ").replace(" )", ")")
     if (abs(p.r) < 0.3) {
-        return "$head No clear relationship — they move largely independently."
+        return "$head No clear relationship - they move largely independently."
     }
     val aT = p.a.metric.title.lowercase()
     val bT = p.b.metric.title.lowercase()
     val verb = if (p.r < 0) "tends to fall" else "tends to rise"
-    return "$head When $aT rises, $bT $verb — a ${strengthWord(p.r)} ${directionWord(p.r)} link."
+    return "$head When $aT rises, $bT $verb - a ${strengthWord(p.r)} ${directionWord(p.r)} link."
 }
 
 private fun signedR(r: Double): String {

@@ -572,9 +572,11 @@ public struct WearableDailyRow: Sendable, Equatable {
     // Heart / recovery inputs
     public var restingHr: Int?
     public var avgHrvMs: Double?
+    public var respRateBpm: Double?   // night respiration (breaths/min) folded from the session, so it reaches the day rollup (#17)
     public var skinTempDevC: Double?  // Oura "temperature_deviation" (°C from baseline)
     public var spo2Pct: Double?
     public var avgStress: Int?        // Garmin daily average stress (0..100), reference
+    public var vo2max: Double?        // Oura "vo2_max" (mL/kg/min); feeds Fitness Age, same as Apple Health VO2max
 
     // Sleep rollup (mirrors the night's session, for the daily metric)
     public var totalSleepMin: Double?
@@ -700,7 +702,7 @@ public struct WhoopImportResult: Sendable, Equatable {
 
 // MARK: - Errors
 
-public enum ImportError: Error, Equatable, Sendable, CustomStringConvertible {
+public enum ImportError: Error, Equatable, Sendable, CustomStringConvertible, LocalizedError {
     case fileNotFound(String)
     case notAZipOrFolder(String)
     case missingEntry(String)
@@ -716,4 +718,10 @@ public enum ImportError: Error, Equatable, Sendable, CustomStringConvertible {
         case .emptyExport(let m):     return "Export contained no usable data: \(m)"
         }
     }
+
+    /// Honest, human-readable failure text surfaced in the import UI. Without this the enum bridges to
+    /// NSError positionally and the user sees an opaque "…ImportError erreur 4" with no clue what went
+    /// wrong (#857). `LocalizedError.errorDescription` is what `Error.localizedDescription` returns, so
+    /// the Data Sources screen now shows the same plain sentence `description` carries.
+    public var errorDescription: String? { description }
 }

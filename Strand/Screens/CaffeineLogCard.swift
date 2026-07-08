@@ -159,8 +159,10 @@ struct CaffeineLogCard: View {
 
     private var lateNudgeText: String {
         let n = latePastCutoffCount
-        let lead = n == 1 ? "A logged caffeine is" : "\(n) logged caffeines are"
-        return "\(lead) past your bedtime cutoff — it may still be on board and keep you up. Just a timing heads-up."
+        // Whole-phrase variants per count so translators see complete sentences (never a stitched lead).
+        return n == 1
+            ? String(localized: "A logged caffeine is past your bedtime cutoff. It may still be on board and keep you up. Just a timing heads-up.")
+            : String(localized: "\(n) logged caffeines are past your bedtime cutoff. They may still be on board and keep you up. Just a timing heads-up.")
     }
 
     /// The cutoff time-of-day label, derived from bedtime minus the dose-decay lead (shared model).
@@ -236,27 +238,32 @@ struct CaffeineLogCard: View {
 
     private func activeTitle(_ est: CaffeineActiveEstimate) -> String {
         if let mg = est.totalRemainingMg {
-            return "About \(Int(mg.rounded())) mg may still be active"
+            return String(localized: "About \(Int(mg.rounded())) mg may still be active")
         }
-        return "Caffeine may still be active"
+        return String(localized: "Caffeine may still be active")
     }
 
+    /// Whole-phrase variants per combination (recent-intake line and/or multi-intake line) so
+    /// translators always see a complete sentence rather than joined fragments.
     private func activeDetail(_ est: CaffeineActiveEstimate) -> String {
-        var parts: [String] = []
-        if let hrs = est.hoursSinceMostRecentActive {
-            parts.append("most recent intake about \(hoursLabel(hrs)) ago")
+        let recent = est.hoursSinceMostRecentActive.map(hoursLabel)
+        let count = est.activeIntakeCount
+        switch (recent, count > 1) {
+        case (let r?, true):
+            return String(localized: "most recent intake about \(r) ago · \(count) intakes still in the estimate. Rough guide only, based on what you logged.")
+        case (let r?, false):
+            return String(localized: "most recent intake about \(r) ago. Rough guide only, based on what you logged.")
+        case (nil, true):
+            return String(localized: "\(count) intakes still in the estimate. Rough guide only, based on what you logged.")
+        case (nil, false):
+            return String(localized: "Rough guide only, based on what you logged.")
         }
-        if est.activeIntakeCount > 1 {
-            parts.append("\(est.activeIntakeCount) intakes still in the estimate")
-        }
-        let lead = parts.isEmpty ? "" : parts.joined(separator: " · ") + ". "
-        return lead + "Rough guide only, based on what you logged."
     }
 
     private func hoursLabel(_ hrs: Double) -> String {
-        if hrs < 1 { return "under an hour" }
+        if hrs < 1 { return String(localized: "under an hour") }
         let rounded = Int(hrs.rounded())
-        return rounded == 1 ? "1 hour" : "\(rounded) hours"
+        return rounded == 1 ? String(localized: "1 hour") : String(localized: "\(rounded) hours")
     }
 
     // MARK: - Logged list
@@ -287,9 +294,9 @@ struct CaffeineLogCard: View {
     private func intakeLabel(_ intake: CaffeineIntake) -> String {
         let time = Self.timeFormatter.string(from: intake.at)
         if let mg = intake.mg {
-            return "\(time) · \(Int(mg.rounded())) mg"
+            return String(localized: "\(time) · \(Int(mg.rounded())) mg")
         }
-        return "\(time) · amount not logged"
+        return String(localized: "\(time) · amount not logged")
     }
 
     // MARK: - Controls

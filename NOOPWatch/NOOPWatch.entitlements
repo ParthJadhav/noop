@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- The watch reads its own heart rate from HealthKit (live HR readout + the basic workout session). -->
+	<key>com.apple.developer.healthkit</key>
+	<true/>
+	<key>com.apple.developer.healthkit.access</key>
+	<array/>
+	<!-- Shared App Group: the watch app + its complication read the latest score snapshot the phone
+	     pushed (key latestWatchSnapshot in this suite's UserDefaults). Same group as the iOS app/widget. -->
+	<key>com.apple.security.application-groups</key>
+	<array>
+		<string>$(APP_GROUP_ID)</string>
+	</array>
+</dict>
+</plist>

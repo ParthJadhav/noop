@@ -54,6 +54,10 @@ object FitnessSensor {
         val instantaneousPowerWatts: Int? = null,
         // CSC / CPS cumulative fields (feed the rate computer)
         val cumulativeWheelRevolutions: Long? = null,   // u32
+        // Wheel event time (u16, wraps at 65536). UNIT IS SOURCE-DEPENDENT: 1/1024 s from CSC (0x2A5B)
+        // but 1/2048 s from CPS (0x2A63) — Cycling Power Service 1.1, Wheel Revolution Data.
+        // [FitnessRateComputer] branches on [kind]; the field name keeps the CSC unit for Kotlin↔Swift
+        // parity with the shipped schema rather than churning every call-site (PR #1007).
         val lastWheelEventTime1024: Int? = null,
         val cumulativeCrankRevolutions: Int? = null,     // u16
         val lastCrankEventTime1024: Int? = null,
@@ -160,8 +164,8 @@ object FitnessSensor {
         r.s16()?.let { power = it }                  // Instantaneous Power (mandatory)
         if (flags and 0x0001 != 0) r.u8()            // Pedal Power Balance
         if (flags and 0x0004 != 0) r.u16()           // Accumulated Torque
-        if (flags and 0x0010 != 0) {                 // Wheel Revolution Data
-            r.u32()?.let { wheelRevs = it }
+        if (flags and 0x0010 != 0) {                 // Wheel Revolution Data (event time 1/2048 s here,
+            r.u32()?.let { wheelRevs = it }          //  unlike CSC's 1/1024 — see Reading doc, PR #1007)
             r.u16()?.let { wheelTime = it }
         }
         if (flags and 0x0020 != 0) {                 // Crank Revolution Data
@@ -196,11 +200,19 @@ object FitnessSensor {
 /**
  * Turns successive CSC/CPS revolution counters into instantaneous wheel speed and crank/pedal cadence.
  *
- * HONEST DERIVATION: CSC/CPS report only CUMULATIVE counts + the event time of the last revolution (unit
- * 1/1024 s, wrapping at 65536). An instantaneous rate is the count difference over the time difference
- * between two packets — so the FIRST packet, and any packet that repeats the same event time, yield null,
- * never a fabricated value. Time wrap (the 16-bit clock rolls every ~64 s) and counter wrap (u32 wheel /
- * u16 crank) are handled with modular arithmetic. Pure — no I/O — so it's fully unit-tested.
+ * HONEST DERIVATION: CSC/CPS report only CUMULATIVE counts + the event time of the last revolution (u16,
+ * wrapping at 65536). An instantaneous rate is the count difference over the time difference between two
+ * packets — so the FIRST packet, and any packet that repeats the same event time, yield null, never a
+ * fabricated value. Time wrap and counter wrap (u32 wheel / u16 crank) are handled with modular
+ * arithmetic. Pure — no I/O — so it's fully unit-tested.
+ *
+ * TICK RATES (PR #1007): the wheel event-time clock is SOURCE-dependent — CSC (0x2A5B) ticks at 1/1024 s
+ * but CPS (0x2A63) at 1/2048 s (Cycling Power Service 1.1, Wheel Revolution Data). A shared 1024 divisor
+ * made a CPS wheel delta look twice as long as reality, HALVING CPS-derived speed. The wheel path
+ * therefore selects the rate from [FitnessSensor.Reading.kind] — and because a 2A5B↔2A63 flip means the
+ * baseline timestamp sits on a DIFFERENT clock base, a kind flip drops the wheel baseline so the first
+ * post-flip packet yields null rather than a speed computed across mixed clocks. Crank event time is
+ * 1/1024 s on BOTH profiles, so the crank path is unchanged.
  *
  * Faithful twin of Swift `FitnessRateComputer`.
  */
@@ -211,6 +223,10 @@ class FitnessRateComputer(
 ) {
     private var lastWheelRevs: Long? = null
     private var lastWheelTime: Int? = null
+    /** Which profile the wheel baseline came from. CSC and CPS wheel event times tick on DIFFERENT clock
+     *  bases (1/1024 vs 1/2048 s), so a delta across a kind flip is meaningless — the baseline is dropped
+     *  when the kind changes and the first post-flip packet re-seeds it (PR #1007). */
+    private var lastWheelKind: FitnessSensor.SensorKind? = null
     private var lastCrankRevs: Int? = null
     private var lastCrankTime: Int? = null
 
@@ -221,7 +237,9 @@ class FitnessRateComputer(
     }
 
     /** Fold one decoded reading in and return whatever instantaneous rates it lets us derive. Remembers
-     *  this packet's counters as the baseline for the next. */
+     *  this packet's counters as the baseline for the next. The wheel path additionally tracks WHICH
+     *  profile the baseline came from, because CSC and CPS wheel timestamps are not on the same clock
+     *  base (see the class doc, PR #1007). */
     fun update(reading: FitnessSensor.Reading): Rates {
         var speed: Double? = null
         var crankRpm: Double? = null
@@ -229,6 +247,18 @@ class FitnessRateComputer(
         val wheelRevs = reading.cumulativeWheelRevolutions
         val wheelTime = reading.lastWheelEventTime1024
         if (wheelRevs != null && wheelTime != null) {
+            // PR #1007: the wheel event-time tick rate is profile-specific — CSC (0x2A5B) 1/1024 s,
+            // CPS (0x2A63) 1/2048 s. A shared /1024 halved CPS-derived speed. The 16-bit wrap in
+            // timeDelta1024 is tick-count arithmetic, so only the seconds conversion branches.
+            val wheelTicksPerSec =
+                if (reading.kind == FitnessSensor.SensorKind.CYCLING_POWER) 2048.0 else 1024.0
+            // A 2A5B↔2A63 kind flip puts the baseline timestamp on a DIFFERENT clock base; a cross-base
+            // delta would fabricate a speed, so drop the baseline and let this packet re-seed it (the
+            // first post-flip packet yields null — same honesty rule as a true first packet).
+            if (lastWheelKind != reading.kind) {
+                lastWheelRevs = null
+                lastWheelTime = null
+            }
             val pRevs = lastWheelRevs
             val pTime = lastWheelTime
             if (pRevs != null && pTime != null) {
@@ -236,12 +266,13 @@ class FitnessRateComputer(
                 if (dt > 0) {
                     // u32 counter wrap handled with a 2^32 modulus.
                     val dRev = ((wheelRevs - pRevs) % 0x1_0000_0000L + 0x1_0000_0000L) % 0x1_0000_0000L
-                    val seconds = dt / 1024.0
+                    val seconds = dt / wheelTicksPerSec
                     speed = dRev * wheelCircumferenceM / seconds
                 }
             }
             lastWheelRevs = wheelRevs
             lastWheelTime = wheelTime
+            lastWheelKind = reading.kind
         }
 
         val crankRevs = reading.cumulativeCrankRevolutions
@@ -266,7 +297,7 @@ class FitnessRateComputer(
 
     /** Forget the baselines (call on disconnect / new session). */
     fun reset() {
-        lastWheelRevs = null; lastWheelTime = null
+        lastWheelRevs = null; lastWheelTime = null; lastWheelKind = null
         lastCrankRevs = null; lastCrankTime = null
     }
 

@@ -197,10 +197,10 @@ final class UpdateStore: ObservableObject {
         // Mark seeded first so a re-entrant call (or a crash mid-post) can't double-post this version.
         d.set(version, forKey: K.lastSeededVersion)
 
-        let message = summary ?? "NOOP \(version) is here — tap to read what's new."
+        let message = summary ?? String(localized: "NOOP \(version) is here. Tap to read what's new.")
         post(UpdateItem(
             kind: .whatsNew,
-            title: title.isEmpty ? "What's new in NOOP \(version)" : title,
+            title: title.isEmpty ? String(localized: "What's new in NOOP \(version)") : title,
             message: message
         ))
     }

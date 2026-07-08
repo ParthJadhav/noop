@@ -152,6 +152,107 @@ class FitnessSensorTest {
         assertEquals(60.0, r.crankRpm!!, 0.0001)
     }
 
+    // MARK: - CPS wheel tick rate (PR #1007: 0x2A63 wheel event time is 1/2048 s, NOT 1/1024 s)
+
+    @Test
+    fun rateComputerCpsWheelEventTimeTicksAt2048() {
+        // Real CPS timestamps → exact speed pin. 4096 ticks at 1/2048 s = 2 s (a /1024 bug would read
+        // 4 s and halve this). +5 revs × 2.0 m over 2 s = 5 m/s.
+        val rc = FitnessRateComputer(wheelCircumferenceM = 2.0)
+        rc.update(
+            FitnessSensor.Reading(
+                FitnessSensor.SensorKind.CYCLING_POWER,
+                cumulativeWheelRevolutions = 100L, lastWheelEventTime1024 = 2048,
+            ),
+        )
+        val r = rc.update(
+            FitnessSensor.Reading(
+                FitnessSensor.SensorKind.CYCLING_POWER,
+                cumulativeWheelRevolutions = 105L, lastWheelEventTime1024 = 6144,
+            ),
+        )
+        assertEquals(5.0, r.speedMps!!, 0.0001)
+        assertEquals(18.0, r.speedKmh!!, 0.0001)
+    }
+
+    @Test
+    fun rateComputerCpsWheelDerivesDoubleTheCscSpeedForIdenticalBytes() {
+        // Regression pin for the halved-speed bug: byte-identical counters/timestamps to the CSC
+        // two-packet test above (1024-tick delta, +5 revs, 2.0 m wheel) must derive DOUBLE the speed on
+        // a CPS source — 1024 ticks span 0.5 s at 1/2048 s, not 1 s. CSC on the same numbers pins 10 m/s.
+        val rc = FitnessRateComputer(wheelCircumferenceM = 2.0)
+        rc.update(
+            FitnessSensor.Reading(
+                FitnessSensor.SensorKind.CYCLING_POWER,
+                cumulativeWheelRevolutions = 100L, lastWheelEventTime1024 = 1024,
+            ),
+        )
+        val r = rc.update(
+            FitnessSensor.Reading(
+                FitnessSensor.SensorKind.CYCLING_POWER,
+                cumulativeWheelRevolutions = 105L, lastWheelEventTime1024 = 2048,
+            ),
+        )
+        assertEquals(20.0, r.speedMps!!, 0.0001)
+        assertEquals(72.0, r.speedKmh!!, 0.0001)
+    }
+
+    @Test
+    fun rateComputerCpsCrankStaysAt1024() {
+        // Guard against over-correcting: CPS CRANK event time is 1/1024 s (same as CSC) — only the wheel
+        // clock differs. +1 crank rev over 1024 ticks = 1 s = 60 rpm, NOT 120.
+        val rc = FitnessRateComputer()
+        rc.update(
+            FitnessSensor.Reading(
+                FitnessSensor.SensorKind.CYCLING_POWER,
+                cumulativeCrankRevolutions = 10, lastCrankEventTime1024 = 1024,
+            ),
+        )
+        val r = rc.update(
+            FitnessSensor.Reading(
+                FitnessSensor.SensorKind.CYCLING_POWER,
+                cumulativeCrankRevolutions = 11, lastCrankEventTime1024 = 2048,
+            ),
+        )
+        assertEquals(60.0, r.crankRpm!!, 0.0001)
+    }
+
+    @Test
+    fun rateComputerWheelKindFlipYieldsNullThenReseeds() {
+        // A 2A5B↔2A63 flip means the baseline timestamp is on a DIFFERENT clock base (1/1024 vs 1/2048 s)
+        // — a cross-base delta would fabricate a speed, so the first post-flip packet must yield null and
+        // re-seed the baseline. The packet AFTER that derives normally on the new base.
+        val rc = FitnessRateComputer(wheelCircumferenceM = 2.0)
+        rc.update(
+            FitnessSensor.Reading(
+                FitnessSensor.SensorKind.CYCLING_SPEED_CADENCE,
+                cumulativeWheelRevolutions = 100L, lastWheelEventTime1024 = 1024,
+            ),
+        )
+        val flip = rc.update(
+            FitnessSensor.Reading(
+                FitnessSensor.SensorKind.CYCLING_POWER,
+                cumulativeWheelRevolutions = 105L, lastWheelEventTime1024 = 2048,
+            ),
+        )
+        assertNull(flip.speedMps)   // never a speed computed across mixed clocks
+        val settled = rc.update(
+            FitnessSensor.Reading(
+                FitnessSensor.SensorKind.CYCLING_POWER,
+                cumulativeWheelRevolutions = 110L, lastWheelEventTime1024 = 4096,
+            ),
+        )
+        assertEquals(10.0, settled.speedMps!!, 0.0001)   // 5 revs × 2 m over 2048/2048 = 1 s
+        // Flip back the other way: same rule, null again.
+        val flipBack = rc.update(
+            FitnessSensor.Reading(
+                FitnessSensor.SensorKind.CYCLING_SPEED_CADENCE,
+                cumulativeWheelRevolutions = 115L, lastWheelEventTime1024 = 5120,
+            ),
+        )
+        assertNull(flipBack.speedMps)
+    }
+
     @Test
     fun rateComputerNoNewRevolutionYieldsNull() {
         val rc = FitnessRateComputer()

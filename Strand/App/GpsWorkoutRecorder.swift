@@ -1,5 +1,6 @@
 import Foundation
 import CoreLocation
+import StrandAnalytics   // WorkoutsTrace + TestCentre: the GPS-fix line for the Workouts test mode
 
 // MARK: - GPS workout recording on Apple (#524)
 //
@@ -214,13 +215,19 @@ enum RouteStore {
     /// start second (different sports) never collide.
     static func key(startTs: Int, sport: String) -> String { "\(startTs)|\(sport)" }
 
-    /// Encode a route map to JSON. Returns nil only if encoding fails (never expected for this shape).
+    /// Encode a route map to JSON. Drops any entry whose distance isn't a finite, non-negative number
+    /// FIRST — JSON has no representation for NaN/Inf, so a single corrupt distance would otherwise make
+    /// `JSONEncoder` throw and take the WHOLE map down with it (silently losing every valid route). We
+    /// sanitise per-entry so one bad row can never poison the blob. Returns nil only if encoding the
+    /// already-clean map fails (never expected for this shape).
     static func encodeMap(_ map: [String: WorkoutRoute]) -> Data? {
-        try? JSONEncoder().encode(map)
+        let clean = map.filter { $0.value.distanceM.isFinite && $0.value.distanceM >= 0 }
+        return try? JSONEncoder().encode(clean)
     }
 
     /// Decode a route map from JSON, dropping any entry whose distance isn't a finite, non-negative
-    /// number — never trust the persisted blob to be clean. nil/garbage yields an empty map.
+    /// number — never trust the persisted blob to be clean (belt-and-braces with `encodeMap`'s sanitise).
+    /// nil/garbage yields an empty map.
     static func decodeMap(_ data: Data?) -> [String: WorkoutRoute] {
         guard let data, !data.isEmpty,
               let raw = try? JSONDecoder().decode([String: WorkoutRoute].self, from: data) else { return [:] }
@@ -301,6 +308,14 @@ final class GpsWorkoutRecorder: NSObject, ObservableObject {
     private var track: [RouteMath.LatLng] = []
     private var startMs: Int64 = 0
 
+    /// Workouts & GPS test mode (Test Centre): the tagged sink for the `.workouts` GPS-fix lines, wired by
+    /// AppModel to `live.append(log:domain:)`. Default nil (inert). We ALWAYS check `TestCentre.active(.workouts)`
+    /// BEFORE building any line, so the recorder pays nothing when the mode is off. Diagnostic only - it never
+    /// changes the route. `rawFixCount` is the running count of raw fixes seen (accepted + rejected) so the
+    /// line can show the filter's accept rate; reset on `start`.
+    var workoutsLog: ((String) -> Void)?
+    private var rawFixCount = 0
+
     override init() {
         super.init()
         manager.delegate = self
@@ -328,6 +343,7 @@ final class GpsWorkoutRecorder: NSObject, ObservableObject {
         distanceM = 0
         paceSecPerKm = nil
         pointCount = 0
+        rawFixCount = 0
         isRecording = true
 
         switch manager.authorizationStatus {
@@ -376,6 +392,7 @@ final class GpsWorkoutRecorder: NSObject, ObservableObject {
     /// distance/pace. No-op when not recording.
     fileprivate func ingest(_ fixes: [RawFix]) {
         guard isRecording else { return }
+        rawFixCount += fixes.count
         var changed = false
         for fix in fixes {
             if let pt = filter.accept(fix) {
@@ -388,6 +405,14 @@ final class GpsWorkoutRecorder: NSObject, ObservableObject {
         distanceM = RouteMath.totalMeters(track)
         let elapsed = Double(Int64(Date().timeIntervalSince1970 * 1000) - startMs) / 1000.0
         paceSecPerKm = RouteMath.paceSecPerKm(meters: distanceM, seconds: elapsed)
+        // Workouts & GPS test mode: one GPS-fix-progress line tagged `.workouts` per batch that added a point,
+        // showing raw fixes seen, how many the accuracy/speed filter accepted, and the running distance, so a
+        // route that under-records (weak signal / denied permission) is visible. Zero-cost when off (the gate
+        // is one UserDefaults bool read), and gated on a non-nil sink so non-prod recorders stay silent.
+        if TestCentre.active(.workouts), let workoutsLog {
+            workoutsLog(WorkoutsTrace.gpsLine(rawFixes: rawFixCount, acceptedPoints: pointCount,
+                                              distanceM: distanceM))
+        }
     }
 }
 

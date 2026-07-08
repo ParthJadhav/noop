@@ -1,6 +1,6 @@
 # WHOOP Design Language — reverse-engineered reference (2026-06-22)
 
-Pixel-sampled from 20 real WHOOP iOS screenshots (Aaron's `~/Downloads/whoop-ref/` +
+Pixel-sampled from 20 real WHOOP iOS screenshots (`~/Downloads/whoop-ref/` +
 `New Folder With Items 18/`). This is the target the NOOP "Design Reset" builds to. Applies
 to the DEFAULT theme on dark; the Classic-throwback toggle is untouched.
 

@@ -47,16 +47,16 @@ public enum RhythmConsent {
     /// own line (head + body), like `Terms.points`. No condition name, no diagnosis, no
     /// "consider a clinician" verdict — this is a visualization, not a screen.
     public static let points: [(String, String)] = [
-        ("Experimental, and not a medical device",
-         "This is an experimental wellness visualization of your beat-to-beat timing. It is NOT an ECG, and it cannot diagnose, detect, or rule out any heart condition."),
-        ("It is a picture, not a verdict",
-         "It shows the shape of your heartbeat timing and a plain-language description of how steady it looked. It does not tell you whether anything is right or wrong."),
-        ("Variation is normal and often benign",
-         "Beat-to-beat timing varies for many ordinary reasons — breathing, movement, an imperfect optical reading, or the occasional extra or skipped beat that most healthy people have."),
-        ("It is not a substitute for a professional",
-         "If you feel unwell or are worried about your heart, contact a qualified professional; in an emergency, your local emergency service. Do not rely on NOOP."),
-        ("Everything stays on your device",
-         "All of this is computed on your own device from data you already have. No heartbeat data leaves it."),
+        (String(localized: "Experimental, and not a medical device"),
+         String(localized: "This is an experimental wellness visualization of your beat-to-beat timing. It is NOT an ECG, and it cannot diagnose, detect, or rule out any heart condition.")),
+        (String(localized: "It is a picture, not a verdict"),
+         String(localized: "It shows the shape of your heartbeat timing and a plain-language description of how steady it looked. It does not tell you whether anything is right or wrong.")),
+        (String(localized: "Variation is normal and often benign"),
+         String(localized: "Beat-to-beat timing varies for many ordinary reasons: breathing, movement, an imperfect optical reading, or the occasional extra or skipped beat that most healthy people have.")),
+        (String(localized: "It is not a substitute for a professional"),
+         String(localized: "If you feel unwell or are worried about your heart, contact a qualified professional; in an emergency, your local emergency service. Do not rely on NOOP.")),
+        (String(localized: "Everything stays on your device"),
+         String(localized: "All of this is computed on your own device from data you already have. No heartbeat data leaves it.")),
     ]
 }
 
@@ -74,7 +74,7 @@ private struct RhythmDisclaimerNote: View {
                     .font(StrandFont.subhead)
                     .foregroundStyle(StrandPalette.textTertiary)
                     .accessibilityHidden(true)
-                Text("Experimental wellness visualization — not a diagnosis, not an ECG, and not a medical device. It cannot detect any heart condition. Beat-to-beat variation has many ordinary, benign causes. If you feel unwell or are worried, contact a qualified professional; in an emergency, your local emergency service. Everything is computed on your device.")
+                Text("Experimental wellness visualization: not a diagnosis, not an ECG, and not a medical device. It cannot detect any heart condition. Beat-to-beat variation has many ordinary, benign causes. If you feel unwell or are worried, contact a qualified professional; in an emergency, your local emergency service. Everything is computed on your device.")
                     .font(StrandFont.footnote)
                     .foregroundStyle(StrandPalette.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -304,6 +304,13 @@ struct RhythmView: View {
         ScreenScaffold(
             title: "Rhythm",
             subtitle: "An experimental picture of your beat-to-beat timing",
+            // PERF: chart-heavy column (the Poincaré beat-to-beat scatter, the stats grid and the
+            // methodology card). The LazyVStack path builds the off-screen cards — including the scatter
+            // plot's point set — on demand; byte-identical layout.
+            lazy: true,
+            // Liquid finish: the day-of-sky backdrop, so the visualization sits in the same liquid
+            // atmosphere as Today. The calm Rest-blue world of the cards stays unchanged over it.
+            topBackground: liquidScaffoldSky(),
             trailing: { closeButton }
         ) {
             SourceBadge("Experimental", tint: StrandPalette.restColor)
@@ -351,8 +358,44 @@ struct RhythmView: View {
                     .font(StrandFont.subhead)
                     .foregroundStyle(StrandPalette.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
+
+                // Two calm liquid readouts of the night's real descriptive fractions (both 0–1, neutral —
+                // never a verdict): the beat-to-beat variation index and the extra/skipped fraction. The
+                // liquid tube idiom, drawn in the same Rest-blue world so it never reads as alarm. The
+                // stats grid below still prints every exact number; these are a descriptive picture.
+                if let hw = headlineWindow {
+                    VStack(spacing: 8) {
+                        liquidStatRow("Beat-to-beat variation", frac: hw.normRmssd,
+                                      tint: StrandPalette.restBright)
+                        liquidStatRow("Extra or skipped beats", frac: hw.ectopicFraction,
+                                      tint: StrandPalette.restColor)
+                    }
+                    .padding(.top, 2)
+                }
             }
         }
+    }
+
+    /// One calm liquid readout: an UPPERCASE overline label, the fraction as a percent, and a posed
+    /// liquid tube filled to that fraction (clamped 0–1). Descriptive only — never a verdict, never red.
+    /// Static tube so a page of them costs one cached frame each. Decorative for VoiceOver (the numbers
+    /// grid carries the meaning).
+    private func liquidStatRow(_ label: LocalizedStringKey, frac: Double?, tint: Color) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack {
+                Text(label)
+                    .font(StrandFont.overline)
+                    .tracking(StrandFont.overlineTracking)
+                    .textCase(.uppercase)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                Spacer()
+                Text(percent(frac))
+                    .font(StrandFont.captionNumber)
+                    .foregroundStyle(StrandPalette.textSecondary)
+            }
+            LiquidTube(frac: max(0, min(1, frac ?? 0)), tint: tint, height: 8, animated: false)
+        }
+        .accessibilityHidden(true)
     }
 
     // MARK: Plot card — the Poincaré scatter + the "comet vs cloud" reading note
@@ -385,31 +428,31 @@ struct RhythmView: View {
             HStack(spacing: NoopMetrics.gap) {
                 StatTile(label: "SHORT AXIS",
                          value: fmt(headlineWindow?.sd1, "%.0f"),
-                         caption: "SD1 · ms",
+                         caption: String(localized: "SD1 · ms"),
                          accent: StrandPalette.restBright)
                 StatTile(label: "LONG AXIS",
                          value: fmt(headlineWindow?.sd2, "%.0f"),
-                         caption: "SD2 · ms",
+                         caption: String(localized: "SD2 · ms"),
                          accent: StrandPalette.restColor)
             }
             HStack(spacing: NoopMetrics.gap) {
                 StatTile(label: "CLOUD SHAPE",
                          value: fmt(headlineWindow?.sd1sd2, "%.2f"),
-                         caption: "SD1:SD2 ratio",
+                         caption: String(localized: "SD1:SD2 ratio"),
                          accent: StrandPalette.metricCyan)
                 StatTile(label: "BEAT-TO-BEAT",
                          value: percent(headlineWindow?.normRmssd),
-                         caption: "variation index",
+                         caption: String(localized: "variation index"),
                          accent: StrandPalette.metricPurple)
             }
             HStack(spacing: NoopMetrics.gap) {
                 StatTile(label: "EXTRA / SKIPPED",
                          value: percent(headlineWindow?.ectopicFraction),
-                         caption: "of beats",
+                         caption: String(localized: "of beats"),
                          accent: StrandPalette.restColor)
                 StatTile(label: "BEATS READ",
                          value: headlineWindow.map { "\($0.nBeats)" } ?? "—",
-                         caption: "clean intervals",
+                         caption: String(localized: "clean intervals"),
                          accent: StrandPalette.textSecondary)
             }
         }
@@ -420,7 +463,7 @@ struct RhythmView: View {
     private var emptyState: some View {
         DataPendingNote(
             title: "No clear reading yet",
-            message: "Rhythm only looks during quiet, still, resting windows — so it needs a calm night's worth of steady beats. Once there's a clean window, the scatter and its description show here.",
+            message: "Rhythm only looks during quiet, still, resting windows, so it needs a calm night's worth of steady beats. Once there's a clean window, the scatter and its description show here.",
             symbol: "waveform.path"
         )
     }
@@ -431,7 +474,7 @@ struct RhythmView: View {
         StrandCard {
             VStack(alignment: .leading, spacing: 8) {
                 Text("How this is measured").strandOverline()
-                Text("During quiet, still, resting windows, NOOP looks at the timing between your heartbeats (R-R intervals) and draws their Poincaré scatter. From the cloud it computes its short and long axes (SD1, SD2) and a few plain regularity numbers. Movement and noisy windows are skipped, not shown. These are transparent, published descriptive statistics — a picture of your timing, never a clinical measurement.")
+                Text("During quiet, still, resting windows, NOOP looks at the timing between your heartbeats (R-R intervals) and draws their Poincaré scatter. From the cloud it computes its short and long axes (SD1, SD2) and a few plain regularity numbers. Movement and noisy windows are skipped, not shown. These are transparent, published descriptive statistics: a picture of your timing, never a clinical measurement.")
                     .font(StrandFont.footnote)
                     .foregroundStyle(StrandPalette.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -445,23 +488,23 @@ struct RhythmView: View {
     /// descriptive and benign; no "consider a clinician", no condition, no alarm.
     private var headlineLabel: String {
         switch night?.overall ?? headlineWindow?.label ?? .unreadable {
-        case .steady:           return "Your rhythm looked steady"
-        case .occasionalEctopy: return "Some occasional extra or skipped beats"
-        case .varied:           return "Your rhythm varied more than usual"
-        case .unreadable:       return "Couldn't read clearly"
+        case .steady:           return String(localized: "Your rhythm looked steady")
+        case .occasionalEctopy: return String(localized: "Some occasional extra or skipped beats")
+        case .varied:           return String(localized: "Your rhythm varied more than usual")
+        case .unreadable:       return String(localized: "Couldn't read clearly")
         }
     }
 
     private var headlineDetail: String {
         switch night?.overall ?? headlineWindow?.label ?? .unreadable {
         case .steady:
-            return "Across the quiet windows we could read, your beat-to-beat timing held a tight, even shape."
+            return String(localized: "Across the quiet windows we could read, your beat-to-beat timing held a tight, even shape.")
         case .occasionalEctopy:
-            return "Mostly steady, with a few isolated extra or skipped beats — very common and usually nothing."
+            return String(localized: "Mostly steady, with a few isolated extra or skipped beats. Very common and usually nothing.")
         case .varied:
-            return "The scatter looked rounder and more spread out than a tight, steady beat. This has many ordinary causes and is not a diagnosis."
+            return String(localized: "The scatter looked rounder and more spread out than a tight, steady beat. This has many ordinary causes and is not a diagnosis.")
         case .unreadable:
-            return "There wasn't a calm, still window clean enough to describe. Try again after a settled night."
+            return String(localized: "There wasn't a calm, still window clean enough to describe. Try again after a settled night.")
         }
     }
 
@@ -479,7 +522,7 @@ struct RhythmView: View {
         let readable = night?.readableWindows ?? windows.filter { $0.label != .unreadable }.count
         switch headlineWindow?.confidence ?? .calibrating {
         case .solid:       return "Solid"
-        case .building:    return readable <= 1 ? "Building — 1 window" : "Building"
+        case .building:    return readable <= 1 ? "Building (1 window)" : "Building"
         case .calibrating: return "Calibrating"
         }
     }

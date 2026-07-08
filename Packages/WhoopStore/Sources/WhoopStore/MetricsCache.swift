@@ -73,6 +73,21 @@ public struct DailyMetric: Equatable, Codable {
         self.spo2Pct = spo2Pct; self.skinTempDevC = skinTempDevC; self.respRateBpm = respRateBpm
         self.steps = steps; self.activeKcalEst = activeKcalEst
     }
+
+    /// The freshest STRICTLY-PRIOR day that carries at least one overnight vital (HRV / resting HR /
+    /// respiratory), or nil. This is the recovery-INDEPENDENT twin of the whole-row Charge carry: it never
+    /// gates on `recovery != nil`, so a night whose recovery is null but which still recorded real HRV/RHR
+    /// is a valid vitals source (the whole-row carry would skip it). It only supplies the FALLBACK — each
+    /// vital is read today-first at the call site (`displayDay?.field ?? vitalsDay?.field`), so today's own
+    /// value always wins and this never overrides it. `days` is oldest→newest.
+    ///
+    /// `todayKey` must be the future-clock-safe "today" key (the later of the logical/local day key,
+    /// mirroring `Repository.widgetAnchor`'s `carriedKey`); the `$0.day < todayKey` bound (yyyy-MM-dd
+    /// compares lexicographically) keeps only genuine prior days, so today's own still-forming row and any
+    /// stray future-dated row (a bad-clock strap) can never be picked up as "last night's" vitals.
+    public nonisolated static func lastVitalsDay(days: [DailyMetric], todayKey: String) -> DailyMetric? {
+        days.last(where: { ($0.avgHrv != nil || $0.restingHr != nil || $0.respRateBpm != nil) && $0.day < todayKey })
+    }
 }
 
 extension WhoopStore {

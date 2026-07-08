@@ -246,7 +246,7 @@ private fun ExplainerCard() {
             }
             Text(
                 "NOOP estimates your steps from your WHOOP's motion, calibrated to your phone's step " +
-                    "count. It's an estimate, not a step counter — a WHOOP 4.0 doesn't transmit steps.",
+                    "count. It's an estimate, not a step counter. A WHOOP 4.0 doesn't transmit steps.",
                 style = NoopType.subhead,
                 color = Palette.textSecondary,
             )
@@ -274,7 +274,7 @@ private fun NoMotionNote() {
             }
             Text(
                 "We're not seeing any motion from your strap yet. Steps are estimated from your WHOOP's " +
-                    "banked motion history — so your strap needs to sync that history before NOOP has " +
+                    "banked motion history, so your strap needs to sync that history before NOOP has " +
                     "anything to count.",
                 style = NoopType.subhead,
                 color = Palette.textSecondary,
@@ -308,7 +308,7 @@ private fun CurrentFitCard(profile: ProfileStore, matchedDays: Int) {
                     Text("steps per motion unit", style = NoopType.footnote, color = Palette.textTertiary, modifier = Modifier.padding(bottom = 4.dp))
                 }
                 if (profile.stepsManualCoefficient > 0) {
-                    StatLine("Source", "Manual — you set this by hand")
+                    StatLine("Source", "Manual (you set this by hand)")
                 } else {
                     val days = profile.stepsCalibrationSampleDays
                     StatLine("Fitted from", "$days day${if (days == 1) "" else "s"} your phone also counted")
@@ -384,8 +384,8 @@ private fun ComparisonCard(rows: List<StepsComparisonRow>) {
                     }
                 }
                 Text(
-                    "These days are excluded from the estimate (your phone's real count is shown instead) " +
-                        "— they're here only so you can judge the estimate's accuracy.",
+                    "These days are excluded from the estimate (your phone's real count is shown instead). " +
+                        "They're here only so you can judge the estimate's accuracy.",
                     style = NoopType.caption,
                     color = Palette.textTertiary,
                 )

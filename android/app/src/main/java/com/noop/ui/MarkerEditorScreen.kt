@@ -244,10 +244,10 @@ fun MarkerEditorScreen(
                             EditorTextField(note, { note = it }, "e.g. fasting, morning draw")
                         }
                         EditorField("Reference range from my report (optional)") {
-                            EditorTextField(referenceText, { referenceText = it }, "e.g. 2.0–5.0 (your report's own range)")
+                            EditorTextField(referenceText, { referenceText = it }, "e.g. 2.0-5.0 (your report's own range)")
                         }
                         Text(
-                            "NOOP never fills this in — it only shows back exactly what you type from your own report.",
+                            "NOOP never fills this in - it only shows back exactly what you type from your own report.",
                             style = NoopType.footnote,
                             color = Palette.textTertiary,
                         )
@@ -256,7 +256,7 @@ fun MarkerEditorScreen(
             }
 
             Text(
-                "Lab Book keeps your own numbers — it doesn't test, read, or judge them, and it's not medical " +
+                "Lab Book keeps your own numbers - it doesn't test, read, or judge them, and it's not medical " +
                     "advice. Everything stays on this phone.",
                 style = NoopType.footnote,
                 color = Palette.textTertiary,

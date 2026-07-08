@@ -140,7 +140,7 @@ object IllnessWatch {
         }
 
         return if (flags.size >= 2) {
-            "Your body looks strained — " + flags.joinToString(", ") +
+            "Your body looks strained - " + flags.joinToString(", ") +
                 ". Consider taking it easy."
         } else {
             null

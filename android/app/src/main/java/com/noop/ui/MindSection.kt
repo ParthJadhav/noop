@@ -62,7 +62,7 @@ private const val MIND_GATE_DAYS = 7
 /** Shared verbatim footnote — IDENTICAL string on macOS/iOS; do not reword. */
 private const val MIND_FOOTNOTE =
     "Self-tracking, not a clinical assessment. If low mood persists, talk to a " +
-        "professional — you deserve support."
+        "professional. You deserve support."
 
 // MARK: - Section
 
@@ -134,7 +134,7 @@ fun MindSection(vm: AppViewModel) {
                         }
                     }
                     Text(
-                        "One check-in per day — picking another face overwrites today's.",
+                        "One check-in per day; picking another face overwrites today's.",
                         style = NoopType.footnote,
                         color = Palette.textTertiary,
                     )
@@ -162,7 +162,7 @@ fun MindSection(vm: AppViewModel) {
                         val left = MIND_GATE_DAYS - checkInDays
                         Text(
                             "Mood correlations unlock after $MIND_GATE_DAYS days of " +
-                                "check-ins — $left more ${if (left == 1) "day" else "days"} to go.",
+                                "check-ins: $left more ${if (left == 1) "day" else "days"} to go.",
                             style = NoopType.footnote,
                             color = Palette.textTertiary,
                         )
@@ -194,7 +194,7 @@ fun MindSection(vm: AppViewModel) {
 @Composable
 private fun MoodFaceButton(face: MoodFace, selected: Boolean, onClick: () -> Unit) {
     val shape = RoundedCornerShape(50)
-    val desc = "${face.word} — mood ${face.value.toInt()} of 5"
+    val desc = "${face.word}, mood ${face.value.toInt()} of 5"
     Box(
         modifier = Modifier
             .clip(shape)

@@ -10,6 +10,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -44,6 +45,7 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -60,21 +62,26 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.noop.analytics.AnalyticsEngine
 import com.noop.analytics.SleepDebt
 import com.noop.analytics.SleepDebtLedger
+import com.noop.analytics.SleepEditGuard
 import com.noop.analytics.SleepStageTotals
 import com.noop.data.DailyMetric
 import com.noop.data.SleepSession
@@ -126,7 +133,20 @@ fun SleepScreen(
     onOpenJournal: () -> Unit = {},
 ) {
     val days by vm.recentDays.collectAsStateWithLifecycle()
+
+    // PERF (#scroll-jank): the BLE live state ticks ~1Hz. This screen reads `live` ONLY for the
+    // "syncing history" note (backfilling + the chunk count), so reading the whole `live` object at
+    // body scope recomposed the entire Sleep screen on every HR tick. Collapse it to the two fields the
+    // note needs via a structural-equality snapshot: a 72→73 bpm tick produces an EQUAL snapshot and
+    // the body is NOT recomposed; it only recomposes when the backfilling state / chunk count actually
+    // changes. Mirrors the shipped Today liveSnap fix. Appearance-preserving.
     val live by vm.live.collectAsStateWithLifecycle()
+    val backfillNote by remember {
+        derivedStateOf {
+            val s = live
+            if (s.backfilling) s.syncChunksThisSession else null
+        }
+    }
 
     // Every recorded sleep BLOCK, oldest→newest — the hero's ◀/▶ chevrons walk this whole list,
     // including same-day naps / split sleep that `sleepSessionsMerged` collapses to one-per-night
@@ -143,8 +163,14 @@ fun SleepScreen(
     LaunchedEffect(days) {
         sleeps = runCatching {
             val now = System.currentTimeMillis() / 1000L
-            val imported = vm.repo.sleepSessions("my-whoop", 0L, now)
-            val computed = vm.repo.sleepSessions(vm.repo.computedDeviceId("my-whoop"), 0L, now)
+            // Read the ACTIVE-strap ∪ canonical "my-whoop" union (#814/#1008), not the canonical id
+            // alone: after a strap remove+re-add live nights land under the fresh "whoop-<uuid>" id, so
+            // a canonical-only read left this screen STUCK on the last pre-re-add night while every
+            // union-joined surface moved on (the #1014/#1009 stuck-sleep divergence, in the OTHER
+            // direction). Exact-duplicate (startTs, endTs) blocks recorded under both ids are dropped;
+            // naps/split blocks survive. Single-device installs collapse to one id, byte-identical.
+            val imported = vm.repo.sleepSessionsUnion(vm.activeStrapId, 0L, now)
+            val computed = vm.repo.computedSleepSessionsUnion(vm.activeStrapId, 0L, now)
             // Key by the LOCAL wake-day (#304), matching WhoopRepository.mergeSleep — a UTC key
             // mis-attributed a UTC+ user's early-morning wake to yesterday. REUSE the existing
             // dayString(ts, offsetSec) overload; do not add a new one (it clashes on the JVM).
@@ -160,6 +186,18 @@ fun SleepScreen(
         nightOffset = 0
     }
 
+    // #65: the transient UNDO banner shown after a suppressing delete. Holds the deleted SleepSession
+    // (which still carries its OWNING deviceId + userEdited), so Undo restores it into the original
+    // namespace and lifts the tombstone. Auto-cleared after ~7s by a keyed LaunchedEffect; a new delete
+    // replaces it. Mirrors the macOS SleepView sleepUndoBanner + WorkoutsView postLogNote idiom.
+    var sleepUndo by remember { mutableStateOf<SleepSession?>(null) }
+    LaunchedEffect(sleepUndo) {
+        if (sleepUndo != null) {
+            kotlinx.coroutines.delay(7_000)
+            sleepUndo = null
+        }
+    }
+
     // The user's LEARNED habitual midsleep (local time-of-day seconds), or null under the cold-start
     // threshold. Loaded from `vm.repo.habitualMidsleepSec` — the SAME value AnalyticsEngine.analyzeDay
     // threads into the daily total — and fed into the main-night selector so the hero, the naps split,
@@ -168,7 +206,9 @@ fun SleepScreen(
     // alongside `sleeps`. Mirrors iOS SleepView.habitualMidsleepSec. (#547)
     var habitualMidsleep by remember { mutableStateOf<Long?>(null) }
     LaunchedEffect(days) {
-        habitualMidsleep = runCatching { vm.repo.habitualMidsleepSec("my-whoop") }.getOrNull()
+        // Thread the ACTIVE strap id so the learner unions active + canonical nights (#814/#1008);
+        // habitualMidsleepSec resolves the canonical "my-whoop" sibling internally either way.
+        habitualMidsleep = runCatching { vm.repo.habitualMidsleepSec(vm.activeStrapId) }.getOrNull()
     }
 
     // Persisted per-epoch MOTION keyed by each session's detected startTs (#407). Loaded alongside
@@ -200,6 +240,11 @@ fun SleepScreen(
 
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+
+    // Day-cycle sky backdrop (#698). Default ON. When off, the screen drops the liquid sky and the
+    // scaffold paints the plain dark surface canvas instead — the SAME gate the liquid Today honours.
+    // SharedPreferences isn't reactive, so it's read once into local state (mirrors iOS @AppStorage).
+    val showDayCycleBackground = remember { NoopPrefs.showDayCycleBackground(context) }
 
     // Morning-journal nudge: once per calendar day, when the freshest night ended within the last
     // 12 hours, invite the user to log how they felt. The shown-day is persisted so the sheet never
@@ -298,6 +343,15 @@ fun SleepScreen(
     }
     val display = remember(model, night) { heroDisplay(model, night) }
 
+    // #940: ONE stage-less SELECTED day (typically the newest, after an impossible hand-edit staged
+    // it all-awake) must not hide the whole tab's history. The tiles / ledger / trends are
+    // full-history and independent of the browsed night (matching iOS, where browsing only
+    // re-points the hero), so when the selected day's model fails to build, anchor them to the
+    // newest stage-bearing day instead of vanishing. The HERO stays on `model`/`display` (an
+    // honest no-stage-data fallback for the bad day, edit pencil reachable). Null only when NO day
+    // has stage data: the true first-run empty state.
+    val tilesModel = remember(model, days, imported) { model ?: fallbackSleepModel(days, imported) }
+
     // Jump straight to a night by its (local) wake-day — the center date block opens a picker.
     // navDays is newest-day-first, so the day's index IS its offset (0 = last night). (#160, #59)
     val onPickNightDate: (LocalDate) -> Unit = { targetDate ->
@@ -306,24 +360,65 @@ fun SleepScreen(
         if (dayIdx >= 0) nightOffset = dayIdx
     }
 
-    ScreenScaffold(title = "Sleep", subtitle = "Last night, read in two seconds.") {
-        if (model == null && night == null) {
+    LazyScreenScaffold(
+        title = "Sleep",
+        subtitle = "Last night, read in two seconds.",
+        // LIQUID SKY BACKDROP (the pilot pattern — LiquidScreenSky.kt): the static time-of-day liquid sky
+        // settles into the theme canvas behind the header + hero, bled full-width up behind the status bar
+        // via the scaffold's topBackground plumbing. Gated on the day-cycle preference exactly like Today
+        // (showDayCycleBackground ? sky : plain canvas). Replaces the classic per-hero scene backdrop.
+        topBackground = if (showDayCycleBackground) { { LiquidScreenSky() } } else null,
+    ) {
+        // #65: the transient UNDO banner after a suppressing delete. Restores the deleted row into its
+        // ORIGINAL namespace + lifts the tombstone. Mirrors the macOS SleepView sleepUndoBanner.
+        sleepUndo?.let { deleted ->
+            item {
+                SleepUndoBanner(
+                    session = deleted,
+                    onUndo = {
+                        sleepUndo = null
+                        scope.launch {
+                            vm.undoDeleteSleepSession(deleted)
+                            // Re-read so the restored night reappears in the ◀/▶ browse. Same
+                            // active∪canonical union as the main loader (#814/#1008), so the undo
+                            // reload can't snap the browse back to a canonical-only night set.
+                            sleeps = runCatching {
+                                val now = System.currentTimeMillis() / 1000L
+                                vm.repo.sleepSessionsUnion(vm.activeStrapId, 0L, now) +
+                                    vm.repo.computedSleepSessionsUnion(vm.activeStrapId, 0L, now)
+                            }.getOrDefault(sleeps)
+                        }
+                    },
+                )
+            }
+        }
+        // #940: the empty state is ONLY for a truly empty history. A newest day that merely fails
+        // to merge (the phantom-edit shape) keeps the hero (night != null) and the full-history
+        // tiles (tilesModel != null), so intact older nights are never hidden behind "no nights".
+        if (tilesModel == null && night == null) {
             // While the strap is mid-offload, say so — "No nights" reads as final otherwise (#77).
-            if (live.backfilling) SyncingHistoryNote(chunks = live.syncChunksThisSession)
-            SleepEmptyState()
+            item {
+                if (backfillNote != null) SyncingHistoryNote(chunks = backfillNote!!)
+                SleepEmptyState()
+            }
         } else {
             // REST HERO — a scenic indigo backdrop with the night's sleep-performance score as a
             // layered BevelGauge (Rest gradient), else a big rounded hours-slept headline. Mirrors the
             // macOS SleepView.restHero. Presentation-only — reads the existing model figures. (Bevel)
-            RestHero(
-                score = model?.performance?.latest,
-                asleepMin = model?.stages?.asleep,
-                source = restHeroSource(imported, days),
-            )
-            Spacer(Modifier.height(Metrics.selectorTopUp))
+            // The score is a full-history latest (series.last), so it reads from `tilesModel` when
+            // the selected day's model failed to build (#940): real data over a zeroed gauge.
+            item {
+                RestHero(
+                    score = (model ?: tilesModel)?.performance?.latest,
+                    asleepMin = model?.stages?.asleep,
+                    source = restHeroSource(imported, days),
+                )
+            }
+            item { Spacer(Modifier.height(Metrics.selectorTopUp)) }
             // SLEEP MARKS — tap to log "going to sleep" / "I'm awake" (#461, Phase 1). LOGGING ONLY:
             // a mark is persisted to the `sleep_mark` series + the shareable strap log; it never
             // changes the detected sleep. Mirrors macOS SleepView.sleepMarkCard.
+            item {
             SleepMarkCard(
                 onMark = { type ->
                     val mark = SleepMark.now(type)
@@ -337,7 +432,9 @@ fun SleepScreen(
                     Toast.makeText(context, mark.confirmation(), Toast.LENGTH_SHORT).show()
                 },
             )
-            Spacer(Modifier.height(Metrics.selectorTopUp))
+            }
+            item { Spacer(Modifier.height(Metrics.selectorTopUp)) }
+            item {
             Hero(
                 display = display,
                 clock = night?.clockLabel ?: model?.clockLabel,
@@ -346,30 +443,50 @@ fun SleepScreen(
                 onNavigate = { nightOffset = it },
                 session = night?.session,
                 onUpdateTimes = { s, start, end ->
-                    // Optimistic: rewrite this session in `sleeps` so every metric recomputes
-                    // immediately, then persist DURABLY off the UI thread. Mirror the persist path —
-                    // keep the IMMUTABLE detected startTs and store the corrected onset in
-                    // startTsAdjusted with userEdited=true, so display (via effectiveStartTs) tracks the
-                    // edit while the (deviceId,startTs) key never moves. (PR #260 + #395)
-                    // Reclip stagesJSON in-memory so the hypnogram strip updates instantly (same
-                    // reclip logic runs again in WhoopRepository for the durable DB copy).
-                    sleeps = sleeps.map {
-                        if (it.deviceId == s.deviceId && it.startTs == s.startTs) {
-                            val reclipped = SleepWindowReclip.reclip(it.stagesJSON, it.effectiveStartTs, it.endTs, end)
-                            it.copy(startTsAdjusted = start, endTs = end, userEdited = true,
-                                    stagesJSON = reclipped ?: it.stagesJSON)
-                        } else {
-                            it
+                    // #940 belt-and-braces: never apply (optimistically OR durably) a future-ending
+                    // or inverted window, whatever the pickers produced. The editor's own guards
+                    // (cross-midnight auto-correct + the disjoint confirm) should make this
+                    // unreachable; sharing ONE safe window here keeps the in-memory copy and the DB
+                    // write in lockstep. Same rule as WhoopRepository.updateSleepSessionTimes.
+                    val safe = SleepEditGuard.clampedEditWindow(start, end, System.currentTimeMillis() / 1000L)
+                    if (safe != null) {
+                        val (safeStart, safeEnd) = safe
+                        // Optimistic: rewrite this session in `sleeps` so every metric recomputes
+                        // immediately, then persist DURABLY off the UI thread. Mirror the persist path —
+                        // keep the IMMUTABLE detected startTs and store the corrected onset in
+                        // startTsAdjusted with userEdited=true, so display (via effectiveStartTs) tracks the
+                        // edit while the (deviceId,startTs) key never moves. (PR #260 + #395)
+                        // Reclip stagesJSON in-memory so the hypnogram strip updates instantly (same
+                        // reclip logic runs again in WhoopRepository for the durable DB copy).
+                        sleeps = sleeps.map {
+                            if (it.deviceId == s.deviceId && it.startTs == s.startTs) {
+                                val reclipped = SleepWindowReclip.reclip(it.stagesJSON, it.effectiveStartTs, it.endTs, safeStart, safeEnd)
+                                it.copy(startTsAdjusted = safeStart, endTs = safeEnd, userEdited = true,
+                                        stagesJSON = reclipped ?: it.stagesJSON)
+                            } else {
+                                it
+                            }
                         }
+                        scope.launch { vm.updateSleepSessionTimes(s, safeStart, safeEnd) }
+                    } else {
+                        // The clamp refused a future/inverted window. Never drop an edit silently (the nap
+                        // pickers used to do exactly that): tell the user why nothing changed. (#940)
+                        Toast.makeText(
+                            context,
+                            "That time can't be saved (it lands in the future or ends before it starts).",
+                            Toast.LENGTH_SHORT,
+                        ).show()
                     }
-                    scope.launch { vm.updateSleepSessionTimes(s, start, end) }
                 },
                 onDeleteSession = { s ->
                     // Delete = the edit path minus the re-insert: drop this session from `sleeps`
                     // so every metric recomputes immediately as if the night were never recorded,
                     // then persist the removal off the UI thread. Lets the user clear a misread or
                     // spurious night. (#281)
+                    // #65: offer a transient UNDO. `s` still carries its owning deviceId + userEdited,
+                    // everything undo needs to restore it into the original namespace.
                     sleeps = sleeps.filterNot { it.deviceId == s.deviceId && it.startTs == s.startTs }
+                    sleepUndo = s
                     scope.launch { vm.deleteSleepSession(s) }
                 },
                 onAddNap = { startTs, endTs ->
@@ -380,8 +497,10 @@ fun SleepScreen(
                         vm.addManualNap(startTs, endTs)
                         sleeps = runCatching {
                             val now = System.currentTimeMillis() / 1000L
-                            val imported = vm.repo.sleepSessions("my-whoop", 0L, now)
-                            val computed = vm.repo.sleepSessions(vm.repo.computedDeviceId("my-whoop"), 0L, now)
+                            // Same active∪canonical union as the main loader (#814/#1008), so the
+                            // post-nap reload can't snap the browse back to a canonical-only night set.
+                            val imported = vm.repo.sleepSessionsUnion(vm.activeStrapId, 0L, now)
+                            val computed = vm.repo.computedSleepSessionsUnion(vm.activeStrapId, 0L, now)
                             fun localEndDay(ts: Long): String {
                                 val offsetSec = (java.util.TimeZone.getDefault().getOffset(ts * 1000) / 1000).toLong()
                                 return AnalyticsEngine.dayString(ts, offsetSec)
@@ -397,19 +516,35 @@ fun SleepScreen(
                 habitualMidsleepSec = habitualMidsleep,
                 motionEpochs = night?.groupMotion ?: emptyList(),
             )
-            if (model != null) {
-                Spacer(Modifier.height(Metrics.selectorTopUp))
-                MetricGrid(model, onMetricClick = { detailMetricKey = it })
-                Spacer(Modifier.height(Metrics.selectorTopUp))
-                SleepDebtLedgerCard(model.sleepDebtLedger)
-                Spacer(Modifier.height(Metrics.selectorTopUp))
-                StagesVsTypical(model)
-                Spacer(Modifier.height(Metrics.selectorTopUp))
-                DurationTrend(model)
-                Spacer(Modifier.height(Metrics.selectorTopUp))
-                HoursVsNeededCard(model)
-                Spacer(Modifier.height(Metrics.selectorTopUp))
-                SleepConsistencyCard(sleeps)
+            }
+            // Tiles / ledger / trends read the FULL-history model (#940): they stay up when only the
+            // selected day's model failed to build, exactly as iOS keeps them while browsing.
+            if (tilesModel != null) {
+                // Bind a non-null local so the smart-cast carries cleanly into each item {} lambda
+                // (a nullable val doesn't smart-cast across a lambda boundary). Same model, same order.
+                val m = tilesModel
+                item { Spacer(Modifier.height(Metrics.selectorTopUp)) }
+                item { MetricGrid(m, onMetricClick = { detailMetricKey = it }) }
+                item { Spacer(Modifier.height(Metrics.selectorTopUp)) }
+                item { SleepDebtLedgerCard(m.sleepDebtLedger) }
+                // StagesVsTypical describes ONE specific night's deep/REM/light minutes under the
+                // "Selected night" header, so it must read the SELECTED day's model, never the
+                // full-history fallback: when the selected day has no stage model (the phantom newest
+                // day), showing tilesModel here would label ANOTHER day's stages as this night (#940).
+                // Hide the card in that state (iOS shows the stub's honest zeros); MetricGrid/ledger/
+                // trends above/below stay on the full-history tilesModel exactly as before.
+                if (model != null) {
+                    // Bind a non-null local so the smart-cast carries into the item {} lambda.
+                    val selectedModel = model
+                    item { Spacer(Modifier.height(Metrics.selectorTopUp)) }
+                    item { StagesVsTypical(selectedModel) }
+                }
+                item { Spacer(Modifier.height(Metrics.selectorTopUp)) }
+                item { DurationTrend(m) }
+                item { Spacer(Modifier.height(Metrics.selectorTopUp)) }
+                item { HoursVsNeededCard(m) }
+                item { Spacer(Modifier.height(Metrics.selectorTopUp)) }
+                item { SleepConsistencyCard(sleeps) }
             }
         }
     }
@@ -430,7 +565,7 @@ private fun SleepMarkCard(onMark: (SleepMarkType) -> Unit) {
         NoopCard(tint = Palette.restColor) {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(
-                    "Tap when you're heading to bed or when you wake. Each tap is logged with the time — it doesn't change tonight's detected sleep.",
+                    "Tap when you're heading to bed or when you wake. Each tap is logged with the time. It doesn't change tonight's detected sleep.",
                     style = NoopType.footnote,
                     color = Palette.textTertiary,
                 )
@@ -465,13 +600,65 @@ private fun SleepMarkCard(onMark: (SleepMarkType) -> Unit) {
     }
 }
 
-// MARK: - 0. REST HERO — scenic backdrop + sleep-performance gauge (Bevel)
+/**
+ * #65: the transient UNDO strip after a suppressing sleep delete. A Rest-tinted card stating the window
+ * NOOP won't re-detect + a real Undo button. The banner auto-clears after ~7s (the caller's keyed
+ * LaunchedEffect); Undo restores the deleted row into its ORIGINAL namespace and lifts the tombstone.
+ * Mirrors the macOS SleepView.sleepUndoBanner (role-alert-ish, explicit Undo label).
+ */
+@Composable
+private fun SleepUndoBanner(session: SleepSession, onUndo: () -> Unit) {
+    val timeFmt = SimpleDateFormat("HH:mm", Locale.US)
+    // effectiveStartTs is the displayed onset (a userEdited night's corrected bed time), matching iOS.
+    val startText = timeFmt.format(java.util.Date(session.effectiveStartTs * 1000L))
+    val endText = timeFmt.format(java.util.Date(session.endTs * 1000L))
+    // Branch the copy on userEdited: a hand-edited/added (nap) night writes NO tombstone (it is never
+    // re-detected), so the suppression promise would be false for it. Only a DETECTED delete tombstones,
+    // so only it gets the "won't detect ... again" wording. Mirrors the macOS branch. (#65 banner honesty.)
+    val message = if (session.userEdited) {
+        "Sleep deleted."
+    } else {
+        "Sleep deleted. NOOP won't detect sleep between $startText and $endText again."
+    }
+    NoopCard(tint = Palette.restColor) {
+        Row(
+            modifier = Modifier.fillMaxWidth().semantics { contentDescription = message },
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text(
+                message,
+                style = NoopType.footnote,
+                color = Palette.textSecondary,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(
+                onClick = onUndo,
+                modifier = Modifier.semantics { contentDescription = "Undo sleep deletion" },
+            ) {
+                Text("Undo", style = NoopType.subhead, color = Palette.restColor)
+            }
+        }
+    }
+}
+
+// MARK: - Liquid hero tokens (the liquid Sleep restyle)
 //
-// The Rest world's opening: a scenic indigo [ScenicHeroBackground] with — when the night carries a
-// 0–100 sleep-performance score — a layered [BevelGauge] in the Rest gradient; else a big rounded
-// hours-slept headline over the same backdrop. A [SourceBadge] states whether the score is WHOOP's
-// own imported figure or NOOP's on-device estimate. Mirrors the macOS SleepView.restHero. The number
-// comes straight from the existing model figures — presentation-only.
+// The hero card the sleep-performance vessel floats on, ported from the liquid Today (TodayScreen.kt). The
+// fill is a translucent near-black (mock rgba(13,14,20,.80)) so the card floats OVER the day-of-sky and the
+// vessel + white count-up number stay crisp — the CARD does the contrast work, not a muted sky. Radius 26 +
+// a white@0.11 hairline give the frosted-glass edge. Same constants as the liquid Today heroCard.
+private val LIQUID_HERO_FILL: Color = Color(red = 13f / 255f, green = 14f / 255f, blue = 20f / 255f, alpha = 0.80f)
+private val LIQUID_HERO_RADIUS: Dp = 26.dp
+
+// MARK: - 0. REST HERO — liquid sky + sleep-performance vessel (liquid restyle)
+//
+// The Rest world's opening, restyled to the liquid pilot: a frosted translucent-black hero card floating on
+// the screen-level liquid sky (the scaffold's topBackground), carrying — when the night has a 0–100
+// sleep-performance score — a [LiquidVessel] filled to score/100 in the Rest colour with the number counting
+// up over it (the Today HeroScoreVessel idiom). No score → the big count-up hours-slept headline. A
+// [SourceBadge] states whether the score is WHOOP's imported figure or NOOP's on-device estimate. The
+// figures, fraction math and Rest tint are UNCHANGED from the BevelGauge this replaced — presentation-only.
 
 @Composable
 private fun RestHero(score: Double?, asleepMin: Double?, source: String) {
@@ -480,12 +667,13 @@ private fun RestHero(score: Double?, asleepMin: Double?, source: String) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(Metrics.cardRadius))
-                // A subtle night atmosphere sits behind the sleep hero ONLY (the Rest world's whisper:
-                // faint indigo wash + crescent moon + a few stars over the near-black canvas, no glow),
-                // clipped to the card. Mirrors the macOS SleepView.restHero .timeOfDayBackground(.night),
-                // replacing the heavier ScenicHeroBackground here. (Bevel)
-                .timeOfDayBackground(DayPart.Night),
+                // The liquid hero CARD: a translucent near-black that floats over the day-of-sky so the
+                // vessel + white count-up number stay crisp. Rounded 26 corner + a faint white hairline give
+                // the frosted-glass edge of the liquid Today heroCard (fill rgba(13,14,20,.80), stroke
+                // white@0.11). Replaces the per-hero night atmosphere (the sky now lives at screen level).
+                .clip(RoundedCornerShape(LIQUID_HERO_RADIUS))
+                .background(LIQUID_HERO_FILL)
+                .border(1.dp, Color.White.copy(alpha = 0.11f), RoundedCornerShape(LIQUID_HERO_RADIUS)),
         ) {
             Column(
                 modifier = Modifier.fillMaxWidth().padding(Metrics.space24),
@@ -493,20 +681,21 @@ private fun RestHero(score: Double?, asleepMin: Double?, source: String) {
                 verticalArrangement = Arrangement.spacedBy(Metrics.space14),
             ) {
                 if (score != null) {
-                    BevelGauge(
+                    // The sleep-performance score as a liquid VESSEL, filled to score/100 in the Rest colour
+                    // (the SAME recovery-colour scale the BevelGauge tipColor used), with the number counting
+                    // up over it. The vessel runs live (slosh + tilt) since a real value is loaded. Mirrors
+                    // the Today HeroScoreVessel.
+                    SleepHeroVessel(
                         fraction = (score / 100.0).coerceIn(0.0, 1.0),
-                        stops = Palette.restGradientStops,
-                        tipColor = Palette.restColor,
-                        numberText = "${score.roundToInt()}",
-                        captionText = "of 100",
-                        stateText = sleepScoreWord(score),
+                        value = score,
+                        tint = Palette.restColor,
                         diameter = 184.dp,
-                        lineWidth = 15.dp,
                     )
+                    Text(sleepScoreWord(score), style = NoopType.subhead, color = Palette.textSecondary)
                 } else {
                     // No 0–100 score for the night — lead with hours slept as a big rounded headline
-                    // whose minutes tick up on appear (the same count-up the scored hero's arc draws in
-                    // with). Mirrors the macOS SleepView.restHero CountUpText fallback.
+                    // whose minutes tick up on appear (the same count-up the scored hero rolls). Mirrors the
+                    // macOS SleepView.restHero CountUpText fallback.
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(Metrics.space4),
@@ -524,6 +713,37 @@ private fun RestHero(score: Double?, asleepMin: Double?, source: String) {
                 SourceBadge(text = source, tint = Palette.restColor)
             }
         }
+    }
+}
+
+/**
+ * The sleep-performance score as a liquid VESSEL with the value counting up over it — the liquid Sleep hero
+ * element, the Today `HeroScoreVessel` idiom. A [LiquidVessel] fills to [fraction] (0..1) in [tint], sized to
+ * [diameter]; over it a [CountUpText] rolls the number up to [value] (white, tabular, a soft shadow so it
+ * reads on the vessel). The number is hit-transparent (clearAndSetSemantics + no clickable) so a tap falls
+ * THROUGH to the vessel — LiquidVessel owns its own tap→splash+haptic. `animated = true`: a real score is
+ * always loaded when this is drawn (the no-score branch shows the hours headline instead).
+ */
+@Composable
+private fun SleepHeroVessel(fraction: Double, value: Double, tint: Color, diameter: Dp) {
+    Box(modifier = Modifier.size(diameter), contentAlignment = Alignment.Center) {
+        LiquidVessel(
+            value = fraction.coerceIn(0.0, 1.0),
+            tint = tint,
+            animated = true,
+            modifier = Modifier.size(diameter),
+        )
+        // Count-up number over the vessel — white, tabular, a soft shadow for legibility, hit-transparent so
+        // the tap reaches the vessel (splash). Size ≈ diameter × 0.27 (the Today 96→26 ratio), capped.
+        val numberSp = (diameter.value * 0.27f).coerceIn(20f, 52f)
+        CountUpText(
+            value = value,
+            format = { it.roundToInt().toString() },
+            style = NoopType.number(numberSp, weight = FontWeight.Bold)
+                .copy(shadow = Shadow(color = Color.Black.copy(alpha = 0.5f), offset = Offset(0f, 1f), blurRadius = 6f)),
+            color = Color.White,
+            modifier = Modifier.clearAndSetSemantics {},
+        )
     }
 }
 
@@ -813,7 +1033,7 @@ private fun NapRow(
     // with the Edit next-step. Inline disclosure (Compose has no anchored popover here); the COPY matches
     // iOS SleepView.whyPopover(napSuffix:) exactly. (spec 2026-06-20)
     var showWhy by remember(nap.startTs) { mutableStateOf(false) }
-    val window = "${clockTimeLabel(nap.effectiveStartTs)}–${clockTimeLabel(nap.endTs)}"
+    val window = "${clockTimeLabel(nap.effectiveStartTs)} - ${clockTimeLabel(nap.endTs)}"
     val durMin = (nap.endTs - nap.effectiveStartTs) / 60.0
     Column(verticalArrangement = Arrangement.spacedBy(Metrics.space10)) {
         Row(
@@ -886,7 +1106,17 @@ private fun NapRow(
                         set(Calendar.HOUR_OF_DAY, h); set(Calendar.MINUTE, m)
                         set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
                     }
-                    pendingStart = cal.timeInMillis / 1000L
+                    // #940 guard 1: the time-only picker keeps the nap's own calendar day, so rolling the
+                    // start EARLIER across midnight (00:20 -> 23:50) lands it in the future. Snap the date
+                    // back a day for the previous evening, exactly like the Add-nap path (no wake rule:
+                    // a nap start after the night's wake is normal). Without this the future window was
+                    // clamped to null downstream and the whole edit was silently dropped.
+                    pendingStart = SleepEditGuard.autoCorrectedBed(
+                        previousBedTs = nap.effectiveStartTs,
+                        candidateBedTs = cal.timeInMillis / 1000L,
+                        originalWakeTs = null,
+                        nowTs = System.currentTimeMillis() / 1000L,
+                    )
                     editingStart = false
                     editingEnd = true
                 },
@@ -980,12 +1210,15 @@ private fun StageBreakdownRow(stage: String, minutes: Double, total: Double, col
             maxLines = 1,
             modifier = Modifier.width(38.dp),
         )
-        // The NOOP signature: a segmented bar that counts up to the share-of-night fraction, tinted in
-        // the stage colour over the canonical inset track. Flat, crisp, no glow. Takes the remaining width.
-        PipBar(
-            value = (fraction * 100.0).toFloat(),
-            segments = 20,
+        // The stage's share-of-night as a liquid TUBE tinted in the stage colour — a genuine single-value
+        // progress bar (minutes / total), so it liquid-ifies cleanly. Posed static (animated = false): a
+        // hero card carries many stage rows, so a per-frame slosh per row isn't worth the cost — the tube
+        // reads as a filled liquid level, matching the pilot's non-hero tubes. Same fraction the % + the
+        // duration carry, so all three agree.
+        LiquidTube(
+            frac = fraction,
             tint = color,
+            animated = false,
             height = 8.dp,
             modifier = Modifier.weight(1f),
         )
@@ -1258,6 +1491,10 @@ private fun NightNavHeader(
     var editingBed by remember { mutableStateOf(false) }
     var editingWake by remember { mutableStateOf(false) }
     var showDatePicker by remember { mutableStateOf(false) }
+    // #940 guard 2: a corrected (start, end) window that no longer touches the night's recorded
+    // coverage parks here awaiting an explicit confirm; committing it silently fabricated an
+    // all-awake phantom night that hid the tab's history. null = nothing pending.
+    var pendingDisjointTimes by remember { mutableStateOf<Pair<Long, Long>?>(null) }
     // Manual nap add (#508): pick a start time, then an end time; both anchored to THIS night's wake day
     // so the new nap lands on the right day. napStartTs holds the chosen start between the two pickers.
     var addingNapStart by remember { mutableStateOf(false) }
@@ -1316,6 +1553,19 @@ private fun NightNavHeader(
         )
     }
 
+    // Commit funnel for BOTH time edits (#940): a corrected window that abandons the night's
+    // recorded coverage (detected onset ... current wake) has no data to stage from, so it parks
+    // behind an explicit confirm instead of silently creating an all-awake phantom night. An
+    // in-coverage window commits straight through, exactly as before.
+    fun commitTimes(s: SleepSession, newStart: Long, newEnd: Long) {
+        val coverageStart = minOf(s.startTs, s.effectiveStartTs)
+        if (SleepEditGuard.isDisjoint(newStart, newEnd, coverageStart, s.endTs)) {
+            pendingDisjointTimes = newStart to newEnd
+        } else {
+            onUpdateTimes(s, newStart, newEnd)
+        }
+    }
+
     // Bed-time picker — keeps the original calendar date, only moves the hour/minute. Pre-fills from
     // the EFFECTIVE onset so re-editing an already-corrected night starts from the edited bedtime, and
     // the new onset is passed through onUpdateTimes (which stores it in startTsAdjusted). (PR #395)
@@ -1329,7 +1579,18 @@ private fun NightNavHeader(
                         timeInMillis = session.effectiveStartTs * 1000L
                         set(Calendar.HOUR_OF_DAY, h); set(Calendar.MINUTE, m)
                     }
-                    onUpdateTimes(session, cal.timeInMillis / 1000L, session.endTs)
+                    // #940 guard 1: keeping the original DATE means rolling the time back across
+                    // midnight (01:06 -> 23:00) lands the bed AFTER the wake / in the future: the
+                    // reporter's "phantom night". A roll past the wake or past the clock almost
+                    // always means the previous evening; snap the date back a day. Pure rule +
+                    // tests: SleepEditGuard (Swift twin in StrandAnalytics).
+                    val bedTs = SleepEditGuard.autoCorrectedBed(
+                        previousBedTs = session.effectiveStartTs,
+                        candidateBedTs = cal.timeInMillis / 1000L,
+                        originalWakeTs = session.endTs,
+                        nowTs = System.currentTimeMillis() / 1000L,
+                    )
+                    commitTimes(session, bedTs, session.endTs)
                     editingBed = false
                 },
                 startCal.get(Calendar.HOUR_OF_DAY),
@@ -1366,8 +1627,9 @@ private fun NightNavHeader(
                         if (timeInMillis / 1000L <= bedTs) add(Calendar.DAY_OF_MONTH, 1)
                     }
                     // Pass the EFFECTIVE onset so a wake-only edit preserves a previously-edited
-                    // bedtime (startTsAdjusted) rather than resetting it to the detected startTs. (PR #395)
-                    onUpdateTimes(session, bedTs, cal.timeInMillis / 1000L)
+                    // bedtime (startTsAdjusted) rather than resetting it to the detected startTs.
+                    // (PR #395; routed through the #940 disjoint-confirm funnel like the bed edit.)
+                    commitTimes(session, bedTs, cal.timeInMillis / 1000L)
                     editingWake = false
                 },
                 endCal.get(Calendar.HOUR_OF_DAY),
@@ -1417,7 +1679,16 @@ private fun NightNavHeader(
                         set(Calendar.HOUR_OF_DAY, h); set(Calendar.MINUTE, m)
                         set(Calendar.SECOND, 0); set(Calendar.MILLISECOND, 0)
                     }
-                    napStartTs = cal.timeInMillis / 1000L
+                    // #940: a nap being logged already happened. The anchor day is the night's wake
+                    // day (usually today), so a picked time later than the clock means the most
+                    // recent PAST occurrence: snap back a day (no wake rule here; a nap after the
+                    // night's wake is normal).
+                    napStartTs = SleepEditGuard.autoCorrectedBed(
+                        previousBedTs = anchorTs,
+                        candidateBedTs = cal.timeInMillis / 1000L,
+                        originalWakeTs = null,
+                        nowTs = System.currentTimeMillis() / 1000L,
+                    )
                     addingNapStart = false
                     addingNapEnd = true
                 },
@@ -1459,6 +1730,36 @@ private fun NightNavHeader(
             dialog.show()
             onDispose { runCatching { dialog.dismiss() } }
         }
+    }
+
+    // #940 guard 2's consent step: the corrected window no longer touches the night's recorded
+    // coverage, so there is nothing to stage it from. Same wording as the iOS SleepTimeEditor alert.
+    val pendingTimes = pendingDisjointTimes
+    if (pendingTimes != null && session != null) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { pendingDisjointTimes = null },
+            containerColor = Palette.surfaceRaised,
+            titleContentColor = Palette.textPrimary,
+            textContentColor = Palette.textSecondary,
+            title = { Text("Move this sleep?", style = NoopType.headline) },
+            text = {
+                Text(
+                    "This moves the night to a time with no recorded data. Stages can't be derived there, so it may show as empty until data covers it.",
+                    style = NoopType.subhead,
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    onUpdateTimes(session, pendingTimes.first, pendingTimes.second)
+                    pendingDisjointTimes = null
+                }) { Text("Move anyway", style = NoopType.subhead, color = Palette.statusWarning) }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingDisjointTimes = null }) {
+                    Text("Cancel", style = NoopType.subhead, color = Palette.textSecondary)
+                }
+            },
+        )
     }
 
     val nightLabel = when (offset) {
@@ -1539,6 +1840,18 @@ private fun NightNavHeader(
                 )
             }
         }
+        // When the older-night arrow is disabled because no earlier night is banked yet, the chevron
+        // just greying out reads as broken. Show a short, honest hint instead — earlier nights only
+        // appear once the strap has offloaded them (typically the next morning sync). (#614 follow-up)
+        if (!canGoOlder) {
+            Text(
+                "No earlier night stored yet. Earlier nights sync in the morning.",
+                style = NoopType.footnote,
+                color = Palette.textTertiary,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
     }
 
     // Confirm before removing the night — the same on-brand AlertDialog the time-edit chooser
@@ -1551,8 +1864,14 @@ private fun NightNavHeader(
             textContentColor = Palette.textSecondary,
             title = { Text("Delete this sleep session?", style = NoopType.headline) },
             text = {
+                // A detected night is tombstoned so it won't re-detect; a userEdited/nap row writes no
+                // tombstone, so its copy drops that (false) promise. Mirrors the undo banner. (#65)
                 Text(
-                    "Removes this recorded sleep and recomputes the day without it. This can't be undone.",
+                    if (session.userEdited) {
+                        "Removes this sleep and recomputes the day without it. You can undo for a few seconds after."
+                    } else {
+                        "Removes this recorded sleep and recomputes the day without it. NOOP won't re-detect sleep in this window. You can undo for a few seconds after."
+                    },
                     style = NoopType.subhead,
                 )
             },
@@ -1695,7 +2014,7 @@ internal fun SleepDebtLedgerCard(ledger: SleepDebtLedger) {
         NoopCard(padding = Metrics.cardPadding, tint = Palette.restColor) {
             if (ledger.nightCount == 0) {
                 Text(
-                    "No nights with sleep data yet — your ledger fills in as you wear the strap to bed.",
+                    "No nights with sleep data yet. Your ledger fills in as you wear the strap to bed.",
                     style = NoopType.subhead,
                     color = Palette.textTertiary,
                 )
@@ -2074,8 +2393,17 @@ private fun SparkTile(
     sparkColor: Color,
     onClick: (() -> Unit)? = null,
 ) {
-    val clickMod = if (onClick != null) modifier.height(Metrics.tileHeight).clickable(onClick = onClick)
-        else modifier.height(Metrics.tileHeight)
+    // liquidPress on the tappable tile: it settles inward on press (the pilot's card feel). The SAME
+    // interactionSource drives the clickable + the press; indication = null so only the liquid settle shows.
+    val interaction = remember { MutableInteractionSource() }
+    val clickMod = if (onClick != null) {
+        modifier
+            .height(Metrics.tileHeight)
+            .liquidPress(interaction)
+            .clickable(interactionSource = interaction, indication = null, onClick = onClick)
+    } else {
+        modifier.height(Metrics.tileHeight)
+    }
     NoopCard(modifier = clickMod, padding = Metrics.space14) {
         Column(modifier = Modifier.fillMaxWidth()) {
             Overline(label)
@@ -2253,27 +2581,44 @@ internal fun selectNight(
     val groupStarts = group.map { it.startTs }.toHashSet()
     val napBlocks = blocks.filter { it.startTs !in groupStarts }
         .sortedBy { it.effectiveStartTs }
+    // Drop a spurious leading pre-sleep awake stub from the hero's RECONSTRUCTION so the hypnogram and the
+    // summed minutes start where the displayed bedtime (the main block's onset) does (#736). A night can
+    // record a brief, all-awake pre-onset block (e.g. lying in bed before sleep); the gap-bridge folds it
+    // into the group, so the chart drew sleep beginning before the labelled "Asleep" time. We only drop a
+    // BRIEF, essentially-sleepless leading fragment that also sits before the main block, so a genuine first
+    // sleep fragment of an interrupted/biphasic night is never lost. The stub still rides in `groupStarts`
+    // above, so it is never mislabelled as a nap. `session` (the edit anchor) is already the main block, so
+    // the bedtime label and the pencil were aligned — this aligns the chart to that same bedtime. (#736/#555)
+    val onsetTsForHero = session.effectiveStartTs
+    val heroGroup = group.dropWhile { it.effectiveStartTs < onsetTsForHero && isPreOnsetAwakeStub(it) }
     val utcKey = AnalyticsEngine.dayString(session.endTs)
     val localKey = localDayString(session.endTs)
     val dayKey = listOf(utcKey, localKey).firstOrNull { key ->
         days.any { it.day == key && (it.deepMin ?: 0.0) + (it.remMin ?: 0.0) + (it.lightMin ?: 0.0) > 0.0 }
     } ?: utcKey
     // Lay every fragment's persisted segments end-to-end so a biphasic night draws as one continuous
-    // hypnogram, and SUM their stage minutes for the hero. Null for a single-block day → prior behaviour.
-    val groupSegments = if (group.size > 1) {
-        group.flatMap { parsePersistedSegments(it.stagesJSON).orEmpty() }
+    // hypnogram, and SUM their stage minutes for the hero. Built from `heroGroup` (the group minus a leading
+    // spurious stub, #736) so the chart and minutes start at the displayed bedtime. Null for a single-block
+    // hero → prior behaviour.
+    val groupSegments = if (heroGroup.size > 1) {
+        heroGroup.flatMap { parsePersistedSegments(it.stagesJSON).orEmpty() }
             .sortedBy { it.start }
             .takeIf { it.size >= 2 }
     } else null
-    val groupStages = if (group.size > 1) sumGroupStages(group) else null
+    val groupStages = if (heroGroup.size > 1) sumGroupStages(heroGroup) else null
     val segments = (groupSegments ?: parsePersistedSegments(session.stagesJSON))
         ?.map { seg -> seg.stage to ((seg.end - seg.start) / 60f) }
-    // #407: lay the GROUP's per-epoch motion fragment-by-fragment in `group` order (the same order
+    // #407: lay the GROUP's per-epoch motion fragment-by-fragment in `heroGroup` order (the same order
     // `groupSegments` lays the stage timeline), reading the already-chosen group's stored series. The
     // detected key (`startTs`) is the motion store's key. A fragment with no series contributes nothing; if
     // NO fragment has one, `groupMotion` is empty → honest empty state.
-    val groupMotion = group.flatMap { motionByStart[it.startTs].orEmpty() }
-    return HeroNight(session, dayKey, segments, sessionClockLabel(session), napBlocks, groupStages,
+    val groupMotion = heroGroup.flatMap { motionByStart[it.startTs].orEmpty() }
+    // #736 parity: the displayed bedtime must match where the hypnogram starts. The chart is built from
+    // heroGroup (first non-stub fragment onward), so label from THAT fragment's onset (mirrors Swift
+    // nightOnsetTs / synth.startTs), closed by the group's latest wake. `session` stays the edit anchor only.
+    val heroOnsetTs = heroGroup.firstOrNull()?.effectiveStartTs ?: session.effectiveStartTs
+    val heroWakeTs = heroGroup.maxOfOrNull { it.endTs } ?: session.endTs
+    return HeroNight(session, dayKey, segments, clockLabelFor(heroOnsetTs, heroWakeTs), napBlocks, groupStages,
         groupSegments, groupMotion)
 }
 
@@ -2317,6 +2662,29 @@ internal fun mainSleepGroup(blocks: List<SleepSession>, habitualMidsleepSec: Lon
         habitualMidsleepSec,
     ) ?: return emptyList()
     return idx.map { blocks[it] }.sortedBy { it.effectiveStartTs }
+}
+
+/** Longest a leading block can be and still be treated as a spurious pre-sleep awake stub (lying in bed
+ *  before sleep). Generous (a few hours) because the reporter's stub ran 21:41 → 00:27 — ~2h45m of pre-sleep
+ *  awake — so a tight cap missed it (#736). The real guard against swallowing a genuine first sleep fragment
+ *  is [PRE_ONSET_STUB_ASLEEP_MAX_MIN]: a stub must be essentially SLEEPLESS. Mirrors iOS
+ *  SleepView.preOnsetStubMaxMin. (#736) */
+private const val PRE_ONSET_STUB_MAX_MIN = 240.0
+/** Most asleep minutes a fragment can carry and still count as a (sleepless) pre-onset awake stub. A real
+ *  first sleep fragment of a biphasic night carries far more. Mirrors iOS SleepView.preOnsetStubAsleepMaxMin.
+ *  (#736) */
+private const val PRE_ONSET_STUB_ASLEEP_MAX_MIN = 3.0
+
+/** A fragment is a spurious pre-onset awake stub when it is within the lie-in cap (<= [PRE_ONSET_STUB_MAX_MIN])
+ *  and carries essentially no sleep (asleep minutes <= [PRE_ONSET_STUB_ASLEEP_MAX_MIN]). Used only to skip such
+ *  a stub when it leads the main-night group, so the hero's hypnogram and minutes start at the displayed
+ *  bedtime (the main block's onset) rather than before it. Mirrors iOS SleepView.isPreOnsetAwakeStub. (#736) */
+internal fun isPreOnsetAwakeStub(frag: SleepSession): Boolean {
+    val spanMin = (frag.endTs - frag.effectiveStartTs) / 60.0
+    if (spanMin > PRE_ONSET_STUB_MAX_MIN) return false
+    val stages = parseSessionStages(frag.stagesJSON)
+    val asleepMin = stages?.let { it.light + it.deep + it.rem } ?: 0.0
+    return asleepMin <= PRE_ONSET_STUB_ASLEEP_MAX_MIN
 }
 
 /** SUM the per-stage minutes across a bridged main-night group, so the hero's stage breakdown reflects the
@@ -2582,6 +2950,24 @@ internal fun buildSleepModel(
     )
 }
 
+/**
+ * #940 no-blank fallback: one impossible/stage-less SELECTED day (typically the newest, after a bad
+ * hand-edit staged it all-awake) must not hide the whole tab's full-history surfaces. Re-anchor the
+ * model to the newest day that HAS stage minutes; the tiles / ledger / trends it feeds are
+ * full-history by construction, so this only changes which day supplies the hero-independent
+ * anchor. Null only when NO day carries stage data (the true first-run empty state). Internal so
+ * SleepPhantomNightFallbackTest can pin the rule. Mirrors iOS buildModel's stage-less stub fallback.
+ */
+internal fun fallbackSleepModel(
+    days: List<DailyMetric>,
+    imported: ImportedSleepSeries = ImportedSleepSeries(),
+): SleepModel? {
+    val anchorDay = days.lastOrNull {
+        (it.deepMin ?: 0.0) + (it.remMin ?: 0.0) + (it.lightMin ?: 0.0) > 0.0
+    }?.day ?: return null
+    return buildSleepModel(days, null, imported, selectedDay = anchorDay)
+}
+
 /** Build a metric from a per-day transform, keeping only finite values. */
 private fun metric(days: List<DailyMetric>, transform: (DailyMetric) -> Double?): Metric {
     val series = days.mapNotNull(transform).filter { it.isFinite() }
@@ -2645,7 +3031,7 @@ private fun pctValue(v: Double?): String = v?.let { "${it.roundToInt()}%" } ?: "
 
 /** "+12% vs typical" / "−0.4 rpm vs typical" — the latest-vs-mean caption every tile carries. */
 private fun vsTypical(latest: Double?, typical: Double?, suffix: String, decimals: Int = 0): String {
-    if (latest == null || typical == null || typical == 0.0) return "vs typical —"
+    if (latest == null || typical == null || typical == 0.0) return "vs typical - "
     val diff = latest - typical
     val sign = if (diff >= 0) "+" else "−"
     val mag = abs(diff)
@@ -2687,13 +3073,13 @@ private fun debtRead(ledger: SleepDebtLedger): String {
     val nights = ledger.nightCount
     val span = "the last $nights night${if (nights == 1) "" else "s"}"
     if (ledger.magnitudeMin < SleepDebt.ON_TARGET_BAND_MIN) {
-        return "You're roughly on top of your sleep across $span — slept minutes balance out against your need."
+        return "You're roughly on top of your sleep across $span. Slept minutes balance out against your need."
     }
     val mag = durationText(ledger.magnitudeMin)
     return if (ledger.isDebt) {
-        "You've banked about $mag of sleep debt over $span. Surplus nights count back against it — an earlier night or two would clear it."
+        "You've banked about $mag of sleep debt over $span. Surplus nights count back against it. An earlier night or two would clear it."
     } else {
-        "You're carrying about $mag of surplus over $span — you've slept past your need on balance. Nicely ahead."
+        "You're carrying about $mag of surplus over $span. You've slept past your need on balance. Nicely ahead."
     }
 }
 
@@ -2739,12 +3125,16 @@ private fun clockLabel(latest: DailyMetric, session: SleepSession?): String {
 }
 
 /** "Wed 4 Jun · 22:50–06:48" — the night-nav header's date · onset–wake line. (#160) */
-private fun sessionClockLabel(session: SleepSession): String {
+private fun sessionClockLabel(session: SleepSession): String =
+    clockLabelFor(session.effectiveStartTs, session.endTs) // EFFECTIVE onset so an edited bedtime shows (PR #395)
+
+/** Same date · onset–wake line from explicit unix-second bounds (the #736 group-aligned bedtime). */
+private fun clockLabelFor(onsetTs: Long, wakeTs: Long): String {
     val timeFmt = SimpleDateFormat("HH:mm", Locale.US)
     val dateFmt = SimpleDateFormat("EEE d MMM", Locale.US)
-    val onset = Date(session.effectiveStartTs * 1000L) // EFFECTIVE onset so an edited bedtime shows (PR #395)
-    val wake = Date(session.endTs * 1000L)
-    return "${dateFmt.format(onset)} · ${timeFmt.format(onset)}–${timeFmt.format(wake)}"
+    val onset = Date(onsetTs * 1000L)
+    val wake = Date(wakeTs * 1000L)
+    return "${dateFmt.format(onset)} · ${timeFmt.format(onset)} - ${timeFmt.format(wake)}"
 }
 
 /** Unix seconds → "YYYY-MM-DD" in the DEVICE timezone (vs AnalyticsEngine.dayString = UTC). */
@@ -3086,7 +3476,11 @@ private fun buildSleepMetricPoints(days: List<DailyMetric>, key: String): List<P
     val needMin = max(450.0, days.mapNotNull { it.totalSleepMin?.takeIf { m -> m > 0.0 } }.average().let { if (it.isNaN()) 480.0 else it })
     return days.mapNotNull { d ->
         val v: Double? = when (key) {
-            "performance" -> d.totalSleepMin?.takeIf { it > 0.0 && needMin > 0.0 }?.let { minOf(100.0, it / needMin * 100.0) }
+            // The Rest detail graph reads the REAL resolved Rest composite per day — the same single
+            // source of truth the Today Rest score uses (RestScorer.restFromDaily, the composite the
+            // sleep_performance series carries) — not a local hours-vs-need approximation. Keeps the
+            // graph and the score in agreement. (#614 follow-up)
+            "performance" -> com.noop.analytics.RestScorer.restFromDaily(d)?.takeIf { it in 0.0..100.0 }
             "efficiency"  -> d.efficiency?.let { if (it <= 1.0) it * 100.0 else it }
             "consistency" -> {
                 val idx = days.indexOf(d)
@@ -3159,7 +3553,7 @@ private fun SleepMetricDetailSheetContent(vm: AppViewModel, key: String) {
                 label = { it.label },
                 onSelect = { range = it },
             )
-            Text("Not enough history in this range — try 3M, 6M, or ALL.", style = NoopType.subhead, color = Palette.textSecondary)
+            Text("Not enough history in this range. Try 3M, 6M, or ALL.", style = NoopType.subhead, color = Palette.textSecondary)
             Spacer(Modifier.height(Metrics.space16))
         } else {
             val values = filteredPoints.map { it.second }

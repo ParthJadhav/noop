@@ -8,7 +8,7 @@ import WhoopStore
 //
 // The headline "interrogate what affects what" screen. Two halves:
 //
-//  1. BEHAVIOUR EFFECTS — split your logged journal answers (Alcohol, Caffeine,
+//  1. BEHAVIOUR EFFECTS, split your logged journal answers (Alcohol, Caffeine,
 //     Late meal, Meditation…) into the days each behaviour WAS logged vs NOT, then
 //     compare a chosen outcome metric (Recovery / HRV / Sleep performance / RHR)
 //     between the two groups. Ranked by effect size (Cohen's d) with significant
@@ -17,7 +17,7 @@ import WhoopStore
 //     Tint is sign-aware: a behaviour that moves the outcome the "good" way
 //     (respecting higherIsBetter) is positive/green, the "bad" way is critical/red.
 //
-//  2. METRIC RELATIONSHIPS — a curated set of Pearson correlations between daily
+//  2. METRIC RELATIONSHIPS, a curated set of Pearson correlations between daily
 //     series (sleep ↔ recovery, today's strain ↔ next-day recovery via a 1-day lag,
 //     HRV ↔ recovery, RHR ↔ recovery), each rendered as a one-line insight with r
 //     and a plain-English reading of strength + direction.
@@ -26,10 +26,41 @@ import WhoopStore
 // view only loads the series, shapes them, and presents. Empty state via ComingSoon
 // when there is no journal data to interrogate.
 
+/// `.task(id:)` key for the Insights journal load: the data-refresh sequence plus today's day-key, so the
+/// load re-runs both on a data change and on a calendar-day rollover (#860 item 4).
+private struct InsightsLoadKey: Equatable {
+    let seq: Int
+    let dayKey: String
+}
+
+/// #833 (Insights freeze): the snapshot InsightsView.load() builds, parked on the long-lived Repository so a
+/// re-mount (macOS keys the NavigationSplitView detail with `.id`, so every sidebar switch cold-mounts the
+/// screen) can RESTORE it in-memory instead of re-running the full history read on the @MainActor. The exact
+/// twin of Today's `TodayHistoryWideCache` for #849; holds load()'s six computed outputs. Consumed only when
+/// the seq AND the dayKey still match (see `Repository.insightsLoadedSeq` / `insightsLoadedDayKey`).
+struct InsightsLoadCache {
+    let behaviours: [String: Set<String>]
+    let importedQuestions: [String]
+    let dayAnswers: [String: Bool]
+    /// The journal day offset the `dayAnswers` were read for (0 = today, 1 = yesterday, -1 = tomorrow). The
+    /// restore guards on it so a re-mount, which resets `journalDayOffset` to 0, only reuses the cache when
+    /// the cached answers match that reset day, otherwise it falls through to a fresh read (#833).
+    let journalDayOffset: Int
+    let outcomeByKey: [String: [String: Double]]
+    let seriesByKey: [String: [(day: String, value: Double)]]
+    let activityCosts: [ActivityCost]
+    /// #322: per-question numeric journal series (question → [day: value]) for numeric journal items
+    /// (e.g. "caffeine mg", "alcohol units"). A numeric series feeds the same effect ranker the metric
+    /// outcomes do, so a numeric behaviour can rank in Insights. Empty for a yes/no-only journal.
+    let numericJournalByKey: [String: [String: Double]]
+}
+
 struct InsightsView: View {
     @EnvironmentObject var repo: Repository
     /// Deep-link into the v5 "What moves you" hub (the n-of-1 ranked-effect + dose-response surface).
     @EnvironmentObject var router: NavRouter
+    /// #860 item 4: foreground signal for the day-rollover re-load (see `currentDayKey`).
+    @Environment(\.scenePhase) private var scenePhase
 
     // MARK: Selected outcome (segmented)
 
@@ -41,9 +72,9 @@ struct InsightsView: View {
         /// Short segment label.
         var label: String {
             switch self {
-            case .recovery: return "Charge"
+            case .recovery: return String(localized: "Charge")
             case .hrv:      return "HRV"
-            case .sleep:    return "Rest"
+            case .sleep:    return String(localized: "Rest")
             case .rhr:      return "RHR"
             }
         }
@@ -59,10 +90,10 @@ struct InsightsView: View {
         /// The human outcome name used by BehaviorInsights.sentence.
         var outcomeName: String {
             switch self {
-            case .recovery: return "Charge"
+            case .recovery: return String(localized: "Charge")
             case .hrv:      return "HRV"
-            case .sleep:    return "Rest"
-            case .rhr:      return "Resting HR"
+            case .sleep:    return String(localized: "Rest")
+            case .rhr:      return String(localized: "Resting HR")
             }
         }
         /// Whether a higher value is the "good" direction (drives tint).
@@ -72,7 +103,7 @@ struct InsightsView: View {
             case .rhr:                    return false
             }
         }
-        /// The Bevel colour world each outcome belongs to — Charge→green, HRV→Rest
+        /// The Bevel colour world each outcome belongs to, Charge→green, HRV→Rest
         /// (periwinkle, the HRV world), Rest→indigo, RHR→Stress (teal). Drives the
         /// section's domain accent + the segmented selection's wash.
         var domain: DomainTheme {
@@ -94,16 +125,16 @@ struct InsightsView: View {
         var id: Int { rawValue }
         var label: String {
             switch self {
-            case .oneWeek:  return "7d"
-            case .twoWeeks: return "14d"
-            case .fourWeeks: return "28d"
+            case .oneWeek:  return String(localized: "7d")
+            case .twoWeeks: return String(localized: "14d")
+            case .fourWeeks: return String(localized: "28d")
             }
         }
     }
 
     @State private var outcome: Outcome = .recovery
 
-    // MARK: Personal-experiment state (LOCAL ONLY — UserDefaults-backed, single user)
+    // MARK: Personal-experiment state (LOCAL ONLY, UserDefaults-backed, single user)
     //
     // A running n-of-1 plan: one behaviour, one outcome, a short window. All five
     // keys mirror the Android SharedPreferences keys (InsightsScreen.kt) for parity.
@@ -113,7 +144,7 @@ struct InsightsView: View {
     @AppStorage("noop.experiment.durationDays") private var experimentDurationDays = ExperimentLength.twoWeeks.rawValue
     @AppStorage("noop.experiment.baselineDays") private var experimentBaselineDays = ExperimentLength.twoWeeks.rawValue
 
-    /// The journal catalog — read for `hiddenQuestions` so a behaviour the user has
+    /// The journal catalog, read for `hiddenQuestions` so a behaviour the user has
     /// hidden never resurfaces as an eligible experiment candidate (triage fix b).
     @StateObject private var catalog = JournalCatalogStore()
 
@@ -125,13 +156,18 @@ struct InsightsView: View {
     @State private var outcomeByKey: [String: [String: Double]] = [:]
     /// outcome key → ordered (day, value) series for correlations.
     @State private var seriesByKey: [String: [(day: String, value: Double)]] = [:]
+    /// #322: numeric journal item (question) → [day: value]. A numeric journal series is a daily
+    /// series the effect ranker can consume exactly like a metric series (it already ranks metrics),
+    /// so "caffeine mg" / "alcohol units" can rank as a numeric outcome in Insights. Empty for a
+    /// yes/no-only journal.
+    @State private var numericJournalByKey: [String: [String: Double]] = [:]
     @State private var loaded = false
 
     // MARK: Memoized derived state
     //
     // The ranking and correlations are expensive (BehaviorInsights.rank +
     // four Pearson correlations) and were previously recomputed inside `body`
-    // on EVERY render — including hover/animation/1Hz HR ticks. Cache them in
+    // on EVERY render, including hover/animation/1Hz HR ticks. Cache them in
     // @State and recompute only when their inputs change.
 
     /// Ranked behaviour effects for the current outcome, recomputed via
@@ -151,40 +187,60 @@ struct InsightsView: View {
 
     /// Distinct imported question strings, so the card adopts the export's exact wording.
     @State private var importedQuestions: [String] = []
-    /// The selected day's native answers (question → answeredYes) — drives the chip state.
+    /// The selected day's native answers (question → answeredYes), drives the chip state.
     @State private var dayAnswers: [String: Bool] = [:]
+    /// The selected day's native numeric values (question → value), drives the numeric fields (#322).
+    @State private var dayNumeric: [String: Double] = [:]
     /// -1 = tomorrow (log ahead), 0 = today, 1 = yesterday (late logging).
     @State private var journalDayOffset = 0
+    /// #860 item 4: today's local calendar-day key, captured on appear and refreshed on foreground. The
+    /// journal day chips ("Today"/"Yesterday"/"Tomorrow") are relative to the CURRENT date, but the
+    /// answers (`dayAnswers`) and the resolved day key are derived from `Date()` only inside `load()`,
+    /// which re-runs on `repo.refreshSeq`. A day can pass with the screen alive and no data refresh (the
+    /// app simply backgrounded overnight), so without re-keying on this the previous day's answers stayed
+    /// pinned under "Today" instead of the new day starting blank. Folding it into the `.task(id:)` key
+    /// re-runs the load the moment the date rolls over, so "Today" always resolves to the live day and
+    /// prior answers move to their real date. Local CALENDAR day (matches the journal's `localDayKey`).
+    @State private var currentDayKey = Repository.localDayKey(Date())
 
     var body: some View {
-        ScreenScaffold(title: "Insights", subtitle: "Interrogate what affects what.") {
+        ScreenScaffold(title: "Insights", subtitle: "Interrogate what affects what.",
+                       // PERF (scroll): lazy column, byte-identical layout (LazyVStack == eager VStack
+                       // alignment/spacing/header). The content is one inner eager VStack, so any nested
+                       // staggered reveals are unchanged; this only defers building that stack on scroll-in.
+                       lazy: true,
+                       // Liquid finish: the same full-bleed day-of-sky backdrop Today + the other liquid
+                       // tabs carry, so Insights sits in one atmosphere ("the options change, not the page").
+                       // Static + non-interactive; the cards below sit on the opaque canvas and stay legible.
+                       topBackground: liquidScaffoldSky()) {
             if !loaded {
                 ComingSoon(what: "Reading your journal and outcomes…")
             } else {
                 VStack(alignment: .leading, spacing: NoopMetrics.sectionSpacing) {
-                    // v5: a single row into the "What moves you" hub — the lag-aware ranked-effect feed
+                    // v5: a single row into the "What moves you" hub, the lag-aware ranked-effect feed
                     // + alcohol/caffeine dose-response. Reachable as its own destination too; this is the
                     // honest in-Insights entry point.
                     whatMovesYouLink
-                    // Native logging — always reachable: the account-free way into Insights.
+                    // Native logging, always reachable: the account-free way into Insights.
                     JournalLogCard(importedQuestions: importedQuestions,
                                    answers: dayAnswers,
+                                   numericAnswers: dayNumeric,
                                    dayOffset: $journalDayOffset,
                                    onChanged: { Task { await load() } })
-                    // Mind — daily mood check-in + mood↔body correlations.
+                    // Mind, daily mood check-in + mood↔body correlations.
                     // Self-contained (owns its own load/state); sits with the
                     // journal card so the two daily-logging surfaces read as one
                     // "log today" block above the derived insights.
                     MindSection()
-                    // Caffeine window (#526) — log an intake + a rough on-device "still active" hint.
+                    // Caffeine window (#526), log an intake + a rough on-device "still active" hint.
                     // Self-contained (owns its own UserDefaults-backed store); sits in the same
                     // "log today" block. Opt-in: shows nothing until the user logs an intake.
                     CaffeineLogCard()
                     experimentSection
                     if behaviours.isEmpty {
-                        // No journal yet — explain, without dead-ending on a paid export.
+                        // No journal yet, explain, without dead-ending on a paid export.
                         NoopCard {
-                            Text("Log behaviours above — after a few days of answers, NOOP ranks how each one moves your charge, HRV and rest. Importing a WHOOP export (which includes its journal) backfills history instantly.")
+                            Text("Log behaviours above. After a few days of answers, NOOP ranks how each one moves your charge, HRV and rest. Importing a WHOOP export (which includes its journal) backfills history instantly.")
                                 .font(StrandFont.subhead)
                                 .foregroundStyle(StrandPalette.textSecondary)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -197,11 +253,28 @@ struct InsightsView: View {
                 }
             }
         }
-        .task(id: repo.refreshSeq) { await load() }
+        // #860 item 4: key on the data-refresh seq AND today's day-key, so the journal re-loads both on a
+        // data change and the moment the calendar day rolls over (driven by the foreground/appear refresh
+        // of `currentDayKey` below), so yesterday's answers leave "Today" and the new day starts fresh.
+        .task(id: InsightsLoadKey(seq: repo.refreshSeq, dayKey: currentDayKey)) { await load(allowCache: true) }
         // Recompute the cached ranking only when the outcome selection changes.
         // (behaviours / outcomeByKey change only at load, which calls
         //  recomputeRanked() directly, so keying on `outcome` is sufficient.)
         .onChangeCompat(of: outcome) { _ in recomputeRanked() }
+        // Refresh the day anchor on appear and whenever the app returns to the foreground; if the date has
+        // advanced this bumps the `.task(id:)` key and the journal reloads for the new logical day (#860).
+        .onAppear { refreshCurrentDayKey() }
+        .onChangeCompat(of: scenePhase) { phase in
+            if phase == .active { refreshCurrentDayKey() }
+        }
+    }
+
+    /// Re-stamp `currentDayKey` to today's local calendar day. A no-op while the day is unchanged; when the
+    /// date has rolled over it flips the value, which re-keys the journal load so the chips' "Today" and the
+    /// answers behind them snap to the new day (#860 item 4).
+    private func refreshCurrentDayKey() {
+        let key = Repository.localDayKey(Date())
+        if key != currentDayKey { currentDayKey = key }
     }
 
     /// The deep-link row into the v5 "What moves you" hub.
@@ -221,7 +294,7 @@ struct InsightsView: View {
                         Text("WHAT MOVES YOU \u{203A}")
                             .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
                             .foregroundStyle(StrandPalette.textPrimary)
-                        Text("Ranked, lag-aware: which of your habits actually move your Charge — plus your personal alcohol/caffeine dose-response.")
+                        Text("Ranked, lag-aware: which of your habits actually move your Charge, plus your personal alcohol/caffeine dose-response.")
                             .font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
@@ -233,30 +306,63 @@ struct InsightsView: View {
                 }
             }
         }
-        .buttonStyle(.plain)
+        // Liquid tap response: the same physical settle-inward every tappable liquid card gets.
+        .buttonStyle(LiquidPressStyle())
         .accessibilityElement(children: .combine)
         .accessibilityLabel("What moves you. Ranked patterns in your own data, and your dose-response.")
     }
 
     // MARK: - Load
 
-    private func load() async {
+    /// Load the journal + outcome series + activity costs.
+    ///
+    /// #833 (Insights freeze): on macOS the NavigationSplitView detail is keyed with `.id` (RootView), so
+    /// every sidebar switch DESTROYS and cold-mounts this view, tearing down its `@State`. Without a cache
+    /// each visit re-ran the full history read on the @MainActor, which is the freeze. Mirroring Today's #849
+    /// remount cache, when `allowCache` is set and the live data state is unchanged
+    /// (`repo.insightsLoadedSeq == repo.refreshSeq` AND the same dayKey) we RESTORE the prior snapshot from
+    /// the long-lived `repo` instead of re-querying. `allowCache` is true ONLY on the `.task(id:)`-driven
+    /// path (a re-mount / data-refresh / day-rollover); the direct write-then-reload sites (journal toggle,
+    /// experiment mark) leave it false so a change that doesn't bump `refreshSeq` always re-reads.
+    private func load(allowCache: Bool = false) async {
+        // #833: same-state re-mount → restore from the repo-level cache (no store queries). The dayKey guard
+        // mirrors the `.task(id:)` key so a day-rollover still re-loads even at an unchanged seq.
+        if allowCache,
+           repo.insightsLoadedSeq == repo.refreshSeq,
+           repo.insightsLoadedDayKey == currentDayKey,
+           let cached = repo.insightsCache,
+           cached.journalDayOffset == journalDayOffset {
+            restoreFromCache(cached)
+            return
+        }
+
         // Journal → behaviours map (only "yes" answers count as the behaviour occurring).
-        // journalEntries() is the imported ∪ native union (native wins per day+question).
+        // journalEntries() is the imported ∪ native union (native wins per day+question). A numeric
+        // log writes answeredYes=true too (#322), so a numeric item lands in the with/without split
+        // here unchanged, on top of the numeric series read below.
         let entries = await repo.journalEntries()
         var byBehaviour: [String: Set<String>] = [:]
+        var numericByBehaviour: [String: [String: Double]] = [:]
         for e in entries where e.answeredYes {
             byBehaviour[e.question, default: []].insert(e.day)
         }
+        // #322: per-question numeric series (question → [day: value]) for numeric journal items. A
+        // numeric series is the same [day: value] shape a metric outcome is, so the effect ranker can
+        // consume it directly (dose-response lands in the v5 hub). Additive: yes/no-only journals
+        // never populate this, so the boolean effect cards are untouched.
+        for e in entries {
+            if let v = e.numericValue { numericByBehaviour[e.question, default: [:]][e.day] = v }
+        }
 
         // The logging card's inputs: the export's exact question strings (so logged days join
-        // imported history) and the selected day's native chip state — a targeted read, since the
+        // imported history) and the selected day's native chip state, a targeted read, since the
         // merged list carries no deviceId to filter on.
         let imported = await repo.importedJournalEntries()
         let importedQs = NSOrderedSet(array: imported.map(\.question)).array as? [String] ?? []
         let selectedDayKey = Repository.localDayKey(
             Calendar.current.date(byAdding: .day, value: -journalDayOffset, to: Date()) ?? Date())
         let nativeAnswers = await repo.nativeJournalAnswers(day: selectedDayKey)
+        let nativeNumeric = await repo.nativeJournalNumeric(day: selectedDayKey)
 
         // Daily metrics for the strap-only outcome fallback (merged, imported-wins). The view is
         // MainActor-isolated, so reading the published cache here is on the right actor.
@@ -279,9 +385,20 @@ struct InsightsView: View {
             seriesMap[key] = dict.sorted { $0.key < $1.key }.map { (day: $0.key, value: $0.value) }
         }
 
+        // #322: fold each numeric journal item's series into the same day→value maps the effect ranker
+        // consumes, under a namespaced "journal.numeric:<question>" key so it never collides with the
+        // four fixed metric outcomes. This makes a numeric journal series (caffeine mg, alcohol units)
+        // a first-class series the ranker/correlations can consume, exactly like a metric outcome; the
+        // four boolean effect cards key on Outcome.key only, so they are untouched.
+        for (question, series) in numericByBehaviour {
+            let namespaced = Self.numericJournalKey(question)
+            byKey[namespaced] = series
+            seriesMap[namespaced] = series.sorted { $0.key < $1.key }.map { (day: $0.key, value: $0.value) }
+        }
+
         // Activity Cost (#439): shape the engine's inputs in the VIEW, not the engine. From the loaded
-        // sessions build [sport: Set<localDayKey>] — collapsing detected/"Activity" into one bucket via
-        // displaySport, keeping manual/imported labels — keyed by the LOCAL calendar day the session
+        // sessions build [sport: Set<localDayKey>], collapsing detected/"Activity" into one bucket via
+        // displaySport, keeping manual/imported labels, keyed by the LOCAL calendar day the session
         // STARTED (the same local-day calendar DailyMetric.day uses, so the engine's D+1 alignment is
         // honest). The recovery side is [localDayKey: Charge] off the merged DailyMetric.recovery.
         let costs = Self.computeActivityCosts(workouts: await repo.workoutRows(), days: mergedDays)
@@ -290,19 +407,58 @@ struct InsightsView: View {
             self.behaviours = byBehaviour
             self.importedQuestions = importedQs
             self.dayAnswers = nativeAnswers
+            self.dayNumeric = nativeNumeric
             self.outcomeByKey = byKey
             self.seriesByKey = seriesMap
+            self.numericJournalByKey = numericByBehaviour
             self.activityCosts = costs
             self.loaded = true
             // Seed the memoized derived state from the freshly loaded inputs.
             self.recomputeRanked()
             self.recomputeRelationships()
+            // #833: snapshot what we just read onto the long-lived `repo`, keyed by the seq + dayKey we
+            // loaded for, so a later same-state re-mount restores it in-memory instead of re-querying. This
+            // ALSO runs on the direct (non-cached) write-then-reload sites, so the cache always reflects the
+            // freshest read, a subsequent re-mount never restores stale data behind a journal toggle.
+            self.repo.insightsCache = InsightsLoadCache(
+                behaviours: byBehaviour,
+                importedQuestions: importedQs,
+                dayAnswers: nativeAnswers,
+                journalDayOffset: self.journalDayOffset,
+                outcomeByKey: byKey,
+                seriesByKey: seriesMap,
+                activityCosts: costs,
+                numericJournalByKey: numericByBehaviour)
+            self.repo.insightsLoadedSeq = self.repo.refreshSeq
+            self.repo.insightsLoadedDayKey = self.currentDayKey
         }
+    }
+
+    /// #833: restore the loaded snapshot from a same-state `repo` cache on a re-mount, so the screen repaints
+    /// from memory without re-running the heavy load. Sets the same `@State` and re-seeds the same memoized
+    /// derived state as the first-load `MainActor.run` block above, byte-identical screen, no store queries.
+    @MainActor
+    private func restoreFromCache(_ c: InsightsLoadCache) {
+        behaviours = c.behaviours
+        importedQuestions = c.importedQuestions
+        dayAnswers = c.dayAnswers
+        // Numeric journal rows are native-only (imported WHOOP rows never carry a numericValue), so the
+        // selected day's numeric fields can be derived from the cached per-question series (#322).
+        let selectedDayKey = Repository.localDayKey(
+            Calendar.current.date(byAdding: .day, value: -c.journalDayOffset, to: Date()) ?? Date())
+        dayNumeric = c.numericJournalByKey.compactMapValues { $0[selectedDayKey] }
+        outcomeByKey = c.outcomeByKey
+        seriesByKey = c.seriesByKey
+        numericJournalByKey = c.numericJournalByKey
+        activityCosts = c.activityCosts
+        loaded = true
+        recomputeRanked()
+        recomputeRelationships()
     }
 
     /// The merged DailyMetric column backing an outcome key, for days the imported metricSeries
     /// doesn't cover (strap-only users). sleep_performance has no daily column, so it stays
-    /// import-only — never seeded here.
+    /// import-only, never seeded here.
     private static func dailyOutcome(key: String, day d: DailyMetric) -> Double? {
         switch key {
         case "recovery": return d.recovery
@@ -320,7 +476,7 @@ struct InsightsView: View {
     // calendar day (DailyMetric.day's calendar) keeps the engine's D+1 next-morning lookups aligned.
 
     // `internal` (not private) so the Workouts post-log note (#439) reuses the exact same input
-    // shaping rather than duplicating it — one source of truth for [sport: days] / [day: Charge].
+    // shaping rather than duplicating it, one source of truth for [sport: days] / [day: Charge].
     static func computeActivityCosts(workouts: [WorkoutRow], days: [DailyMetric]) -> [ActivityCost] {
         // Local-day offset so the activity day key lands on the SAME calendar as DailyMetric.day
         // (which IntelligenceEngine/WhoopImporter both bucket by local midnight, #277).
@@ -345,7 +501,7 @@ struct InsightsView: View {
     // MARK: - Memoized recomputation
 
     /// Rebuild the cached behaviour ranking for the current inputs.
-    /// Called at load and whenever `outcome` changes — NOT in `body`.
+    /// Called at load and whenever `outcome` changes, NOT in `body`.
     private func recomputeRanked() {
         let outcomeDays = outcomeByKey[outcome.key] ?? [:]
         ranked = BehaviorInsights.rank(
@@ -356,7 +512,7 @@ struct InsightsView: View {
     }
 
     /// Rebuild the cached metric relationships from the loaded series.
-    /// Called at load only — the series don't change after that.
+    /// Called at load only, the series don't change after that.
     private func recomputeRelationships() {
         relationships = computeRelationships()
     }
@@ -375,7 +531,7 @@ struct InsightsView: View {
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
             SectionHeader("Personal Experiment",
                           overline: "N-of-1 protocol",
-                          trailing: activeExperimentSnapshot?.phaseLabel ?? "Setup")
+                          trailing: activeExperimentSnapshot?.phaseLabel ?? String(localized: "Setup"))
             NoopCard {
                 if let snapshot = activeExperimentSnapshot {
                     activeExperimentCard(snapshot)
@@ -472,11 +628,11 @@ struct InsightsView: View {
             ) {
                 experimentMeasure("Baseline",
                                   value: snapshot.baselineMean.map { formatOutcome($0, as: snapshot.outcome) } ?? "—",
-                                  caption: "\(snapshot.baselineCount) days without it",
+                                  caption: String(localized: "\(snapshot.baselineCount) days without it"),
                                   tint: StrandPalette.textSecondary)
                 experimentMeasure("Intervention",
                                   value: snapshot.interventionMean.map { formatOutcome($0, as: snapshot.outcome) } ?? "—",
-                                  caption: "\(snapshot.interventionCount) logged days",
+                                  caption: String(localized: "\(snapshot.interventionCount) logged days"),
                                   tint: StrandPalette.accent)
                 experimentMeasure("Change",
                                   value: formatExperimentDelta(snapshot.delta, outcome: snapshot.outcome),
@@ -484,13 +640,15 @@ struct InsightsView: View {
                                   tint: experimentDeltaColor(snapshot))
                 experimentMeasure("Compliance",
                                   value: "\(Int(snapshot.compliance.rounded()))%",
-                                  caption: snapshot.loggedToday ? "logged today" : "not logged today",
+                                  caption: snapshot.loggedToday ? String(localized: "logged today") : String(localized: "not logged today"),
                                   tint: snapshot.loggedToday ? StrandPalette.statusPositive : StrandPalette.statusWarning)
             }
 
             VStack(alignment: .leading, spacing: 6) {
-                ProgressView(value: snapshot.progress)
-                    .tint(StrandPalette.accent)
+                // Liquid progress: the experiment window as a filling LiquidTube (the same horizontal
+                // vessel Today's Key Metrics + workout bars use) rather than a flat ProgressView. Static
+                // (no live slosh needed for a progress read); carries the same a11y label + value.
+                LiquidTube(frac: snapshot.progress, tint: StrandPalette.accent, height: 8, animated: false)
                     .accessibilityLabel("Experiment progress")
                     .accessibilityValue("\(snapshot.daysElapsed) of \(snapshot.durationDays) days")
                 HStack {
@@ -572,7 +730,7 @@ struct InsightsView: View {
     /// Behaviours the user actually has data for: distinct logged journal questions
     /// (`behaviours.keys`) ∪ imported-export questions, minus the catalog's hidden set.
     /// Triage fix (a)/(b): we do NOT route this through `mergeCatalog`, which would inject
-    /// the whole starter catalog (and re-surface hidden behaviours) as eligible — so the
+    /// the whole starter catalog (and re-surface hidden behaviours) as eligible, so the
     /// empty-state guard is real and only behaviours with history can be tested.
     private var experimentCandidates: [String] {
         let saved = experimentBehaviour.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -698,24 +856,27 @@ struct InsightsView: View {
                                       compliance: Double) -> ExperimentConfidence {
         let pairedCount = min(baselineCount, interventionCount)
         if pairedCount >= 10, compliance >= 0.65 {
-            return .init(label: "STRONGER SIGNAL", tone: .positive)
+            return .init(label: String(localized: "STRONGER SIGNAL"), tone: .positive)
         }
         if pairedCount >= 5 {
-            return .init(label: "EARLY SIGNAL", tone: .accent)
+            return .init(label: String(localized: "EARLY SIGNAL"), tone: .accent)
         }
-        return .init(label: "LOW SIGNAL", tone: .warning)
+        return .init(label: String(localized: "LOW SIGNAL"), tone: .warning)
     }
 
     private func experimentReading(_ snapshot: ExperimentSnapshot) -> String {
         guard let delta = snapshot.delta else {
-            return "Collect a few logged intervention days before reading the effect. Baseline and imported metrics stay in place."
+            return String(localized: "Collect a few logged intervention days before reading the effect. Baseline and imported metrics stay in place.")
         }
         let absDelta = formatExperimentDelta(abs(delta), outcome: snapshot.outcome, includeSign: false)
         if abs(delta) < 0.05 {
-            return "\(snapshot.outcome.outcomeName) is flat against baseline on logged intervention days."
+            return String(localized: "\(snapshot.outcome.outcomeName) is flat against baseline on logged intervention days.")
         }
+        // Whole-phrase variants per direction so translators never see a stitched better/worse fragment.
         let movedGood = snapshot.outcome.higherIsBetter ? delta > 0 : delta < 0
-        return "\(snapshot.outcome.outcomeName) is \(absDelta) \(movedGood ? "better" : "worse") than baseline on days you logged this behaviour."
+        return movedGood
+            ? String(localized: "\(snapshot.outcome.outcomeName) is \(absDelta) better than baseline on days you logged this behaviour.")
+            : String(localized: "\(snapshot.outcome.outcomeName) is \(absDelta) worse than baseline on days you logged this behaviour.")
     }
 
     private func experimentDeltaColor(_ snapshot: ExperimentSnapshot) -> Color {
@@ -770,6 +931,10 @@ struct InsightsView: View {
         return values.reduce(0, +) / Double(values.count)
     }
 
+    /// The namespaced outcome key a numeric journal item's series is folded under (#322). Prefixed so
+    /// it can never collide with a fixed metric outcome key. Pure + tested (mirrors Android).
+    static func numericJournalKey(_ question: String) -> String { "journal.numeric:" + question }
+
     private struct ExperimentSnapshot {
         let behavior: String
         let outcome: Outcome
@@ -786,7 +951,8 @@ struct InsightsView: View {
 
         var progress: Double { min(1, Double(daysElapsed) / Double(max(durationDays, 1))) }
         var phaseLabel: String {
-            daysElapsed >= durationDays ? "COMPLETE" : "DAY \(daysElapsed)/\(durationDays)"
+            daysElapsed >= durationDays ? String(localized: "COMPLETE")
+                                        : String(localized: "DAY \(daysElapsed)/\(durationDays)")
         }
         var phaseTone: StrandTone { daysElapsed >= durationDays ? .positive : .accent }
         var delta: Double? {
@@ -794,8 +960,8 @@ struct InsightsView: View {
             return interventionMean - baselineMean
         }
         var deltaCaption: String {
-            guard delta != nil else { return "needs baseline + logged days" }
-            return "vs behaviour-free baseline"
+            guard delta != nil else { return String(localized: "needs baseline + logged days") }
+            return String(localized: "vs behaviour-free baseline")
         }
     }
 
@@ -832,8 +998,7 @@ struct InsightsView: View {
 
     private var noEffects: some View {
         NoopCard {
-            Text("Not enough overlap between your journal answers and \(outcome.outcomeName.lowercased()) "
-                + "to measure an effect yet. Keep logging — effects need days both with and without each behaviour.")
+            Text(String(localized: "Not enough overlap between your journal answers and \(outcome.outcomeName.lowercased()) to measure an effect yet. Keep logging. Effects need days both with and without each behaviour."))
                 .font(StrandFont.subhead)
                 .foregroundStyle(StrandPalette.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -872,10 +1037,14 @@ struct InsightsView: View {
         return NoopCard(tint: outcome.domain.color) {
             VStack(alignment: .leading, spacing: NoopMetrics.gap) {
 
-                // Header: behaviour name + significance pill.
-                HStack(alignment: .firstTextBaseline) {
-                    HStack(spacing: 8) {
-                        Circle().fill(tintColor).frame(width: 8, height: 8)
+                // Header: behaviour name + significance pill. The old direction dot becomes a small liquid
+                // vessel filled to the effect magnitude (|Cohen's d|, capped where large is about 0.8+) in
+                // the sign-aware tint, the leading-gauge idiom Today uses, so the strength reads at a glance.
+                HStack(alignment: .center) {
+                    HStack(spacing: 10) {
+                        LiquidVessel(value: min(1, abs(e.cohensD) / 0.8), tint: tintColor, animated: false)
+                            .frame(width: 26, height: 26)
+                            .accessibilityHidden(true)
                         Text(e.behavior)
                             .font(StrandFont.headline)
                             .foregroundStyle(StrandPalette.textPrimary)
@@ -928,9 +1097,10 @@ struct InsightsView: View {
             }
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(sentence
-            + " Cohen's d \(String(format: "%.2f", e.cohensD)). "
-            + (e.significant ? "Statistically significant." : "Exploratory, not yet significant."))
+        // Whole-string key per variant (never a concatenated localized tail on an a11y label).
+        .accessibilityLabel(e.significant
+            ? String(localized: "\(sentence) Cohen's d \(String(format: "%.2f", e.cohensD)). Statistically significant.")
+            : String(localized: "\(sentence) Cohen's d \(String(format: "%.2f", e.cohensD)). Exploratory, not yet significant."))
     }
 
     // MARK: - Metric relationships section
@@ -994,19 +1164,19 @@ struct InsightsView: View {
                           alignment: .leading, spacing: NoopMetrics.gap) {
                     StatTile(label: "Next morning",
                              value: "\(Int(cost.meanNextMorning.rounded()))",
-                             caption: "Charge · \(pointsLabel) pts",
+                             caption: String(localized: "Charge · \(pointsLabel) pts"),
                              accent: accent)
                     StatTile(label: "Rest baseline",
                              value: "\(Int(cost.baselineMean.rounded()))",
-                             caption: "untouched days",
+                             caption: String(localized: "untouched days"),
                              accent: StrandPalette.textPrimary)
                     StatTile(label: "Bounce back",
                              value: cost.daysToBaseline.map { "\($0)d" } ?? "—",
-                             caption: cost.daysToBaseline != nil ? "to baseline" : "not within 7d",
+                             caption: cost.daysToBaseline != nil ? String(localized: "to baseline") : String(localized: "not within 7d"),
                              accent: StrandPalette.chargeColor)
                     StatTile(label: "Sessions",
                              value: "\(cost.n)",
-                             caption: cost.confidence == .solid ? "solid" : "building",
+                             caption: cost.confidence == .solid ? String(localized: "solid") : String(localized: "building"),
                              accent: StrandPalette.textPrimary)
                 }
             }
@@ -1060,24 +1230,24 @@ struct InsightsView: View {
         if let c = CorrelationEngine.pearson(
             CorrelationEngine.alignByDay(series("sleep_performance"), series("recovery"))) {
             out.append(.init(id: "sleep-rec",
-                             title: "Rest ↔ Charge",
-                             blurb: "How closely a good night tracks next-morning charge.",
+                             title: String(localized: "Rest ↔ Charge"),
+                             blurb: String(localized: "How closely a good night tracks next-morning charge."),
                              corr: c))
         }
         // HRV ↔ recovery (same day).
         if let c = CorrelationEngine.pearson(
             CorrelationEngine.alignByDay(series("hrv"), series("recovery"))) {
             out.append(.init(id: "hrv-rec",
-                             title: "HRV ↔ Charge",
-                             blurb: "Heart-rate variability as the engine behind your charge score.",
+                             title: String(localized: "HRV ↔ Charge"),
+                             blurb: String(localized: "Heart-rate variability as the engine behind your charge score."),
                              corr: c))
         }
-        // Resting HR ↔ recovery (same day) — expected to be negative.
+        // Resting HR ↔ recovery (same day), expected to be negative.
         if let c = CorrelationEngine.pearson(
             CorrelationEngine.alignByDay(series("rhr"), series("recovery"))) {
             out.append(.init(id: "rhr-rec",
-                             title: "Resting HR ↔ Charge",
-                             blurb: "A lower resting heart rate usually means a higher charge.",
+                             title: String(localized: "Resting HR ↔ Charge"),
+                             blurb: String(localized: "A lower resting heart rate usually means a higher charge."),
                              corr: c))
         }
         // Today's recovery ↔ NEXT-day recovery (1-day lag) as a strain/carry-over proxy.
@@ -1085,8 +1255,8 @@ struct InsightsView: View {
         //  how much yesterday carries into today.)
         if let c = CorrelationEngine.lagged(x: series("recovery"), y: series("recovery"), lagDays: 1) {
             out.append(.init(id: "rec-lag",
-                             title: "Charge → Next-day charge",
-                             blurb: "How much one day's charge carries into the next.",
+                             title: String(localized: "Charge → Next-day charge"),
+                             blurb: String(localized: "How much one day's charge carries into the next."),
                              corr: c))
         }
 
@@ -1100,7 +1270,13 @@ struct InsightsView: View {
         // the accessibility label (was computed twice per row).
         let sentence = relationshipSentence(rel)
         return VStack(alignment: .leading, spacing: 10) {
-            HStack(alignment: .firstTextBaseline) {
+            HStack(spacing: 10) {
+                // Liquid magnitude accent: a small filling vessel showing |r| in the correlation's
+                // strength colour, the same leading-gauge idiom Today's card rows + vitals use. Static
+                // (a small gauge doesn't need live slosh); decorative, the exact r + a11y read below.
+                LiquidVessel(value: min(1, abs(r)), tint: strength, animated: false)
+                    .frame(width: 28, height: 28)
+                    .accessibilityHidden(true)
                 Text(rel.title)
                     .font(StrandFont.headline)
                     .foregroundStyle(StrandPalette.textPrimary)
@@ -1113,7 +1289,7 @@ struct InsightsView: View {
                           showsDot: false)
             }
 
-            // r bar — visual magnitude/direction (hover reveals the exact value).
+            // r bar, visual magnitude/direction (hover reveals the exact value).
             rBar(r: r, color: strength, label: rel.title)
 
             Text(sentence)
@@ -1132,7 +1308,7 @@ struct InsightsView: View {
 
     /// A centred bar: zero in the middle, fills left (negative) or right (positive)
     /// proportional to |r|. Hovering reveals a tooltip with the exact r value, so the
-    /// bar — like every Strand chart — is never an unexplained coloured shape.
+    /// bar, like every Strand chart, is never an unexplained coloured shape.
     private func rBar(r: Double, color: Color, label: String) -> some View {
         RBar(r: r, color: color, label: label)
     }
@@ -1169,21 +1345,21 @@ struct InsightsView: View {
     /// Cohen's d → conventional magnitude word.
     private func effectMagnitudeWord(_ d: Double) -> String {
         switch abs(d) {
-        case ..<0.2:  return "negligible"
-        case ..<0.5:  return "small"
-        case ..<0.8:  return "moderate"
-        default:      return "large"
+        case ..<0.2:  return String(localized: "negligible")
+        case ..<0.5:  return String(localized: "small")
+        case ..<0.8:  return String(localized: "moderate")
+        default:      return String(localized: "large")
         }
     }
 
     /// |r| → strength word.
     private func strengthWord(_ r: Double) -> String {
         switch abs(r) {
-        case ..<0.1:  return "no"
-        case ..<0.3:  return "a weak"
-        case ..<0.5:  return "a moderate"
-        case ..<0.7:  return "a strong"
-        default:      return "a very strong"
+        case ..<0.1:  return String(localized: "no")
+        case ..<0.3:  return String(localized: "a weak")
+        case ..<0.5:  return String(localized: "a moderate")
+        case ..<0.7:  return String(localized: "a strong")
+        default:      return String(localized: "a very strong")
         }
     }
 
@@ -1196,10 +1372,9 @@ struct InsightsView: View {
 
     private func relationshipSentence(_ rel: Relationship) -> String {
         let r = rel.corr.r
-        let dir = r > 0 ? "positive" : (r < 0 ? "negative" : "flat")
+        let dir = r > 0 ? String(localized: "positive") : (r < 0 ? String(localized: "negative") : String(localized: "flat"))
         let strength = strengthWord(r)
-        return "\(strength.capitalizedFirst) \(dir) relationship "
-            + "(r = \(String(format: "%.2f", r)), n = \(rel.corr.n))."
+        return String(localized: "\(strength.capitalizedFirst) \(dir) relationship (r = \(String(format: "%.2f", r)), n = \(rel.corr.n)).")
     }
 }
 
@@ -1236,7 +1411,7 @@ private struct RBar: View {
         }
         .frame(height: 8)
         // Tooltip floats above the bar without affecting layout (overlays aren't
-        // clipped), so the exact r value reads on hover — same affordance as charts.
+        // clipped), so the exact r value reads on hover, same affordance as charts.
         .overlay(alignment: .center) {
             if hovering {
                 ChartTooltip(

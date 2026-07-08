@@ -83,7 +83,10 @@ public struct FitnessSensorReading: Equatable, Sendable {
     // CSC / CPS cumulative fields (raw — feed the rate computer for instantaneous values) ----------
     /// Cumulative wheel revolutions (CSC wheel data, or CPS optional wheel data) — u32.
     public var cumulativeWheelRevolutions: UInt32?
-    /// Last wheel-event time, unit 1/1024 s, wrapping at 65536 (u16).
+    /// Last wheel-event time, wrapping at 65536 (u16). UNIT IS SOURCE-DEPENDENT: 1/1024 s from CSC
+    /// (0x2A5B) but 1/2048 s from CPS (0x2A63) — Cycling Power Service 1.1, Wheel Revolution Data.
+    /// `FitnessRateComputer` branches on `kind`; the field name keeps the CSC unit for Kotlin↔Swift
+    /// parity with the shipped schema rather than churning every call-site (PR #1007).
     public var lastWheelEventTime1024: Int?
     /// Cumulative crank revolutions (CSC crank data, or CPS crank data) — u16.
     public var cumulativeCrankRevolutions: Int?
@@ -202,6 +205,7 @@ public enum FitnessSensorDecode {
     //   bit2  Accumulated Torque present     → u16
     //   bit3  Accumulated Torque Source      → no field (a flag only)
     //   bit4  Wheel Revolution Data present  → Cumulative Wheel Revolutions u32 + Last Wheel Event u16
+    //                                          (NOTE: CPS wheel event time is 1/2048 s, unlike CSC's 1/1024)
     //   bit5  Crank Revolution Data present  → Cumulative Crank Revolutions u16 + Last Crank Event u16
     //   bit6  Extreme Force Magnitudes       → u16 + u16
     //   bit7  Extreme Torque Magnitudes      → u16 + u16
@@ -252,11 +256,19 @@ public enum FitnessSensorDecode {
 /// Turns successive CSC/CPS revolution counters into instantaneous wheel speed and crank/pedal cadence.
 ///
 /// HONEST DERIVATION: CSC and CPS report only CUMULATIVE counts + the event time of the last revolution
-/// (unit 1/1024 s, wrapping at 65536). An instantaneous rate is the count difference over the time
-/// difference between two packets — so the FIRST packet (nothing to diff against) and any packet that
-/// repeats the same event time (the sensor hasn't ticked since) yield nil, never a fabricated value.
-/// Time wrap (the 16-bit 1/1024-s clock rolls every 64 s) and counter wrap (u32 wheel / u16 crank) are
-/// handled with modular arithmetic. Pure value type — no I/O — so it's fully unit-tested.
+/// (u16, wrapping at 65536). An instantaneous rate is the count difference over the time difference
+/// between two packets — so the FIRST packet (nothing to diff against) and any packet that repeats the
+/// same event time (the sensor hasn't ticked since) yield nil, never a fabricated value. Time wrap and
+/// counter wrap (u32 wheel / u16 crank) are handled with modular arithmetic. Pure value type — no I/O —
+/// so it's fully unit-tested.
+///
+/// TICK RATES (PR #1007): the wheel event-time clock is SOURCE-dependent — CSC (0x2A5B) ticks at
+/// 1/1024 s but CPS (0x2A63) at 1/2048 s (Cycling Power Service 1.1, Wheel Revolution Data). A shared
+/// 1024 divisor made a CPS wheel delta look twice as long as reality, HALVING CPS-derived speed. The
+/// wheel path therefore selects the rate from `reading.kind` — and because a 2A5B↔2A63 flip means the
+/// baseline timestamp sits on a DIFFERENT clock base, a kind flip drops the wheel baseline so the first
+/// post-flip packet yields nil rather than a speed computed across mixed clocks. Crank event time is
+/// 1/1024 s on BOTH profiles, so the crank path is unchanged.
 public struct FitnessRateComputer: Sendable {
 
     /// Wheel circumference in metres, used to turn wheel revolutions into speed. The spec default road
@@ -266,6 +278,10 @@ public struct FitnessRateComputer: Sendable {
 
     private var lastWheelRevs: UInt32?
     private var lastWheelTime1024: Int?
+    /// Which profile the wheel baseline came from. CSC and CPS wheel event times tick on DIFFERENT
+    /// clock bases (1/1024 vs 1/2048 s), so a delta across a kind flip is meaningless — the baseline is
+    /// dropped when the kind changes and the first post-flip packet re-seeds it (PR #1007).
+    private var lastWheelKind: FitnessSensorKind?
     private var lastCrankRevs: Int?
     private var lastCrankTime1024: Int?
 
@@ -294,24 +310,37 @@ public struct FitnessRateComputer: Sendable {
     }
 
     /// Fold one decoded reading in and return whatever instantaneous rates it lets us derive. Mutating —
-    /// it remembers this packet's counters as the baseline for the next. A reading from a DIFFERENT sensor
-    /// kind than the counters it carries is fine; only the blocks present are used.
+    /// it remembers this packet's counters as the baseline for the next. Only the blocks present in the
+    /// reading are used; the wheel path additionally tracks WHICH profile the baseline came from, because
+    /// CSC and CPS wheel timestamps are not on the same clock base (see the type doc, PR #1007).
     public mutating func update(_ reading: FitnessSensorReading) -> Rates {
         var rates = Rates()
 
         // Wheel → speed.
         if let revs = reading.cumulativeWheelRevolutions, let time = reading.lastWheelEventTime1024 {
+            // PR #1007: the wheel event-time tick rate is profile-specific — CSC (0x2A5B) 1/1024 s,
+            // CPS (0x2A63) 1/2048 s. A shared /1024 halved CPS-derived speed. The 16-bit wrap in
+            // timeDelta1024 is tick-count arithmetic, so only the seconds conversion branches.
+            let wheelTicksPerSec: Double = reading.kind == .cyclingPower ? 2048.0 : 1024.0
+            // A 2A5B↔2A63 kind flip puts the baseline timestamp on a DIFFERENT clock base; a cross-base
+            // delta would fabricate a speed, so drop the baseline and let this packet re-seed it (the
+            // first post-flip packet yields nil — same honesty rule as a true first packet).
+            if lastWheelKind != reading.kind {
+                lastWheelRevs = nil
+                lastWheelTime1024 = nil
+            }
             if let pRevs = lastWheelRevs, let pTime = lastWheelTime1024 {
                 let dt = Self.timeDelta1024(time, pTime)
                 if dt > 0 {
                     // u32 counter wrap handled by unsigned subtraction.
                     let dRev = Int(bitPattern: UInt(revs &- pRevs))
-                    let seconds = Double(dt) / 1024.0
+                    let seconds = Double(dt) / wheelTicksPerSec
                     rates.speedMps = Double(dRev) * wheelCircumferenceM / seconds
                 }
             }
             lastWheelRevs = revs
             lastWheelTime1024 = time
+            lastWheelKind = reading.kind
         }
 
         // Crank → cadence.
@@ -333,7 +362,7 @@ public struct FitnessRateComputer: Sendable {
 
     /// Forget the baselines (call on disconnect / new session) so the next packet is treated as a first.
     public mutating func reset() {
-        lastWheelRevs = nil; lastWheelTime1024 = nil
+        lastWheelRevs = nil; lastWheelTime1024 = nil; lastWheelKind = nil
         lastCrankRevs = nil; lastCrankTime1024 = nil
     }
 }

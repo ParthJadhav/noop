@@ -9,6 +9,7 @@ import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.DirectionsRun
 import androidx.compose.material.icons.filled.DirectionsWalk
 import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.Hexagon
 import androidx.compose.material.icons.filled.LocalFireDepartment
 import androidx.compose.material.icons.filled.MonitorHeart
 import androidx.compose.material.icons.filled.Thermostat
@@ -53,7 +54,13 @@ enum class DashboardCard(
     SKIN_TEMP("skinTemp", "Skin Temp", "Skin temperature", "", Icons.Filled.Thermostat),
     SLEEP("sleep", "Sleep", "Last night", "", Icons.Filled.Bedtime),
     CALORIES("calories", "Calories", "Active energy", "kcal", Icons.Filled.LocalFireDepartment),
-    HYDRATION("hydration", "Hydration", "Today's fluid", "", Icons.Filled.WaterDrop);
+    HYDRATION("hydration", "Hydration", "Today's fluid", "", Icons.Filled.WaterDrop),
+
+    // Optional, default-OFF (task #43): a tap-through to the Coupled view (the WHOOP-style day read). Unlike
+    // every other card it carries NO metric value of its own, it is a navigation row that opens the full
+    // CoupledScreen. It is NOT in [defaultSelection], so a fresh install never shows it until the user adds
+    // it via CUSTOMISE. Mirrors iOS DashboardCard.coupled (raw "coupled", byte-identical across OS).
+    COUPLED("coupled", "Coupled view", "Recovery, strain and sleep in one glance", "", Icons.Filled.Hexagon);
 
     companion object {
         fun fromRaw(raw: String?): DashboardCard? = entries.firstOrNull { it.raw == raw }

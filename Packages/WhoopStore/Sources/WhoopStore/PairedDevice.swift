@@ -50,6 +50,16 @@ public enum SourceKind: String, Sendable, CaseIterable {
     /// behind the experimental add-device tier. Additive: only the experimental wizard writes it.
     /// (Garmin uses `liveBLE` — its live HR is the standard broadcast-HR path, no proprietary protocol.)
     case huami
+    /// Apple Watch streamed via HealthKit (live HealthKit observer + background delivery). Apple-only,
+    /// no Android twin. Additive: only the Apple Watch device registration writes it.
+    case liveAppleWatch
+    /// An EXPERIMENTAL live Oura Ring (gen 3/4/5) source over the ring's own clean-room BLE protocol
+    /// (OuraProtocol package). Owns its OWN central/GATT, never the WHOOP path. Surfaces only the ring's
+    /// decoded raw signals + open HRV/sleep-phase tags (capabilities {hr, hrv, spo2, skinTemp, sleep});
+    /// NOOP computes its own Charge/Rest and never reads Oura's encrypted readiness/sleep scores. When a
+    /// signal can't be read it stays "-" (Huami precedent), never faked. Additive (no DB migration): only
+    /// the experimental add-device wizard's Oura path writes it.
+    case oura
 }
 
 /// Canonical metric a source can provide. Drives capability-aware UI + the day-owner resolver.

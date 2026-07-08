@@ -44,6 +44,58 @@ object LogExport {
     fun rawCaptureFilename(nowMs: Long = System.currentTimeMillis()) = "noop-straplog-${exportStamp(nowMs)}.bin"
 
     /**
+     * Profile-tagged, self-describing bundle filename: `noop-<profile>-<platform>-v<version>-<yyMMdd-HHmm>.zip`
+     * (spec section 5.1). Twin of the Swift `FileExport.bundleName`. Self-describing so a maintainer knows
+     * the profile, platform and version before opening the zip. Uses the same minute-precision [timestamp]
+     * the interactive shares use. Injectable epoch purely for the unit test.
+     */
+    fun bundleName(profile: String, platform: String, version: String, nowMs: Long = System.currentTimeMillis()): String {
+        val stamp = java.text.SimpleDateFormat("yyMMdd-HHmm", java.util.Locale.US).format(nowMs)
+        return "noop-$profile-$platform-v$version-$stamp.zip"
+    }
+
+    /**
+     * Pure zip builder (twin of Swift `FileExport.zipData`): write `entries` (in-zip name to bytes) into a
+     * single zip and return its bytes, or null if there are no entries. No file IO or UI so it is JVM
+     * unit-testable. EVERY entry must already be redacted by the caller (spec section 5.3).
+     */
+    fun zipEntries(entries: List<Pair<String, ByteArray>>): ByteArray? {
+        if (entries.isEmpty()) return null
+        val bos = java.io.ByteArrayOutputStream()
+        java.util.zip.ZipOutputStream(bos).use { zos ->
+            for ((name, data) in entries) {
+                zos.putNextEntry(java.util.zip.ZipEntry(name))
+                zos.write(data)
+                zos.closeEntry()
+            }
+        }
+        return bos.toByteArray()
+    }
+
+    /**
+     * Zip `entries` into one `.zip` under cache/logs (the FileProvider path) and fire the share chooser,
+     * returning the staged file or null. Twin of Swift `FileExport.exportBundle`. EVERY entry must already
+     * be redacted by the caller; the 20 MB cap is the assembler's job before this is called.
+     */
+    fun exportBundle(context: Context, entries: List<Pair<String, ByteArray>>, suggestedName: String): File? =
+        runCatching {
+            val bytes = zipEntries(entries) ?: return null
+            val dir = File(context.cacheDir, "logs").apply { mkdirs() }
+            val file = File(dir, suggestedName)
+            file.writeBytes(bytes)
+            val send = Intent(Intent.ACTION_SEND).apply {
+                type = "application/zip"
+                putExtra(Intent.EXTRA_STREAM, fileUri(context, file))
+                putExtra(Intent.EXTRA_SUBJECT, suggestedName)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            context.startActivity(Intent.createChooser(send, "Share report bundle"))
+            file
+        }.onFailure {
+            Toast.makeText(context, "Couldn't export the bundle: ${it.message}", Toast.LENGTH_LONG).show()
+        }.getOrNull()
+
+    /**
      * Mirror the latest strap-log tail into the durable [StrapLogBuffer] (#510). Called from the same UI
      * actions that ship a log interactively, AND on demand by [DebugExportScheduler] before a scheduled
      * write, so the 24h rolling buffer that the background worker reads is kept current even though the
@@ -77,11 +129,10 @@ object LogExport {
             val header = buildString {
                 appendLine("NOOP strap log (scheduled debug export)")
                 appendLine("App:     ${BuildConfig.VERSION_NAME} (${BuildConfig.TIER})")
-                appendLine("Android: ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})")
-                appendLine("Device:  ${Build.MANUFACTURER} ${Build.MODEL}")
+                for (line in com.noop.testcentre.AndroidDiagnostics.summaryLines(context)) appendLine(line)
                 appendLine("─".repeat(40))
             }
-            val text = body.ifBlank { "(rolling strap-log buffer is empty — connect to your strap so lines accrue)" }
+            val text = body.ifBlank { "(rolling strap-log buffer is empty; connect to your strap so lines accrue)" }
             val logFile = File(dir, strapLogFilename(nowMs))
             logFile.writeText(header + "\n" + text)
             out.add(logFile)
@@ -117,11 +168,10 @@ object LogExport {
         val header = buildString {
             appendLine("NOOP strap log")
             appendLine("App:     ${BuildConfig.VERSION_NAME} (${BuildConfig.TIER})")
-            appendLine("Android: ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})")
-            appendLine("Device:  ${Build.MANUFACTURER} ${Build.MODEL}")
+            for (line in com.noop.testcentre.AndroidDiagnostics.summaryLines(context)) appendLine(line)
             appendLine("─".repeat(40))
         }
-        val body = logText.ifBlank { "(strap log is empty — connect to your strap, reproduce the issue, then share again)" }
+        val body = logText.ifBlank { "(strap log is empty; connect to your strap, reproduce the issue, then share again)" }
 
         // Append the last captured crash (if any) so a device-specific crash like the Insights
         // tab (#224/#267) arrives with its real stack trace instead of being unreachable.
@@ -146,7 +196,7 @@ object LogExport {
         val header = buildString {
             appendLine("# NOOP 5/MG raw backfill capture (JSONL; one frame per line)")
             appendLine("# App: ${BuildConfig.VERSION_NAME} (${BuildConfig.TIER}) · Android ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT}) · ${Build.MANUFACTURER} ${Build.MODEL}")
-            appendLine("# NOTE: contains raw biometric frames (heart rate, R-R, skin temp, motion) and the strap's console text — share only if you're comfortable with that.")
+            appendLine("# NOTE: contains raw biometric frames (heart rate, R-R, skin temp, motion) and the strap's console text. Share only if you're comfortable with that.")
         }
         val dir = File(context.cacheDir, "logs").apply { mkdirs() }
         val out = File(dir, "noop-raw-capture-${timestamp()}.jsonl")
@@ -187,9 +237,9 @@ object LogExport {
             !whoop5Connected ->
                 "Raw capture records WHOOP 5/MG history syncs and doesn't apply to WHOOP 4.0 (already fully decoded).$tail"
             !PuffinExperiment.from(context).isCaptureEnabled ->
-                "No raw capture yet — turn on \"Record 5/MG raw capture\" above, then let a history sync run.$tail"
+                "No raw capture yet. Turn on \"Record 5/MG raw capture\" above, then let a history sync run.$tail"
             else ->
-                "Raw capture is on — let a 5/MG history sync run, then try again.$tail"
+                "Raw capture is on. Let a 5/MG history sync run, then try again.$tail"
         }
     }
 
@@ -219,35 +269,24 @@ object LogExport {
     }
 
     /**
-     * One-tap matched-pair export (#510): share BOTH the raw 5/MG capture AND the strap log together in
-     * a single chooser (ACTION_SEND_MULTIPLE), each stamped with the same `yyMMdd-HHmm` minute, so a
-     * reporter/contributor hands over the frames and the context that produced them as one bundle. If
-     * there's no capture yet, falls back to sharing just the log so the tap isn't a dead end. Reuses the
-     * same file-builders the single-share paths use.
+     * One-tap matched-pair export (#510): share BOTH the raw 5/MG capture AND the strap log together. Now
+     * a 2-entry case of [exportBundle] so the pair rides in one `.zip` (mobile GitHub can attach a zip,
+     * not loose .txt files). If there's no capture yet, falls back to just the log so the tap isn't a dead
+     * end. Reuses the same file-builders the single-share paths use; both entries are already redacted by
+     * their writers.
      */
     fun shareRawAndLog(context: Context, logText: String, whoop5Connected: Boolean) {
         runCatching {
             val logFile = writeStrapLogFile(context, logText)
             val capture = writeCaptureFile(context)
+            val entries = arrayListOf("report.txt" to logFile.readBytes())
             if (capture == null) {
                 Toast.makeText(context, noCaptureMsg(context, whoop5Connected, sharingLog = true), Toast.LENGTH_LONG).show()
-                val send = Intent(Intent.ACTION_SEND).apply {
-                    type = "text/plain"
-                    putExtra(Intent.EXTRA_STREAM, fileUri(context, logFile))
-                    putExtra(Intent.EXTRA_SUBJECT, "NOOP strap log")
-                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                }
-                context.startActivity(Intent.createChooser(send, "Share strap log"))
-                return
+            } else {
+                entries.add(0, "raw-capture.jsonl" to capture.readBytes())
             }
-            val uris = arrayListOf(fileUri(context, capture), fileUri(context, logFile))
-            val send = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
-                type = "text/plain"
-                putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
-                putExtra(Intent.EXTRA_SUBJECT, "NOOP raw capture + strap log")
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            }
-            context.startActivity(Intent.createChooser(send, "Share raw capture + log"))
+            val name = "noop-export-${timestamp()}.zip"
+            exportBundle(context, entries, name)
         }.onFailure {
             Toast.makeText(context, "Couldn't export the pair: ${it.message}", Toast.LENGTH_LONG).show()
         }

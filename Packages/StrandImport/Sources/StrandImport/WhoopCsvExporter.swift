@@ -171,7 +171,14 @@ public enum WhoopCsvExporter {
 
     /// sleeps.csv. Stage durations come from the tolerant stagesJSON decoder; in-bed is derived
     /// from the session span when the row carries no explicit figure.
+    /// `cycleStart` returns the "Cycle start time" for a session — the LOCAL day-midnight of the cycle the
+    /// sleep belongs to (the caller passes `Repository.localDayKey(endTs) + " 00:00:00"`, the same end-day
+    /// key analyze/mergeSleep use), so it matches the corresponding physiological_cycles row's key and the
+    /// two CSVs reconcile by cycle. The previous `utc(startTs)` put a non-UTC user's night on a different
+    /// date than its cycle (#715). Onset/Wake stay the real UTC session times — the round-trip is unchanged
+    /// (the importer keys on `sleep_onset`, not Cycle start time).
     public static func sleepsCSV(_ sessions: [CachedSleepSession],
+                                 cycleStart: (CachedSleepSession) -> String,
                                  sourceBySession: (CachedSleepSession) -> String = { _ in "" }) -> String {
         var out = "Cycle start time,Sleep onset,Wake onset,Cycle timezone,Nap,Sleep performance %,"
             + "Respiratory rate (rpm),Asleep duration (min),In bed duration (min),"
@@ -182,7 +189,7 @@ public enum WhoopCsvExporter {
             let stages = stageMinutes(s.stagesJSON)
             let inBedMin: Double? = s.endTs > s.startTs ? Double(s.endTs - s.startTs) / 60.0 : nil
             let cols: [String] = [
-                utc(s.startTs), utc(s.startTs), utc(s.endTs), "UTC+00:00",
+                cycleStart(s), utc(s.startTs), utc(s.endTs), "UTC+00:00",
                 // NOOP never stores a nap flag — everything exports as a main sleep so the importer
                 // keeps it (it drops `isNap` rows).
                 "false", "", "",

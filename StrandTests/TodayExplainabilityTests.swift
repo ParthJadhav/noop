@@ -32,7 +32,30 @@ final class TodayExplainabilityTests: XCTestCase {
         let s = MetricTileState.resolve(hasTodayValue: false,
                                    calibratingNightsRemaining: nil,
                                    carriedDate: "14 Jun")
-        XCTAssertEqual(s, .carriedLastNight(date: "14 Jun"))
+        XCTAssertEqual(s, .carriedLastNight(date: "14 Jun", stale: false))
+    }
+
+    func testScoreState_carryWithinCap_isFreshLastNight() {
+        // #779: a recent carry keeps the "Last night" framing.
+        let s = MetricTileState.resolve(hasTodayValue: false,
+                                   calibratingNightsRemaining: nil,
+                                   carriedDate: "14 Jun",
+                                   carriedStale: false)
+        XCTAssertEqual(s, .carriedLastNight(date: "14 Jun", stale: false))
+        XCTAssertEqual(s.title, "Last night · 14 Jun")
+    }
+
+    func testScoreState_staleCarry_relabelsLatestSleep() {
+        // #779: a weeks-old carry is still shown (not a bare blank) but relabelled so the number is never
+        // passed off as "Last night".
+        let s = MetricTileState.resolve(hasTodayValue: false,
+                                   calibratingNightsRemaining: nil,
+                                   carriedDate: "14 May",
+                                   carriedStale: true)
+        XCTAssertEqual(s, .carriedLastNight(date: "14 May", stale: true))
+        XCTAssertEqual(s.title, "Latest sleep · 14 May")
+        XCTAssertEqual(s.accessibilityText,
+                       "Latest sleep, 14 May. This is your last scored session. Wear the strap overnight for a fresh score.")
     }
 
     func testScoreState_nothingBanked_isNeedsStrap() {
@@ -78,7 +101,7 @@ final class TodayExplainabilityTests: XCTestCase {
     }
 
     func testScoreState_carriedLastNight_stampsDate() {
-        XCTAssertEqual(MetricTileState.carriedLastNight(date: "14 Jun").accessibilityText,
+        XCTAssertEqual(MetricTileState.carriedLastNight(date: "14 Jun", stale: false).accessibilityText,
                        "Last night, 14 Jun. Tonight's lands after you sleep with the strap on.")
     }
 
@@ -102,7 +125,8 @@ final class TodayExplainabilityTests: XCTestCase {
 
     func testScoreState_copy_hasNoEmDash() {
         let states: [MetricTileState] = [.calibrating(nightsRemaining: 2),
-                                    .carriedLastNight(date: "14 Jun"),
+                                    .carriedLastNight(date: "14 Jun", stale: false),
+                                    .carriedLastNight(date: "14 May", stale: true),
                                     .needsStrap]
         for s in states {
             XCTAssertFalse(s.accessibilityText!.contains("\u{2014}"),
@@ -225,5 +249,42 @@ final class TodayExplainabilityTests: XCTestCase {
         // Mi Band is a real merge winner — keep its own name, never a blanket on-device claim.
         XCTAssertEqual(TodayView.provenanceDisplayLabel(rawSource: "xiaomi-band", deviceId: "my-whoop"),
                        "Mi Band")
+    }
+
+    // MARK: - Apple Watch provenance (M1) — Today-only "Apple Watch" relabel of the apple-health source
+
+    func testIsWatchSource_appleHealthSource_isTrue() {
+        XCTAssertTrue(TodayView.isWatchSource("apple-health", appleHealthSource: "apple-health"))
+    }
+
+    func testIsWatchSource_strapOrNil_isFalse() {
+        // A strap-sourced score (or no resolved source at all) is never the watch.
+        XCTAssertFalse(TodayView.isWatchSource("my-whoop", appleHealthSource: "apple-health"))
+        XCTAssertFalse(TodayView.isWatchSource(nil, appleHealthSource: "apple-health"))
+    }
+
+    func testTodayChipLabel_appleHealthSource_readsAppleWatch() {
+        // The audience knows the device, not the framework — a watch-sourced score reads "Apple Watch".
+        XCTAssertEqual(
+            TodayView.todayProvenanceChipLabel(rawSource: "apple-health", deviceId: "my-whoop",
+                                               appleHealthSource: "apple-health"),
+            "Apple Watch")
+    }
+
+    func testTodayChipLabel_nonWatchSources_deferToSharedLabel() {
+        // Everything else stays byte-identical to the shared provenance label (and the footer): the
+        // Today relabel only touches the apple-health source.
+        XCTAssertEqual(
+            TodayView.todayProvenanceChipLabel(rawSource: "my-whoop", deviceId: "my-whoop",
+                                               appleHealthSource: "apple-health"),
+            "Whoop")
+        XCTAssertEqual(
+            TodayView.todayProvenanceChipLabel(rawSource: "my-whoop-noop", deviceId: "my-whoop",
+                                               appleHealthSource: "apple-health"),
+            "On-device")
+        XCTAssertEqual(
+            TodayView.todayProvenanceChipLabel(rawSource: "xiaomi-band", deviceId: "my-whoop",
+                                               appleHealthSource: "apple-health"),
+            "Mi Band")
     }
 }

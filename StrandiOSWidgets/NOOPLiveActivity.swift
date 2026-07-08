@@ -64,22 +64,32 @@ struct NOOPLiveActivity: Widget {
     }
 }
 
-/// Lock-Screen banner stat column (label over value, right-aligned). File-scope because the
-/// `ActivityConfiguration` content closure isn't a method of `NOOPLiveActivity`.
+/// Lock-Screen banner stat column (label over value). File-scope because the `ActivityConfiguration`
+/// content closure isn't a method of `NOOPLiveActivity`.
+///
+/// #759 - the label and value are CENTRE-aligned so each value sits directly under its own label. The
+/// old `.trailing` alignment right-pinned both to the column's edge: when the value was narrower than
+/// the label (e.g. "12" under "Effort") it drifted to the label's right edge instead of under it, which
+/// read as "the number doesn't line up with its label". `fixedSize` stops either line truncating so the
+/// pairing is never clipped at narrow widths.
 @ViewBuilder
 private func bannerStat(label: String, value: String) -> some View {
-    VStack(alignment: .trailing, spacing: 2) {
+    VStack(alignment: .center, spacing: 2) {
         Text(label).font(.caption2).foregroundStyle(StrandPalette.textSecondary)
         Text(value).font(.headline).foregroundStyle(StrandPalette.textPrimary)
     }
+    .multilineTextAlignment(.center)
+    .fixedSize()
 }
 
 /// Dynamic Island expanded-region stat column (label over value). File-scope for the same reason as
-/// `bannerStat` — the `dynamicIsland` closure has no enclosing `self`.
+/// `bannerStat`. #759 - centre-aligned + `fixedSize` for the same value-under-its-label fix as the banner.
 @ViewBuilder
 private func statColumn(label: String, value: String) -> some View {
-    VStack(alignment: .trailing, spacing: 1) {
+    VStack(alignment: .center, spacing: 1) {
         Text(label).font(.caption2).foregroundStyle(.secondary)
         Text(value).font(.headline)
     }
+    .multilineTextAlignment(.center)
+    .fixedSize()
 }

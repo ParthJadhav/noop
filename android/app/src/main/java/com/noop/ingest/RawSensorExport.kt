@@ -30,10 +30,10 @@ import java.util.Locale
  */
 object RawSensorExport {
 
-    /** 17 columns, in the contract order shared with the Swift exporter. */
+    /** 18 columns, in the contract order shared with the Swift exporter (band_sleep_state added, #175). */
     private const val HEADER =
         "unix_s,iso_utc,stream,hr_bpm,rr_ms,grav_x,grav_y,grav_z,step_counter,ppg_bpm,ppg_conf," +
-            "spo2_red,spo2_ir,skintemp_raw,resp_raw,event_kind,event_payload"
+            "spo2_red,spo2_ir,skintemp_raw,resp_raw,band_sleep_state,event_kind,event_payload"
 
     private val UTC_FMT: java.time.format.DateTimeFormatter =
         java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US)
@@ -67,7 +67,7 @@ object RawSensorExport {
         limit: Int = 200_000,
     ): Map<String, Int> {
         // index: 0 hr_bpm,1 rr_ms,2 grav_x,3 grav_y,4 grav_z,5 step_counter,6 ppg_bpm,7 ppg_conf,
-        //        8 spo2_red,9 spo2_ir,10 skintemp_raw,11 resp_raw,12 event_kind,13 event_payload
+        //        8 spo2_red,9 spo2_ir,10 skintemp_raw,11 resp_raw,12 band_sleep_state,13 event_kind,14 event_payload
         val rows = ArrayList<LineRow>()
         val counts = LinkedHashMap<String, Int>()
 
@@ -103,11 +103,17 @@ object RawSensorExport {
         counts["resp"] = resp.size
         for (s in resp) rows += LineRow(s.ts, line("resp", s.ts, 11 to n(s.raw)))
 
+        // Band sleep_state (#175): the strap's OWN @81 high-nibble state (0 wake/1 still/2 asleep/3 up),
+        // carried verbatim. Column 12, before the event columns (matches the Swift exporter order).
+        val sleepState = repo.sleepStateSamples(deviceId, from, to, limit)
+        counts["band_sleep_state"] = sleepState.size
+        for (s in sleepState) rows += LineRow(s.ts, line("band_sleep_state", s.ts, 12 to n(s.state)))
+
         val events = repo.events(deviceId, from, to, limit)
         counts["event"] = events.size
         for (s in events) rows += LineRow(
             s.ts,
-            line("event", s.ts, 12 to WhoopCsvExporter.csvField(s.kind), 13 to WhoopCsvExporter.csvField(s.payloadJSON)),
+            line("event", s.ts, 13 to WhoopCsvExporter.csvField(s.kind), 14 to WhoopCsvExporter.csvField(s.payloadJSON)),
         )
 
         // Stable sort by ts asc (a stream's intra-ts order is its query's secondary key).
@@ -120,11 +126,11 @@ object RawSensorExport {
     /** ts + the fully-formatted CSV line for one sample (kept small so a whole day fits in memory). */
     private class LineRow(val ts: Long, val line: String)
 
-    /** Build one CSV line: `unix_s,iso_utc,stream` + the 14 value cells (only [set] indices filled). */
+    /** Build one CSV line: `unix_s,iso_utc,stream` + the 15 value cells (only [set] indices filled). */
     private fun line(stream: String, ts: Long, vararg set: Pair<Int, String>): String {
         val sb = StringBuilder(96)
         sb.append(ts).append(',').append(iso(ts)).append(',').append(stream)
-        for (i in 0 until 14) {
+        for (i in 0 until 15) {
             sb.append(',')
             for ((idx, v) in set) if (idx == i) { sb.append(v); break }
         }
@@ -160,7 +166,7 @@ object RawSensorExport {
 
             val total = counts.values.sum()
             val summary = if (total == 0) {
-                "No samples in the last 24h — wear the strap and let it sync, then export again."
+                "No samples in the last 24h - wear the strap and let it sync, then export again."
             } else {
                 // Compact "hr 3204 · rr 812 · …" line, only non-empty streams.
                 counts.filterValues { it > 0 }.entries.joinToString(" · ") { "${it.key} ${it.value}" }

@@ -149,7 +149,8 @@ final class DeviceFamilyFramingTests: XCTestCase {
         // A puffin-metadata (type 56) frame must parse with typeName "METADATA".
         // payload=[56 03 00 ab cd 00 00 00] (padded), crc32 over it.
         let frame = Self.hex("aa010c000001e741380300abcd00000060153281")
-        let parsed = parseFrame(frame, family: .whoop5)
+        // collectFields: the annotated fields array is opt-in diagnostics (D#742).
+        let parsed = parseFrame(frame, family: .whoop5, collectFields: true)
         XCTAssertTrue(parsed.ok)
         XCTAssertEqual(parsed.typeName, "METADATA")
         XCTAssertEqual(parsed.seq, 3)
@@ -284,5 +285,20 @@ final class DeviceFamilyFramingTests: XCTestCase {
                        Self.hex("aa010c000001e74123014502ff000000267ffc4f"))
         XCTAssertEqual(puffinCommandFrame(cmd: 68, seq: 1, payload: AlarmPayload.runAlarmRev2()),
                        Self.hex("aa010c000001e741230144020100000017cd19e2"))
+    }
+
+    func testPuffinOneShotBuzzSequenceGoldens() {
+        // #921 one-shot buzz (BLEManager.buzzStrapOnce): on a 5/MG the confirmed sequence is the
+        // maverick 0x13 notify buzz followed by RUN_ALARM(68) REVISION_2, on consecutive seq bytes.
+        // Golden hexes generated independently (Python: zlib CRC-32, CRC16-Modbus) and cross-checked
+        // against the Android FramingTest vectors, so a drift in either frame fails here. (Android
+        // stops at the maverick buzz on a 5/MG: its allow-list excludes RUN_ALARM for that family.)
+        let buzz = puffinCommandFrame(cmd: 0x13, seq: 1,
+                                      payload: [0x01, 47, 152, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+        XCTAssertEqual(buzz, Self.hex("aa0114000001e1e1230113012f980000000000000000000098cb83a5"))
+        let runAlarm = puffinCommandFrame(cmd: 68, seq: 2, payload: AlarmPayload.runAlarmRev2())
+        XCTAssertEqual(runAlarm, Self.hex("aa010c000001e74123024402010000008ad7f1d3"))
+        XCTAssertTrue(verifyFrame(buzz, family: .whoop5).ok)
+        XCTAssertTrue(verifyFrame(runAlarm, family: .whoop5).ok)
     }
 }

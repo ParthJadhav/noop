@@ -164,7 +164,7 @@ public enum CircadianEngine {
             let tmin = observedTempMinHour ?? wrap24(fit.acrophaseHours - acrophaseAfterCbtMinHours)
             return PhaseEstimate(tempMinHour: tmin, acrophaseHours: fit.acrophaseHours,
                                  offsetVsScheduleMinutes: 0, confidence: .unreadable,
-                                 note: "Your rhythm is hard to read right now — keep wearing it for a clearer picture.")
+                                 note: "Your rhythm is hard to read right now - keep wearing it for a clearer picture.")
         }
 
         // Activity-derived temp-minimum ≈ acrophase − ~12 h (activity peaks roughly half a day after CBTmin).
@@ -242,7 +242,7 @@ public enum CircadianEngine {
         let magnitude = abs(shiftHours)
         guard magnitude >= 0.5 else {
             return JetLagPlan(direction: .none, totalShiftHours: 0, estimatedDays: 0, days: [],
-                              note: "No meaningful body-clock shift needed — you're about aligned.")
+                              note: "No meaningful body-clock shift needed - you're about aligned.")
         }
 
         let advancing = shiftHours > 0
@@ -269,14 +269,14 @@ public enum CircadianEngine {
                 brightStart = wake
                 brightEnd = wrap24(wake + 2.0)
                 dimFrom = wrap24(sleep - 2.0)
-                guidance = "Get bright light early after waking and keep the evening dim — this nudges your "
+                guidance = "Get bright light early after waking and keep the evening dim - this nudges your "
                     + "clock earlier. Aim for lights-out around \(clock(sleep))."
             } else {
                 // DELAY: bright light in the EVENING; avoid bright morning light; go to bed later.
                 brightStart = wrap24(sleep - 3.0)
                 brightEnd = wrap24(sleep - 1.0)
                 dimFrom = wrap24(wake)
-                guidance = "Get bright light in the evening and go easy on bright morning light — this nudges "
+                guidance = "Get bright light in the evening and go easy on bright morning light - this nudges "
                     + "your clock later. Aim for lights-out around \(clock(sleep))."
             }
             plan.append(DayPlan(dayIndex: i, brightLightStartHour: brightStart, brightLightEndHour: brightEnd,

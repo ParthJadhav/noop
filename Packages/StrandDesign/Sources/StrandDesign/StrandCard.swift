@@ -15,7 +15,7 @@ public extension View {
     /// wash + border bias; nil uses the flat raised surface with no wash.
     func frostedCardSurface(
         tint: Color? = nil,
-        cornerRadius: CGFloat = 18,
+        cornerRadius: CGFloat = 22,
         washStrength: Double = 1.0
     ) -> some View {
         background(FrostedCardSurface(tint: tint, cornerRadius: cornerRadius, washStrength: washStrength))
@@ -31,7 +31,7 @@ public struct FrostedCardSurface: View {
     public var washStrength: Double
     @Environment(\.colorScheme) private var scheme
 
-    public init(tint: Color? = nil, cornerRadius: CGFloat = 18, washStrength: Double = 1.0) {
+    public init(tint: Color? = nil, cornerRadius: CGFloat = 22, washStrength: Double = 1.0) {
         self.tint = tint
         self.cornerRadius = cornerRadius
         self.washStrength = washStrength
@@ -61,11 +61,11 @@ public struct FrostedCardSurface: View {
                     )
                 )
             )
-            // Apple x WHOOP: NO card border on dark — the #16181D fill on the near-black canvas carries
-            // the edge by contrast alone (Apple-flat). Light mode keeps a soft shadow for paper separation.
-            // Elevation idiom: DARK is flat — fill contrast carries the edge, no shadow. LIGHT raises
-            // white cards off the warm-paper canvas with a soft resting drop shadow (the hairline alone
-            // is too faint to separate white-on-paper). Hover deepens this further in StrandCardHover.
+            // Liquid redesign (2026-07-02): a 1px resting hairline in BOTH themes so every card
+            // matches the liquid home card's edge (LiquidTodayView.card), not just fill contrast.
+            .overlay(shape.strokeBorder(StrandPalette.hairline, lineWidth: 1))
+            // LIGHT raises white cards off the warm-paper canvas with a soft resting drop shadow; DARK
+            // stays flat (the hairline + fill carry the edge, matching the home card which has no shadow).
             .shadow(
                 color: scheme == .light ? Color(hex: "#1A2230").opacity(0.11) : .clear,
                 radius: scheme == .light ? 10 : 0,
@@ -90,7 +90,7 @@ public struct StrandCard<Content: View>: View {
 
     public init(
         padding: CGFloat = 16,
-        cornerRadius: CGFloat = 18,
+        cornerRadius: CGFloat = 22,
         tint: Color? = nil,
         @ViewBuilder content: @escaping () -> Content
     ) {
@@ -118,7 +118,7 @@ public struct StrandCardHover: ViewModifier {
     @State private var hovering = false
     @Environment(\.colorScheme) private var scheme
 
-    public init(cornerRadius: CGFloat = 18) {
+    public init(cornerRadius: CGFloat = 22) {
         self.cornerRadius = cornerRadius
     }
 
@@ -142,13 +142,16 @@ public struct StrandCardHover: ViewModifier {
             )
             .offset(y: hovering ? -1 : 0)
             .animation(StrandMotion.interactive, value: hovering)
+            // .onHover is unavailable on watchOS (no pointer); the watch never hovers a card.
+            #if !os(watchOS)
             .onHover { hovering = $0 }
+            #endif
     }
 }
 
 public extension View {
     /// Apply the Strand card hover lift (shadow + -1px translate + border emphasis).
-    func strandCardHover(cornerRadius: CGFloat = 16) -> some View {
+    func strandCardHover(cornerRadius: CGFloat = 22) -> some View {
         modifier(StrandCardHover(cornerRadius: cornerRadius))
     }
 }
@@ -229,7 +232,7 @@ public extension View {
     }
 }
 
-#if DEBUG
+#if DEBUG && !os(watchOS)
 #Preview("StrandCard") {
     VStack(spacing: 16) {
         StrandCard {

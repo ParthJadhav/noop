@@ -42,6 +42,20 @@ final class ReassemblerTests: XCTestCase {
         XCTAssertEqual(out, [a, b])
     }
 
+    func testReassembleFromOneBytePerFragment() {
+        // Two back-to-back frames, fed a single byte per fragment. This is the worst case for the old
+        // removeFirst drain and exercises the offset/compact window hard: head advances byte by byte,
+        // compact() slides the tail every feed(). Output must still be the two exact frames, in order.
+        let a = frameFromPayload([0x01, 0x02], type: 40)
+        let b = frameFromPayload([0x03, 0x04], type: 48)
+        let r = Reassembler()
+        var out: [[UInt8]] = []
+        for byte in a + b {
+            out.append(contentsOf: r.feed([byte]))
+        }
+        XCTAssertEqual(out, [a, b])
+    }
+
     func testLeadingGarbageIsSkipped() {
         let a = frameFromPayload([0x09], type: 40)
         let r = Reassembler()

@@ -29,7 +29,7 @@ struct SiriShortcutsSettingsView: View {
                         .font(StrandFont.headline)
                         .foregroundStyle(StrandPalette.textPrimary)
                 }
-                Text("Buzz your strap or mark a moment from Siri, Spotlight, the Shortcuts app, or a Back-Tap / automation — no setup needed.")
+                Text("Buzz your strap or mark a moment from Siri, Spotlight, the Shortcuts app, or a Back-Tap / automation. No setup needed.")
                     .font(StrandFont.caption)
                     .foregroundStyle(StrandPalette.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -52,7 +52,7 @@ struct SiriShortcutsSettingsView: View {
                         .font(StrandFont.headline)
                         .foregroundStyle(StrandPalette.textPrimary)
                 }
-                Text("Wire NOOP's actions into a Back-Tap, a focus automation, or a longer Shortcut — for example, double-tap the back of your iPhone to buzz the strap.")
+                Text("Wire NOOP's actions into a Back-Tap, a focus automation, or a longer Shortcut. For example, double-tap the back of your iPhone to buzz the strap.")
                     .font(StrandFont.caption)
                     .foregroundStyle(StrandPalette.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)

@@ -63,6 +63,20 @@ import kotlin.math.roundToInt
  * The matching capability on macOS is free: `AppModel` is an app-level `@StateObject` kept alive by
  * the menu-bar extra, so closing the window leaves the strap connected.
  */
+/**
+ * One tick of the ongoing-notification/widget stream. Carries TWO day rows on purpose (#911):
+ * [todayRow] is the naive/unscored today row the notification's Recovery line reads (honest-null until
+ * tonight is scored), while [anchorRow] is the widget-only carried anchor (today when scored, else the
+ * freshest prior scored day) so the widget describes the same day as Today without the notification ever
+ * showing a carried figure as if it were live.
+ */
+private data class NotifyTick(
+    val state: LiveState,
+    val todayRow: DailyMetric?,
+    val anchorRow: DailyMetric?,
+    val illness: String?,
+)
+
 class WhoopConnectionService : Service() {
 
     /** Main-thread scope used only to mirror [LiveState] into the notification. */
@@ -173,18 +187,35 @@ class WhoopConnectionService : Service() {
                 // not to take it down. (Audited during #82, which proved unrelated/unreproducible —
                 // this guard is belt-and-braces, not a diagnosed fix.) After catch{emit} the inner
                 // flow completes; combine keeps running on ble.state with days frozen.
-                repo.daysMergedFlow("my-whoop").catch { emit(emptyList()) },
+                // #797: the bounded merge (recentDaysMergedFlow) is enough here, the notification only reads
+                // today's row; this stops a years-deep import re-merging the whole history on every change.
+                repo.recentDaysMergedFlow("my-whoop").catch { emit(emptyList()) },
             ) { state, days ->
-                val todayKey = java.time.LocalDate.now().toString()
-                // Carry the whole today row (not just recovery) so the 2x2 widget can derive Rest +
-                // Effort from the same banked figures — honest-null until each is scored. (#516)
-                Triple(
-                    state,
-                    days.lastOrNull { it.day == todayKey },
+                // #911: resolve the day the way the dashboard does, via the LOGICAL local day (rolls at
+                // 04:00, with the #304 pre-04:00 carve-out), NOT a naive LocalDate.now() that rolls at
+                // midnight and starts looking up a brand-new, not-yet-scored calendar day. Two DISTINCT
+                // rows come out, so the two surfaces keep their own honest contracts:
+                val logicalKey = com.noop.ui.logicalDayKeyNow()
+                val localKey = java.time.LocalDate.now().toString()
+                //  - todayRow: the naive/unscored today row. The ongoing notification's Recovery line must
+                //    stay on THIS (honest-null until tonight is scored), never on a carried prior-day
+                //    figure, or the lock-screen would silently show yesterday's Recovery% as if it were
+                //    live, with no provenance caption.
+                //  - anchorRow: today's row when scored, else the freshest STRICTLY-PRIOR scored day carried
+                //    over (via the SHARED `widgetAnchorRow`, mirroring TodayScreen + the #547 future-day
+                //    guard). ONLY the widget uses this, so the 2x2 widget shows the same day as Today rather
+                //    than blanking in the small hours before tonight is scored. This keeps the service
+                //    symmetric with AppViewModel, where only the widget push reads the anchor.
+                val todayRow = com.noop.ui.resolveTodayRow(days, logicalKey, localKey)
+                val anchorRow = com.noop.ui.widgetAnchorRow(days, logicalKey, localKey)
+                NotifyTick(
+                    state = state,
+                    todayRow = todayRow,
+                    anchorRow = anchorRow,
                     // Illness watch in the background (gated on the opt-out pref): the FGS is the
                     // only long-lived collector, so this is what makes the early-warning reach a
                     // user who hasn't opened the app today.
-                    if (NoopPrefs.illnessWatch(this@WhoopConnectionService)) IllnessWatch.evaluate(days) else null,
+                    illness = if (NoopPrefs.illnessWatch(this@WhoopConnectionService)) IllnessWatch.evaluate(days) else null,
                 )
             }.catch { /* belt-and-braces: a frozen notification beats a dead process */ }
                 // conflate + collect, NOT collectLatest (#82): the widget push suspends in Glance
@@ -192,8 +223,10 @@ class WhoopConnectionService : Service() {
                 // every push mid-flight and the widget starved on stale data the moment HR started
                 // streaming. Conflation still processes only the latest value — just without the axe.
                 .conflate()
-                .collect { (state, today, illness) ->
-                postNotification(state, today?.recovery)
+                .collect { (state, todayRow, anchorRow, illness) ->
+                // Honest-null: the notification's Recovery line reads the NAIVE today row, never the
+                // carried anchor, so it stays blank until tonight's recovery actually lands (#911).
+                postNotification(state, todayRow?.recovery)
                 // Banner transition (clear → raised) → real system notification; the notifier's
                 // persisted day gate dedupes against the app-open (AppViewModel) call site.
                 if (lastIllnessAlert == null && illness != null) {
@@ -214,11 +247,12 @@ class WhoopConnectionService : Service() {
                     WidgetSnapshotStore.push(
                         this@WhoopConnectionService,
                         WidgetSnapshot(
-                            recoveryPct = today?.recovery?.roundToInt(),
-                            // Rest = the sleep_performance composite from today's banked stage figures
-                            // (pure, honest-null until last night is scored); Effort = the 0–100 strain. (#516)
-                            restPct = today?.let { RestScorer.restFromDaily(it)?.roundToInt() },
-                            effortPct = today?.strain?.roundToInt(),
+                            recoveryPct = anchorRow?.recovery?.roundToInt(),
+                            // Rest = the sleep_performance composite from the anchor row's banked stage
+                            // figures (pure, honest-null until last night is scored); Effort = the 0-100
+                            // strain. Widget-only carry, so it shows the same day as Today. (#516/#911)
+                            restPct = anchorRow?.let { RestScorer.restFromDaily(it)?.roundToInt() },
+                            effortPct = anchorRow?.strain?.roundToInt(),
                             heartRate = state.heartRate,
                             batteryPct = state.batteryPct?.roundToInt(),
                             connected = state.connected,
@@ -248,6 +282,17 @@ class WhoopConnectionService : Service() {
                         // background must declare the location FGS type. Reverted to connectedDevice-only
                         // when the workout ends (active=false re-posts the base type).
                         startForegroundCompat(buildNotification(ble.state.value, null), tracking = true)
+                        // Workouts & GPS test mode (Test Centre): wire the GpsSession fix-progress sink to the
+                        // .workouts-tagged strap log ONLY when the WORKOUTS mode is on (one SharedPreferences
+                        // bool read here). When off, the sink stays null and the route fold is byte-identical.
+                        GpsSession.workoutsLog =
+                            if (com.noop.testcentre.TestCentre.from(applicationContext)
+                                    .active(com.noop.testcentre.TestDomain.WORKOUTS)
+                            ) {
+                                { line -> ble.externalLog(line, com.noop.testcentre.TestDomain.WORKOUTS) }
+                            } else {
+                                null
+                            }
                         gpsJob = launch {
                             // LocationTracker fails SAFE (no permission / no provider just ends the
                             // stream); runCatching guards an OEM throw so it can't tear down the FGS.
@@ -256,6 +301,7 @@ class WhoopConnectionService : Service() {
                             }
                         }
                     } else {
+                        GpsSession.workoutsLog = null   // route finished: drop the test-mode sink
                         startForegroundCompat(buildNotification(ble.state.value, null), tracking = false)
                     }
                 }

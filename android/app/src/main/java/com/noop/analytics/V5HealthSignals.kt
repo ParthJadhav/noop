@@ -34,6 +34,13 @@ object V5HealthSignals {
         val cycle: CyclePhaseEngine.Result,
         val bodyClock: CircadianEngine.PhaseEstimate?,
         val illness: IllnessSignalEngine.Result,
+        /**
+         * Parallel Mahalanobis illness-distance read (IllnessDistance), computed on the SAME illness-ward
+         * z-vector as [illness] but NEVER gating the alert: [IllnessSignalEngine] stays the sole fire gate.
+         * This only surfaces a "how strong" confidence readout in the Heads-Up card when the engine has
+         * already raised. Nullable so an absent illness pass leaves it null. (Augment-only, Option A.)
+         */
+        val illnessDistance: IllnessDistance.Result?,
         /** True once there are enough trusted nights for any of these to be more than "learning". */
         val baselineTrusted: Boolean,
     )
@@ -104,12 +111,28 @@ object V5HealthSignals {
             firedLabels = firedLabels,
         )
 
+        // PARALLEL Mahalanobis distance on the SAME illness-ward z-vector (RHR up, HRV negated, skin-temp
+        // up, respiration up). This NEVER gates the alert: the IllnessSignalEngine above remains the sole
+        // fire gate. Computed here only so the Heads-Up card can show a "how strong" confidence band when
+        // the engine has already raised. null where a z is absent (dropped from the distance). correlation
+        // = null (identity), validated to agree ~100% with the z-sum detector. Mirrors iOS exactly.
+        val illnessDistance = IllnessDistance.evaluate(
+            features = IllnessDistance.FeatureVector(
+                restingHR = latest?.rhrZ,
+                rmssd = latest?.hrvZ?.let { -it },   // orient illness-ward: HRV down is illness-like
+                skinTemp = latest?.tempZ,
+                respiration = respZ,
+            ),
+            correlation = null,
+        )
+
         // ── Body clock: needs per-hour rest-activity bins we don't bank here; the planner is on-demand.
         //    Leave null so the BodyClockCard reads its honest "Calibrating" empty state until a future
         //    activity-bin source lands (the engine is wired + ready, the input pipe is the gap). ──
         val bodyClock: CircadianEngine.PhaseEstimate? = null
 
-        return Snapshot(cycle = cycle, bodyClock = bodyClock, illness = illness, baselineTrusted = baselineTrusted)
+        return Snapshot(cycle = cycle, bodyClock = bodyClock, illness = illness,
+            illnessDistance = illnessDistance, baselineTrusted = baselineTrusted)
     }
 
     /** A day is "usable" for the baseline if it carries at least one of the four illness/cycle vitals. */

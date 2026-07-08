@@ -73,8 +73,19 @@ final class DeviceRegistry: ObservableObject {
 
     /// Permanently delete every recorded sample/derived row for a device across all `deviceId`-keyed
     /// tables. Does NOT remove the registry row (that's `archive`); this only empties its recordings.
-    func deleteDeviceData(_ id: String) {
-        try? store.deleteAllData(deviceId: id)
+    ///
+    /// Routed through the `WhoopStore` actor's `deleteAllData(deviceId:)`, so the heavy 16+-table delete
+    /// runs on the actor's OWN (off-main) executor instead of blocking the main thread (this is a
+    /// `@MainActor` cache). Calling the synchronous `DeviceRegistryStore` write directly here would run
+    /// the whole transaction on the main actor and freeze the UI on a large device/Apple-Health dataset.
+    /// Best-effort: a store failure leaves the recordings and published state untouched. Awaits the delete
+    /// BEFORE `reload()` so the refreshed device list reflects the emptied recordings.
+    func deleteDeviceData(_ id: String, store: WhoopStore) async {
+        do {
+            try await store.deleteAllData(deviceId: id)
+        } catch {
+            return
+        }
         reload()
     }
 

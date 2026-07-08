@@ -12,7 +12,7 @@ public struct HRBucket: Sendable, Equatable {
 }
 
 extension WhoopStore {
-    /// Shared decoder — JSONDecoder is stateless across decodes and was previously allocated once
+    /// Shared decoder, JSONDecoder is stateless across decodes and was previously allocated once
     /// per event row. Battery events are dense (~every 8 min), so a multi-year read decodes
     /// thousands of rows; reusing one decoder removes that per-row allocation.
     fileprivate static let eventDecoder = JSONDecoder()
@@ -42,6 +42,26 @@ extension WhoopStore {
                                  deviceId, from, to,
                                  limit])
                 .map { HRSample(ts: $0["ts"], bpm: $0["bpm"]) }
+        }
+    }
+
+    /// Cheap change-detector for the raw HR stream: `(count, maxTs)` over `[from, to]`, computed in
+    /// SQLite over the `(deviceId, ts)` index WITHOUT materializing any rows (#836). Lets a caller decide
+    /// "nothing was inserted since last time, skip the expensive re-read" for pennies, `COUNT(*)` moves on
+    /// any insert (including a backfilled OLD night whose `maxTs` wouldn't change), and `maxTs` distinguishes
+    /// fresh appends. COALESCE so an empty window is `(0, 0)`, never nil.
+    public func hrFingerprint(deviceId: String, from: Int, to: Int) async throws -> (count: Int, maxTs: Int) {
+        try syncRead { db in
+            // COUNT(*) and COALESCE(MAX(ts),0) are both NON-NULL, and the aggregate query always returns
+            // exactly one row, so fetchOne is non-nil and the columns read straight into Int. The guard is
+            // belt-and-suspenders.
+            guard let row = try Row.fetchOne(db, sql: """
+                SELECT COUNT(*) AS c, COALESCE(MAX(ts), 0) AS m FROM hrSample
+                WHERE deviceId = ? AND ts >= ? AND ts <= ?
+                """, arguments: [deviceId, from, to]) else { return (0, 0) }
+            let c: Int = row["c"]
+            let m: Int = row["m"]
+            return (c, m)
         }
     }
 
@@ -141,11 +161,13 @@ extension WhoopStore {
     public func stepSamples(deviceId: String, from: Int, to: Int, limit: Int) async throws -> [StepSample] {
         try syncRead { db in
             try Row.fetchAll(db, sql: """
-                SELECT ts, counter FROM stepSample
+                SELECT ts, counter, activityClass FROM stepSample
                 WHERE deviceId = ? AND ts >= ? AND ts <= ?
                 ORDER BY ts ASC LIMIT ?
                 """, arguments: [deviceId, from, to, limit])
-                .map { StepSample(ts: $0["ts"], counter: $0["counter"]) }
+                // activityClass (#316, v19) reads back nil for any pre-v19 row (the column defaulted null) and
+                // for any record whose @63 byte was 0xFF/invalid/absent, an absent class stays absent.
+                .map { StepSample(ts: $0["ts"], counter: $0["counter"], activityClass: $0["activityClass"]) }
         }
     }
 

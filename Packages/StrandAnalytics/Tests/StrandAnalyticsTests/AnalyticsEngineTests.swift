@@ -218,7 +218,8 @@ final class AnalyticsEngineTests: XCTestCase {
         let newEnd = detected.startTs + (detected.endTs - detected.startTs) / 2
         let reshaped = SleepWindowReclip.reclip(stagesJSON: detected.stagesJSON,
                                                 sessionStart: detected.startTs,
-                                                oldEnd: detected.endTs, newEnd: newEnd)
+                                                oldEnd: detected.endTs,
+                                                newStart: detected.startTs, newEnd: newEnd)
         XCTAssertNotNil(reshaped, "the detected segment stages must reshape to the new window")
 
         // The override — keyed by the stager's OWN detected startTs — must fire and roughly halve sleep.
@@ -510,4 +511,33 @@ final class AnalyticsEngineTests: XCTestCase {
     // three mainNightIndex selection tests). An end-to-end analyzeDay variant was dropped: it leaned on
     // the SleepStager detecting a synthetic daytime nap, which the daytime-false-sleep guard rejects by
     // design, so it tested detection (a #508 concern), not #525's aggregation.
+
+    // MARK: - Group E (Sleep & Rest test mode): analyzeDay forwards the trace + emits the Rest line
+
+    func testAnalyzeDayEmitsGateAndRestTrace() {
+        // A real scored night yields at least one gate verdict line and one Rest sub-score line when
+        // a trace sink is supplied. The numeric DayResult must be UNCHANGED versus the untraced call.
+        let day = "2021-06-17"
+        let n = night(endDay: day, hours: 7)
+        var lines: [String] = []
+        let traced = AnalyticsEngine.analyzeDay(
+            day: day, hr: n.hr, rr: n.rr, gravity: n.gravity, profile: UserProfile(age: 30),
+            traceSink: { lines.append($0) })
+        let untraced = AnalyticsEngine.analyzeDay(
+            day: day, hr: n.hr, rr: n.rr, gravity: n.gravity, profile: UserProfile(age: 30))
+        XCTAssertTrue(lines.contains { $0.hasPrefix("gate ") }, "expected a gate line, got: \(lines)")
+        XCTAssertTrue(lines.contains { $0.hasPrefix("rest ") }, "expected a Rest sub-score line, got: \(lines)")
+        // Trace is side-effect-only: the whole scored DailyMetric matches the untraced run exactly.
+        XCTAssertEqual(traced.daily, untraced.daily)
+        XCTAssertEqual(traced.sleepSessions, untraced.sleepSessions)
+    }
+
+    func testAnalyzeDayWithoutTraceSinkProducesNoLines() {
+        // Zero-cost-when-off proof: no sink means no work and no lines.
+        let day = "2021-06-18"
+        let n = night(endDay: day, hours: 7)
+        let result = AnalyticsEngine.analyzeDay(
+            day: day, hr: n.hr, rr: n.rr, gravity: n.gravity, profile: UserProfile(age: 30))
+        XCTAssertNotNil(result.daily.totalSleepMin)
+    }
 }

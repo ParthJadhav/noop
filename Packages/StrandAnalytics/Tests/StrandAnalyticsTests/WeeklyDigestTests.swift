@@ -210,6 +210,114 @@ final class WeeklyDigestTests: XCTestCase {
                        "Must NOT claim a steady week on 2 days: \(line)")
     }
 
+    func testSparsePreviousWeekSaysRoughNotSteady() {
+        // The mirror image of the sparse-current case (typical new user in week 2): the
+        // CURRENT week has plenty of days, but LAST week only had 2 — movers are gated on
+        // previous.n ≥ minDaysForFocus, so nothing surfaces, while the chips show a big raw %
+        // off those 2 days. The summary must call the comparison rough rather than claim a
+        // steady week with nothing moved (#463, the residual half).
+        var charge: [String: Double] = [:]
+        charge["2026-06-06"] = 70                                            // last week, day 1
+        charge["2026-06-07"] = 74                                            // last week, day 2
+        for d in 8...12 { charge[String(format: "2026-06-%02d", d)] = 41 }   // this week, 5 days
+        let d = WeeklyDigestEngine.build(byMetric: [.charge: charge], anchorDay: "2026-06-12")
+        XCTAssertEqual(d.summary(.charge)!.thisWeek.n, 5)                    // full-enough current week
+        XCTAssertEqual(d.summary(.charge)!.weekOverWeek.previous.n, 2)       // sparse previous week
+        XCTAssertEqual(d.focalPoints.count, 1)
+        let line = d.focalPoints[0]
+        XCTAssertTrue(line.contains("Last week"), "Should point at last week: \(line)")
+        XCTAssertTrue(line.contains("rough"), "Should call the comparison rough: \(line)")
+        XCTAssertTrue(line.contains("2 days"), "Should name the day count: \(line)")
+        XCTAssertFalse(line.lowercased().contains("steady"),
+                       "Must NOT claim a steady week against 2 days: \(line)")
+        XCTAssertFalse(line.contains("too early"),
+                       "The current week is fine; the honesty aims at last week: \(line)")
+    }
+
+    // MARK: - Rough-comparison flag (chips must not imply confidence on a sparse side)
+
+    func testIsRoughComparisonFlagsSparseSides() {
+        // Sparse CURRENT week (2 days) vs full previous → rough.
+        var charge: [String: Double] = [:]
+        for d in 1...7 { charge[String(format: "2026-06-%02d", d)] = 70 }
+        charge["2026-06-08"] = 40; charge["2026-06-09"] = 40
+        let sparseCurrent = WeeklyDigestEngine.build(byMetric: [.charge: charge], anchorDay: "2026-06-09")
+        XCTAssertTrue(sparseCurrent.summary(.charge)!.isRoughComparison)
+
+        // Sparse PREVIOUS week (2 days) vs full-enough current → rough.
+        var rest: [String: Double] = [:]
+        rest["2026-06-06"] = 80; rest["2026-06-07"] = 82
+        for d in 8...12 { rest[String(format: "2026-06-%02d", d)] = 85 }
+        let sparsePrevious = WeeklyDigestEngine.build(byMetric: [.rest: rest], anchorDay: "2026-06-12")
+        XCTAssertTrue(sparsePrevious.summary(.rest)!.isRoughComparison)
+
+        // Both weeks fully populated → a real comparison, not rough.
+        var hrv: [String: Double] = [:]
+        for d in 1...14 { hrv[String(format: "2026-06-%02d", d)] = 60 }
+        let full = WeeklyDigestEngine.build(byMetric: [.hrv: hrv], anchorDay: "2026-06-12")
+        XCTAssertFalse(full.summary(.hrv)!.isRoughComparison)
+
+        // No previous week at all → there is no comparison to call rough.
+        var rhr: [String: Double] = [:]
+        rhr["2026-06-08"] = 55; rhr["2026-06-09"] = 56
+        let noPrevious = WeeklyDigestEngine.build(byMetric: [.rhr: rhr], anchorDay: "2026-06-09")
+        XCTAssertFalse(noPrevious.summary(.rhr)!.isRoughComparison)
+    }
+
+    // MARK: - Effort display factor (the #268 scale toggle reaches the prose)
+
+    func testEffortDisplayFactorDefaultIsByteIdentical() {
+        // factor 1.0 (and the omitted default) must not change a single character of
+        // any focal point — this pins every existing sentence for existing callers.
+        var effort: [String: Double] = [:], charge: [String: Double] = [:]
+        for d in 8...14 { let k = String(format: "2026-06-%02d", d); effort[k] = 25; charge[k] = 60 }
+        for d in 1...7  { let k = String(format: "2026-06-%02d", d); effort[k] = 35; charge[k] = 60 }
+        let input: [WeeklyMetric: [String: Double]] = [.effort: effort, .charge: charge]
+        let implicitDefault = WeeklyDigestEngine.build(byMetric: input, anchorDay: "2026-06-13")
+        let explicitOne = WeeklyDigestEngine.build(byMetric: input, anchorDay: "2026-06-13",
+                                                   effortDisplayFactor: 1.0)
+        XCTAssertEqual(implicitDefault, explicitOne)
+        XCTAssertTrue(implicitDefault.focalPoints[0].contains("(avg 25 vs 35)"),
+                      "Stored-scale averages at factor 1.0: \(implicitDefault.focalPoints[0])")
+    }
+
+    func testEffortDisplayFactorRescalesEffortAveragesOnly() {
+        // Effort mover 25 vs 35 (stored 0–100). On the 0–21 scale (factor 0.21) the prose
+        // averages must read 5 vs 7 while the % (scale-invariant) stays 29%.
+        var effort: [String: Double] = [:]
+        for d in 8...14 { effort[String(format: "2026-06-%02d", d)] = 25 }
+        for d in 1...7  { effort[String(format: "2026-06-%02d", d)] = 35 }
+        let scaled = WeeklyDigestEngine.build(byMetric: [.effort: effort], anchorDay: "2026-06-13",
+                                              effortDisplayFactor: 0.21)
+        let line = scaled.focalPoints[0]
+        XCTAssertTrue(line.contains("(avg 5 vs 7)"), "0–21 averages expected: \(line)")
+        XCTAssertTrue(line.contains("29%"), "Percent change is scale-invariant: \(line)")
+
+        // A non-Effort mover is untouched by the factor.
+        var chargeOnly: [String: Double] = [:]
+        for d in 8...14 { chargeOnly[String(format: "2026-06-%02d", d)] = 80 }
+        for d in 1...7  { chargeOnly[String(format: "2026-06-%02d", d)] = 55 }
+        let input: [WeeklyMetric: [String: Double]] = [.charge: chargeOnly]
+        let a = WeeklyDigestEngine.build(byMetric: input, anchorDay: "2026-06-13")
+        let b = WeeklyDigestEngine.build(byMetric: input, anchorDay: "2026-06-13",
+                                         effortDisplayFactor: 0.21)
+        XCTAssertEqual(a.focalPoints, b.focalPoints)
+        XCTAssertTrue(b.focalPoints[0].contains("(avg 80 vs 55)"), "Charge stays stored-scale: \(b.focalPoints[0])")
+    }
+
+    func testEffortDisplayFactorRescalesPtsFallback() {
+        // Previous Effort mean is 0 → pctChange is nil → the "pts" fallback renders, and it
+        // must be in display units too (10 stored pts × 0.21 = 2.1 pts on the 0–21 scale).
+        var effort: [String: Double] = [:]
+        for d in 8...14 { effort[String(format: "2026-06-%02d", d)] = 10 }
+        for d in 1...7  { effort[String(format: "2026-06-%02d", d)] = 0 }
+        let d = WeeklyDigestEngine.build(byMetric: [.effort: effort], anchorDay: "2026-06-13",
+                                         effortDisplayFactor: 0.21)
+        let line = d.focalPoints[0]
+        XCTAssertTrue(line.contains("2.1 pts"), "pts fallback should be display-scaled: \(line)")
+        XCTAssertTrue(line.contains("(avg 2 vs 0)"), "Averages display-scaled: \(line)")
+    }
+
     func testFocalPointsCappedAtTwo() {
         // Several big movers + a non-trivial balance → still ≤ 2 lines.
         var charge: [String: Double] = [:], effort: [String: Double] = [:], hrv: [String: Double] = [:]

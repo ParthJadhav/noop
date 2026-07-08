@@ -38,54 +38,20 @@ enum CsvExport {
         let hi = Int(Date().timeIntervalSince1970) + 86_400
 
         do {
-            // Merged exactly like Repository.mergeDaily: computed first, imported overwrites — so a
-            // real WHOOP import always wins and the strap-only user still exports a full history.
+            // Fetch every source off the WhoopStore actor (each `await store.*` already hops off main).
             let imported = try await store.dailyMetrics(deviceId: deviceId, from: fromDay, to: toDay)
             let computed = try await store.dailyMetrics(deviceId: computedId, from: fromDay, to: toDay)
-            var byDay: [String: DailyMetric] = [:]
-            var sourceByDay: [String: String] = [:]
-            for d in computed { byDay[d.day] = d; sourceByDay[d.day] = "noop (APPROXIMATE)" }
-            for d in imported { byDay[d.day] = d; sourceByDay[d.day] = "import" }
-            let days = byDay.values.sorted { $0.day < $1.day }
-
-            // The cycles columns DailyMetric lacks, recovered from the imported metricSeries.
-            var series: [String: [String: Double]] = [:]
+            var seriesRaw: [String: [MetricPoint]] = [:]
             for key in ["sleep_performance", "sleep_consistency", "sleep_need_min", "sleep_debt_min",
                         "in_bed_min", "awake_min", "energy_kcal", "avg_hr", "max_hr"] {
-                for p in (try await store.metricSeries(deviceId: deviceId, key: key,
-                                                       from: fromDay, to: toDay)) {
-                    series[p.day, default: [:]][key] = p.value
-                }
+                seriesRaw[key] = try await store.metricSeries(deviceId: deviceId, key: key,
+                                                             from: fromDay, to: toDay)
             }
-
-            // Sleep: merged per end-day, imported wins (Repository.mergeSleep semantics).
             let impSleep = try await store.sleepSessions(deviceId: deviceId, from: 0, to: hi, limit: 100_000)
             let compSleep = try await store.sleepSessions(deviceId: computedId, from: 0, to: hi, limit: 100_000)
-            var sleepByDay: [String: CachedSleepSession] = [:]
-            var sleepSource: [Int: String] = [:]   // keyed by startTs (the session's natural key)
-            func endDay(_ s: CachedSleepSession) -> String {
-                Repository.localDayKey(Date(timeIntervalSince1970: TimeInterval(s.endTs)))
-            }
-            for s in compSleep { sleepByDay[endDay(s)] = s; sleepSource[s.startTs] = "noop (APPROXIMATE)" }
-            for s in impSleep { sleepByDay[endDay(s)] = s; sleepSource[s.startTs] = "import" }
-            let sleeps = sleepByDay.values.sorted { $0.startTs < $1.startTs }
-
-            // Workouts: imported WHOOP ∪ on-device detected. Apple-Health workouts are intentionally
-            // omitted (read only the two NOOP sources), matching the cycles/sleep exclusion.
-            // Dedup by (startTs, sport), imported (deviceId) first so it wins — the same session can
-            // exist under both ids (e.g. a reimported export + BLE re-detection), which double-counted
-            // it in the CSV and inflated totals on reimport. (PR #97 review, tigercraft4.)
-            var seenWorkouts = Set<String>()
-            let workouts = ((try await store.workouts(deviceId: deviceId, from: 0, to: hi, limit: 100_000))
-                + (try await store.workouts(deviceId: computedId, from: 0, to: hi, limit: 100_000)))
-                .filter { seenWorkouts.insert("\($0.startTs)|\($0.sport)").inserted }
-
-            // Journal lives under the imported deviceId (WhoopImporter writes it there). Native
-            // in-app journal logging is an Android/PR-#97 feature not present in this Mac build, so
-            // the imported read is the complete on-Mac journal today.
+            let impWorkouts = try await store.workouts(deviceId: deviceId, from: 0, to: hi, limit: 100_000)
+            let compWorkouts = try await store.workouts(deviceId: computedId, from: 0, to: hi, limit: 100_000)
             let journal = try await store.journalEntries(deviceId: deviceId, from: fromDay, to: toDay)
-
-            // Sidecar: every metricSeries row under both NOOP sources, full fidelity.
             var sidecar: [String: [MetricPoint]] = [:]
             for id in [deviceId, computedId] {
                 var points: [MetricPoint] = []
@@ -95,31 +61,95 @@ enum CsvExport {
                 if !points.isEmpty { sidecar[id] = points }
             }
 
-            let entries: [(name: String, data: Data)] = [
-                ("physiological_cycles.csv",
-                 Data(WhoopCsvExporter.cyclesCSV(days: days, series: series, sourceByDay: sourceByDay).utf8)),
-                ("sleeps.csv",
-                 Data(WhoopCsvExporter.sleepsCSV(sleeps, sourceBySession: { sleepSource[$0.startTs] ?? "" }).utf8)),
-                ("workouts.csv",
-                 Data(WhoopCsvExporter.workoutsCSV(workouts, sourceLabel: { workoutSource($0, computedId: computedId) }).utf8)),
-                ("journal_entries.csv", Data(WhoopCsvExporter.journalCSV(journal).utf8)),
-                ("noop_metric_series.json", WhoopCsvExporter.metricSeriesJSON(sidecar)),
-            ]
+            // The ONLY main-actor-isolated call in the assembly is Repository.localDayKey (Repository is
+            // @MainActor). Precompute every session's local end-day HERE, on main, into a plain Sendable
+            // [startTs: dayKey] map so the detached merge/serialization can key off it without touching the
+            // actor. startTs is the session's natural key (same key `sleepSource` uses). Same for the export
+            // file name (also localDayKey-derived).
+            var endDayByStartTs: [Int: String] = [:]
+            for s in impSleep + compSleep {
+                endDayByStartTs[s.startTs] = Repository.localDayKey(Date(timeIntervalSince1970: TimeInterval(s.endTs)))
+            }
+            let name = defaultName()
+
+            // Assembly + serialization + zip deflate run OFF the main actor (mirrors the timelineSeries
+            // Task.detached): only Sendable value types (the fetched rows, the precomputed day-key map)
+            // cross in, and the result (a temp file URL / the archive on disk) comes back. WhoopCsvExporter
+            // and SleepMerge are pure package statics; workoutSource is a pure static; endDay is now a pure
+            // dictionary lookup. Byte-identical output to the in-line version.
+            let tmp = try await Task.detached(priority: .utility) {
+                // Merged exactly like Repository.mergeDaily: computed first, imported overwrites, so a
+                // real WHOOP import always wins and the strap-only user still exports a full history.
+                var byDay: [String: DailyMetric] = [:]
+                var sourceByDay: [String: String] = [:]
+                for d in computed { byDay[d.day] = d; sourceByDay[d.day] = "noop (APPROXIMATE)" }
+                for d in imported { byDay[d.day] = d; sourceByDay[d.day] = "import" }
+                let days = byDay.values.sorted { $0.day < $1.day }
+
+                // The cycles columns DailyMetric lacks, recovered from the imported metricSeries.
+                var series: [String: [String: Double]] = [:]
+                for (key, points) in seriesRaw {
+                    for p in points { series[p.day, default: [:]][key] = p.value }
+                }
+
+                // Sleep: merged per end-day, imported wins (Repository.mergeSleep semantics). endDay is a
+                // pure lookup into the precomputed map (localDayKey already ran on main).
+                let endDay: (CachedSleepSession) -> String = { endDayByStartTs[$0.startTs] ?? "" }
+                var sleepSource: [Int: String] = [:]   // keyed by startTs (the session's natural key)
+                // #715: keep EVERY session, naps and main nights each export as their own sleeps.csv row.
+                // Imported still wins per end-day. Shared, unit-tested grouping (WhoopStore.SleepMerge) replaces
+                // the per-day dict that silently dropped a second same-day session.
+                for s in compSleep { sleepSource[s.startTs] = "noop (APPROXIMATE)" }
+                for s in impSleep { sleepSource[s.startTs] = "import" }
+                let sleeps = SleepMerge.merge(imported: impSleep, computed: compSleep, endDay: endDay)
+
+                // Workouts: imported WHOOP ∪ on-device detected. Apple-Health workouts are intentionally
+                // omitted (read only the two NOOP sources), matching the cycles/sleep exclusion.
+                // Dedup by (startTs, sport), imported (deviceId) first so it wins. The same session can
+                // exist under both ids (e.g. a reimported export + BLE re-detection), which double-counted
+                // it in the CSV and inflated totals on reimport. (PR #97 review, tigercraft4.)
+                var seenWorkouts = Set<String>()
+                let workouts = (impWorkouts + compWorkouts)
+                    .filter { seenWorkouts.insert("\($0.startTs)|\($0.sport)").inserted }
+
+                let entries: [(name: String, data: Data)] = [
+                    ("physiological_cycles.csv",
+                     Data(WhoopCsvExporter.cyclesCSV(days: days, series: series, sourceByDay: sourceByDay).utf8)),
+                    ("sleeps.csv",
+                     Data(WhoopCsvExporter.sleepsCSV(
+                        sleeps,
+                        // "Cycle start time" = the session's local end-day (the same key cyclesCSV/mergeSleep
+                        // use), so the two CSVs reconcile by cycle for a non-UTC user (#715).
+                        cycleStart: { endDay($0) + " 00:00:00" },
+                        sourceBySession: { sleepSource[$0.startTs] ?? "" }).utf8)),
+                    ("workouts.csv",
+                     Data(WhoopCsvExporter.workoutsCSV(workouts, sourceLabel: { workoutSource($0, computedId: computedId) }).utf8)),
+                    ("journal_entries.csv", Data(WhoopCsvExporter.journalCSV(journal).utf8)),
+                    ("noop_metric_series.json", WhoopCsvExporter.metricSeriesJSON(sidecar)),
+                ]
+                // Deflate to a temp path off main; the cheap atomic swap into the user's chosen destination
+                // stays on main (it needs the panel/picker result).
+                let out = FileManager.default.temporaryDirectory
+                    .appendingPathComponent(UUID().uuidString + ".zip")
+                try WhoopCsvExporter.writeArchive(entries: entries, to: out)
+                return out
+            }.value
+
             #if os(macOS)
             // Save panel — DataBackup.runExport precedent (NSSavePanel + .zip content type).
             let panel = NSSavePanel()
-            panel.title = "Export NOOP data as CSV"
-            panel.nameFieldStringValue = defaultName()
+            panel.title = String(localized: "Export NOOP data as CSV")
+            panel.nameFieldStringValue = name
             panel.allowedContentTypes = [.zip]
             panel.canCreateDirectories = true
-            guard panel.runModal() == .OK, let dest = panel.url else { return .cancelled }
+            guard panel.runModal() == .OK, let dest = panel.url else {
+                try? FileManager.default.removeItem(at: tmp)
+                return .cancelled
+            }
 
-            // Write to a temp path first, then swap into place — deleting the destination before a
-            // write that can throw destroyed the user's previous export on failure (PR #97 review,
-            // tigercraft4). replaceItemAt is atomic on APFS; the original survives a failed write.
-            let tmp = FileManager.default.temporaryDirectory
-                .appendingPathComponent(UUID().uuidString + ".zip")
-            try WhoopCsvExporter.writeArchive(entries: entries, to: tmp)
+            // Swap the freshly-written temp zip into place. Deleting the destination before a write that
+            // can throw destroyed the user's previous export on failure (PR #97 review, tigercraft4).
+            // replaceItemAt is atomic on APFS; the original survives a failed write.
             if FileManager.default.fileExists(atPath: dest.path) {
                 _ = try FileManager.default.replaceItemAt(dest, withItemAt: tmp)
             } else {
@@ -127,14 +157,14 @@ enum CsvExport {
             }
             return .exported(dest)
             #else
-            // iOS: stage the zip in a temp dir, then hand it to the system document picker so the
-            // user can save it into Files / iCloud Drive (DataBackup.runExport precedent). Archive
-            // appends to an existing file, so clear any stale staged copy first.
-            let staged = FileManager.default.temporaryDirectory.appendingPathComponent(defaultName())
+            // iOS: move the staged zip to its user-facing name, then hand it to the system document picker
+            // so the user can save it into Files / iCloud Drive (DataBackup.runExport precedent). Clear any
+            // stale staged copy first.
+            let staged = FileManager.default.temporaryDirectory.appendingPathComponent(name)
             if FileManager.default.fileExists(atPath: staged.path) {
                 try FileManager.default.removeItem(at: staged)
             }
-            try WhoopCsvExporter.writeArchive(entries: entries, to: staged)
+            try FileManager.default.moveItem(at: tmp, to: staged)
             guard let dest = await DocumentPicker.export(staged) else { return .cancelled }
             return .exported(dest)
             #endif

@@ -657,7 +657,7 @@ RUN_HAPTICS_PATTERN payload = [patternId, numLoops, 0, 0, 0]   // 5 bytes
 ```
 
 NOOP uses **`patternId = 2`** — the characteristic graduated "alarm" buzz, observed as the one the
-official app fires, for interoperability (`testAlarmBuzz`, `AppModel.buzz`). `numLoops` sets the
+official app fires, for interoperability (`buzzStrapOnce`, `AppModel.buzz`). `numLoops` sets the
 length; `STOP_HAPTICS` (122) cancels an in-progress pattern. All notification patterns in NOOP map to
 this confirmed preset and vary only the repeat count, so behaviour is predictable on real hardware.
 

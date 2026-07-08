@@ -158,17 +158,21 @@ fun AppleHealthScreen(vm: AppViewModel) {
 
     val subtitle = spanSubtitle(loaded, data, range)
 
-    ScreenScaffold(title = "Apple Health", subtitle = subtitle) {
+    // PERF (#707): lazy scaffold — in the populated `else` branch each chart section is its own `item { }`,
+    // so only on-screen sections compose + are accessibility-walked on scroll (this data view is the long,
+    // chart-heavy one). The loading/empty branches stay single items. Order + spacing are unchanged
+    // (LazyColumn reproduces the eager `spacedBy(20.dp)` between the six sections).
+    LazyScreenScaffold(title = "Apple Health", subtitle = subtitle) {
         when {
-            !loaded -> LoadingCard()
-            !data.hasAnyData -> EmptyState()
+            !loaded -> item { LoadingCard() }
+            !data.hasAnyData -> item { EmptyState() }
             else -> {
-                RangeControl(data = data, range = range, onSelect = { range = it })
-                TileGrid(data = data, range = range)
-                HeartSection(data = data, range = range)
-                ActivitySection(data = data, range = range)
-                BodySection(data = data, range = range)
-                SleepSection(data = data, range = range)
+                item { RangeControl(data = data, range = range, onSelect = { range = it }) }
+                item { TileGrid(data = data, range = range) }
+                item { HeartSection(data = data, range = range) }
+                item { ActivitySection(data = data, range = range) }
+                item { BodySection(data = data, range = range) }
+                item { SleepSection(data = data, range = range) }
             }
         }
     }
@@ -179,12 +183,12 @@ fun AppleHealthScreen(vm: AppViewModel) {
 /** Header subtitle reflects the windowed (visible) per-day span of the steps series. */
 private fun spanSubtitle(loaded: Boolean, data: AppleData, range: AppleRange): String {
     if (!loaded) {
-        return "Steps, heart, sleep, body composition and VO₂ max — synced from the desktop app."
+        return "Steps, heart, sleep, body composition and VO₂ max - synced from the desktop app."
     }
     // Use steps as the canonical per-day series for the span readout.
     val rows = resolve(data.raw("steps"), range).rows
     if (rows.isEmpty()) {
-        return "Steps, heart, sleep, body composition and VO₂ max — synced from the desktop app."
+        return "Steps, heart, sleep, body composition and VO₂ max - synced from the desktop app."
     }
     val lo = rows.first().day
     val hi = rows.last().day
@@ -439,7 +443,7 @@ private fun MetricChartCard(
 
     val subtitle = run {
         val unit = if (n == 1) "reading" else "readings"
-        if (resolved.fellBack) "$n $unit · sparse — widened to ${resolved.effective.windowName}"
+        if (resolved.fellBack) "$n $unit · sparse - widened to ${resolved.effective.windowName}"
         else "$n $unit · ${range.windowName}"
     }
 
