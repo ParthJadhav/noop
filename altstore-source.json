@@ -23,7 +23,7 @@
           "date": "2026-07-05",
           "localizedDescription": "NOOP 8.2.0. See the release notes for what changed.",
           "downloadURL": "https://github.com/ParthJadhav/noop/releases/download/v8.2.0/NOOP-v8.2.0-ios.ipa",
-          "size": 14473528,
+          "size": 14027256,
           "minOSVersion": "17.0"
         }
       ],
@@ -42,7 +42,7 @@
       "versionDate": "2026-07-05",
       "versionDescription": "NOOP 8.2.0. See the release notes for what changed.",
       "downloadURL": "https://github.com/ParthJadhav/noop/releases/download/v8.2.0/NOOP-v8.2.0-ios.ipa",
-      "size": 14473528,
+      "size": 14027256,
       "minOSVersion": "17.0"
     }
   ],
