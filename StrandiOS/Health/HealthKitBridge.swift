@@ -43,6 +43,16 @@ final class HealthKitBridge: ObservableObject {
     /// `noopDeviceId` daily row, so those metrics exist ONLY here.
     private var computedDeviceId: String { noopDeviceId + "-noop" }
 
+    /// UserDefaults key for the opt-in "write my full data set to Apple Health, automatically"
+    /// preference. Read by `sync` to decide whether to run the extended `writeSleepBack` pass; bound by
+    /// the Apple Health screen's toggle (`AppleHealthView.liveSyncCard`). Defaults to false, so the
+    /// write-back stays the minimal core-vitals set until the user opts in.
+    static let writeAllDataDefaultsKey = "health.writeAllData.v1"
+
+    /// True when the user has opted into writing NOOP's full mappable data set (core vitals PLUS the
+    /// strap-detected sleep stages) into Apple Health on every sync. Off by default.
+    var writeAllData: Bool { UserDefaults.standard.bool(forKey: Self.writeAllDataDefaultsKey) }
+
     init(repo: Repository, appleDeviceId: String, noopDeviceId: String) {
         self.repo = repo
         self.appleDeviceId = appleDeviceId
@@ -403,6 +413,11 @@ final class HealthKitBridge: ObservableObject {
             try await store.upsertMetricSeries(points, deviceId: appleDeviceId)
             if !workoutRows.isEmpty { try await store.upsertWorkouts(workoutRows, deviceId: appleDeviceId) }
             try await writeBack(whoopStore: store)
+            // Opt-in "write all data" pass: when enabled, ALSO mirror NOOP's strap-detected sleep
+            // stages into Apple Health. Kept inside the same round-trip so a sleep-save failure
+            // surfaces in lastError and does NOT advance lastSync (a false "success" would let the
+            // next delta sync skip the window). No-op unless the user turned the toggle on.
+            if writeAllData { try await writeSleepBack(whoopStore: store) }
             lastSync = Date()
             lastError = nil
         } catch {
@@ -485,6 +500,80 @@ final class HealthKitBridge: ObservableObject {
             _ = try? await self.store.deleteObjects(of: type, predicate: pred)
         }
         try await self.store.save(candidates.map { $0.sample })
+    }
+
+    /// Extended write-back (opt-in via `writeAllData`): mirror NOOP's strap-detected sleep into Apple
+    /// Health as `sleepAnalysis` category samples — the full per-stage timeline when the session
+    /// carries one, otherwise a single asleep span. Sleep-share permission is ALREADY requested in
+    /// `writeTypes`, so this needs no new consent prompt; it simply activates a scope the bridge asked
+    /// for but never wrote.
+    ///
+    /// Dedup mirrors `writeBack`: each sample carries a deterministic `HKMetadataKeyExternalUUID`
+    /// (`noop:<deviceId>:sleep:<sessionStart>:<segmentIndex>`); before saving we delete any of OUR
+    /// prior samples with those keys, scoped to `HKSource.default()` so another app's sleep is never
+    /// touched. Re-syncing a night therefore refreshes rather than duplicates.
+    ///
+    /// Throws on save failure so the caller keeps `lastSync` honest.
+    private func writeSleepBack(whoopStore: WhoopStore, days: Int = 14) async throws {
+        guard auth == .authorized else { return }
+        guard let sleepType = HKObjectType.categoryType(forIdentifier: .sleepAnalysis) else { return }
+        let cal = Calendar.current
+        let now = Date()
+        guard let fromDate = cal.date(byAdding: .day, value: -days, to: now) else { return }
+        let fromTs = Int(fromDate.timeIntervalSince1970)
+        let toTs = Int(now.timeIntervalSince1970)
+
+        // Union the COMPUTED sleep sessions (a strap-only user's nights live under `deviceId + "-noop"`)
+        // with any IMPORTED ones, imported overriding by onset — the same source precedence `writeBack`
+        // uses for the daily vitals.
+        let computed = (try? await whoopStore.sleepSessions(deviceId: computedDeviceId, from: fromTs, to: toTs, limit: 5000)) ?? []
+        let imported = (try? await whoopStore.sleepSessions(deviceId: noopDeviceId, from: fromTs, to: toTs, limit: 5000)) ?? []
+        var byOnset: [Int: CachedSleepSession] = [:]
+        for s in computed { byOnset[s.effectiveStartTs] = s }   // computed first
+        for s in imported { byOnset[s.effectiveStartTs] = s }   // imported overrides
+        let sessions = byOnset.keys.sorted().map { byOnset[$0]! }
+
+        var samples: [HKCategorySample] = []
+        var keys: [String] = []
+        for session in sessions {
+            let start = Date(timeIntervalSince1970: TimeInterval(session.effectiveStartTs))
+            let end = Date(timeIntervalSince1970: TimeInterval(session.endTs))
+            // Pure, testable parse of stagesJSON → absolute-time stage intervals (StrandImport).
+            let intervals = NoopHealthSleepExport.stageIntervals(
+                stagesJSON: session.stagesJSON, sessionStart: start, sessionEnd: end)
+            for (i, iv) in intervals.enumerated() {
+                let value = Self.sleepCategoryValue(iv.kind)
+                let key = "noop:\(noopDeviceId):sleep:\(session.effectiveStartTs):\(i)"
+                let sample = HKCategorySample(
+                    type: sleepType, value: value.rawValue,
+                    start: iv.start, end: iv.end,
+                    metadata: [HKMetadataKeyExternalUUID: key])
+                samples.append(sample)
+                keys.append(key)
+            }
+        }
+        guard !samples.isEmpty else { return }
+
+        // Delete OUR prior sleep samples for these keys, then save the fresh batch. Scoped to this
+        // app's own source so we never delete Apple Watch / another app's sleep.
+        let bySource = HKQuery.predicateForObjects(from: HKSource.default())
+        let byKey = HKQuery.predicateForObjects(withMetadataKey: HKMetadataKeyExternalUUID,
+                                                allowedValues: Array(Set(keys)))
+        let pred = NSCompoundPredicate(andPredicateWithSubpredicates: [bySource, byKey])
+        _ = try? await self.store.deleteObjects(of: sleepType, predicate: pred)
+        try await self.store.save(samples)
+    }
+
+    /// Map a NOOP stage onto HealthKit's sleep-analysis category value. `core` is Apple's name for the
+    /// stager's "light"; the whole-session fallback writes as `asleepUnspecified`.
+    private static func sleepCategoryValue(_ kind: NoopSleepStageKind) -> HKCategoryValueSleepAnalysis {
+        switch kind {
+        case .awake:             return .awake
+        case .core:              return .asleepCore
+        case .deep:              return .asleepDeep
+        case .rem:               return .asleepREM
+        case .asleepUnspecified: return .asleepUnspecified
+        }
     }
 
     private struct DayAgg {
