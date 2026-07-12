@@ -46,6 +46,11 @@ struct AppleHealthView: View {
     // property and every `health.*` use below MUST stay inside `#if os(iOS)`.
     #if os(iOS)
     @EnvironmentObject private var health: HealthKitBridge
+    /// Opt-in: write NOOP's FULL mappable data set (core vitals + strap-detected sleep stages) into
+    /// Apple Health automatically on every sync. Persisted under the same key the bridge reads
+    /// (`HealthKitBridge.writeAllData`); defaults off so nothing beyond the core vitals is written
+    /// until the user turns it on. Toggling it kicks an immediate sync so the choice takes effect now.
+    @AppStorage(HealthKitBridge.writeAllDataDefaultsKey) private var writeAllToHealth = false
     #endif
 
     // Imperial/Metric display preference (D#103). Weight and lean mass (stored kg) re-label to lb here;
@@ -454,6 +459,37 @@ struct AppleHealthView: View {
                     .buttonStyle(.bordered)
                     .tint(StrandPalette.metricCyan)
                     .disabled(health.syncing)
+
+                    Divider().overlay(StrandPalette.hairline)
+
+                    // "Add all data to Apple Health, automatically." NOOP always writes its core vitals
+                    // (resting HR, HRV, blood oxygen, respiratory rate) on each sync; this adds the full
+                    // strap-detected sleep stages to that write-back, on every automatic sync. Recovery
+                    // and Strain are NOOP-only scores with no Apple Health type, so they stay in NOOP.
+                    Toggle(isOn: $writeAllToHealth) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Write all data automatically")
+                                .font(StrandFont.subhead)
+                                .foregroundStyle(StrandPalette.textPrimary)
+                            Text(writeAllToHealth
+                                 ? "Vitals and full sleep stages are written to Apple Health on every sync."
+                                 : "Core vitals only. Turn on to also add your sleep stages, automatically.")
+                                .font(StrandFont.footnote)
+                                .foregroundStyle(StrandPalette.textTertiary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    .tint(StrandPalette.metricCyan)
+                    .disabled(health.syncing)
+                    // Apply the choice immediately: switching on runs a sync so this session's sleep
+                    // lands in Health now rather than waiting for the next foreground refresh.
+                    .onChangeCompat(of: writeAllToHealth) { on in
+                        guard on else { return }
+                        Task {
+                            await health.sync()
+                            await load()
+                        }
+                    }
                 }
 
                 if let err = health.lastError {
